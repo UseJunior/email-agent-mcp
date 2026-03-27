@@ -1,0 +1,24 @@
+{
+  "name": "@usejunior/agent-email",
+  "version": "0.1.0",
+  "description": "Email connectivity for AI agents — MCP server for OpenClaw, Claude Code, Gemini CLI, and more",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "bin": {
+    "agent-email": "./bin/agent-email.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    }
+  },
+  "dependencies": {
+    "@usejunior/email-mcp": "^0.1.0"
+  },
+  "engines": { "node": ">=20" },
+  "files": ["bin", "index.js", "index.d.ts", "server.json"],
+  "publishConfig": {"access": "public"},
+  "license": "Apache-2.0"
+}

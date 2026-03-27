@@ -1,0 +1,17 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.UseJunior/agent-email",
+  "title": "Agent Email",
+  "description": "Email connectivity for AI agents — read, reply, send, categorize emails from Microsoft 365 and Gmail",
+  "version": "0.1.0",
+  "websiteUrl": "https://github.com/UseJunior/agent-email",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@usejunior/agent-email",
+      "version": "0.1.0",
+      "transport": { "type": "stdio" },
+      "runtimeHint": "npx"
+    }
+  ]
+}

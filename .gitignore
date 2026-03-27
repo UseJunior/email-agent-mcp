@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+coverage/
+allure-results/
+allure-report/
+*.log
+.DS_Store
+tmp/

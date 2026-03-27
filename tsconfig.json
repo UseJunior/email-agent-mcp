@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "composite": true,
+    "outDir": "dist",
+    "lib": ["ES2022"]
+  },
+  "references": [
+    { "path": "packages/email-core" },
+    { "path": "packages/provider-microsoft" },
+    { "path": "packages/provider-gmail" },
+    { "path": "packages/email-mcp" }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "name": "@usejunior/email-core",
+  "version": "0.1.0",
+  "description": "Core email actions, content engine, security, and provider interfaces for agent-email",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist/"
+  },
+  "dependencies": {
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": ["dist/"],
+  "publishConfig": {"access": "public"},
+  "license": "Apache-2.0"
+}
