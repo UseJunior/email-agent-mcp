@@ -39,7 +39,8 @@ Work through specs in this order (dependencies flow downward):
 
 | Priority | Spec | Package | Why This Order |
 |----------|------|---------|---------------|
-| 1 | `provider-interface` | email-core | Interfaces first — everything depends on these |
+| 0 | **Shared infra** | email-core | Types (`types.ts`), provider interfaces (`providers/provider.ts`), action registry (`actions/registry.ts`), `MockEmailProvider` (`testing/mock-provider.ts`), spec coverage script (`scripts/check-spec-coverage.mjs`). Must exist before any tests can run. Commit as "Add shared types, interfaces, and test infrastructure". |
+| 1 | `provider-interface` | email-core | Flesh out interfaces with error normalization, rate limit handling |
 | 2 | `content-engine` | email-core | Content transformation — used by read actions |
 | 3 | `email-security` | email-core | Allowlists — used by write actions |
 | 4 | `email-read` | email-core | Read actions — simplest, test the action pattern |
@@ -57,17 +58,29 @@ Work through specs in this order (dependencies flow downward):
 
 **Rule**: Only move to the next spec when ALL tests for the current spec pass.
 
-### Step 3: Implement
+### Step 3: Implement (Tests + Code Together)
 
-For each spec:
+**Tests do not exist yet.** For each spec, you write BOTH the tests and the implementation in a test-driven cycle:
 
-1. **Read the spec**: `openspec/specs/{spec-name}/spec.md`
-2. **Read the tests**: find the test file(s) for this spec (see TEST_PLAN.md mapping)
-3. **If tests don't exist yet**: create them following the TEST_PLAN.md pattern — `describe('spec-id/requirement')` → `it('Scenario: ...')`
-4. **Implement the source code** to make tests pass
-5. **Run tests**: `npm run test:run -- --reporter=verbose 2>&1`
-6. **Fix failures**: iterate until all tests for this spec pass
-7. **Commit**: `git add -A && git commit -m "Implement {spec-name} spec"`
+1. **Read the spec**: `openspec/specs/{spec-name}/spec.md` — every `#### Scenario:` becomes one `it()` test
+2. **Read TEST_PLAN.md** to see the test file mapping for this spec
+3. **Write the tests FIRST**: create the test file(s) following the traceability pattern:
+   ```typescript
+   describe('email-read/list-emails', () => {
+     it('Scenario: List unread emails from inbox', async () => {
+       // Arrange: set up MockEmailProvider with sample messages
+       // Act: call listEmailsAction.run(mockProvider, {unread: true, limit: 10})
+       // Assert: verify results match expected output
+     });
+   });
+   ```
+   Each `#### Scenario:` from the spec = one `it()` test. The spec's WHEN/THEN/AND become the test's arrange/act/assert.
+4. **Run tests to confirm they fail**: `npm run test:run -- --reporter=verbose 2>&1` — you should see RED (failing tests)
+5. **Implement the source code** (types, actions, providers, etc.) to make the tests pass
+6. **Run tests again**: iterate until all tests for this spec are GREEN
+7. **Commit both tests + implementation**: `git add -A && git commit -m "Implement {spec-name} spec with tests"`
+
+**Important**: do NOT write empty/placeholder tests that auto-pass. Every test must assert real behavior. A test that passes without implementation code is a bug in the test.
 
 ### Step 4: Verify and Continue
 
