@@ -23,7 +23,7 @@ export interface GraphApiClient {
 }
 
 /** Delta query select fields for efficiency */
-const DELTA_SELECT = '$select=subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments,id';
+const DELTA_SELECT = '$select=subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments,isRead,id';
 
 /** Result from delta query, including messages and the deltaLink for persistence */
 export interface DeltaResult {

@@ -285,6 +285,8 @@ async function runWatch(opts: CliOptions): Promise<number> {
         let newCount = 0;
         let skippedDedup = 0;
         let skippedAllowlist = 0;
+        let skippedRead = 0;
+        let wakeFailed = false;
 
         for (const msg of delta.messages) {
           // Dedup
@@ -292,12 +294,19 @@ async function runWatch(opts: CliOptions): Promise<number> {
             skippedDedup++;
             continue;
           }
-          markProcessed(msg.id);
+
+          // Only wake for unread messages — filters out read-status changes,
+          // flag changes, and other updates to existing messages from delta results.
+          if (msg.isRead) {
+            skippedRead++;
+            continue;
+          }
 
           // Receive allowlist check
           const senderEmail = msg.from?.email ?? '';
           if (!isAllowedSender(senderEmail, allowlist)) {
             skippedAllowlist++;
+            markProcessed(msg.id);
             console.error(`[agent-email] Skipping email from ${senderEmail} (not on receive allowlist)`);
             continue;
           }
@@ -307,23 +316,33 @@ async function runWatch(opts: CliOptions): Promise<number> {
           console.error(`[agent-email] WAKE: ${payload.text.split('\n')[0]}`);
 
           const result = await sendWake(wakeUrl, payload, token);
-          if (!result.success) {
-            console.error(`[agent-email] WARNING: Wake POST failed: ${result.error}`);
+          if (result.success) {
+            // Only mark processed AFTER successful wake — if wake fails,
+            // the message will be re-processed on the next poll.
+            markProcessed(msg.id);
+            newCount++;
+          } else {
+            console.error(`[agent-email] WARNING: Wake POST failed for ${msg.id}: ${result.error} — will retry next poll`);
+            wakeFailed = true;
           }
-          newCount++;
         }
 
-        // Update delta state
-        state.deltaLink = delta.nextDeltaLink;
-        await saveDeltaState(state.safeKey, {
-          deltaLink: delta.nextDeltaLink,
-          lastUpdated: new Date().toISOString(),
-        });
+        // Only advance delta state if all wakes succeeded.
+        // If any wake failed, keep the old deltaLink so failed messages are re-processed.
+        if (!wakeFailed) {
+          state.deltaLink = delta.nextDeltaLink;
+          await saveDeltaState(state.safeKey, {
+            deltaLink: delta.nextDeltaLink,
+            lastUpdated: new Date().toISOString(),
+          });
+        } else {
+          console.error(`[agent-email] WARNING: Delta state NOT advanced for ${state.emailAddress} due to wake failure(s)`);
+        }
 
         console.error(
           `[agent-email] Poll complete for ${state.emailAddress}: ` +
           `${delta.messages.length} changes, ${newCount} wakes, ` +
-          `${skippedDedup} dedup, ${skippedAllowlist} allowlist-blocked`,
+          `${skippedDedup} dedup, ${skippedRead} already-read, ${skippedAllowlist} allowlist-blocked`,
         );
       } catch (err) {
         // Handle 410 Gone — delta token expired, do fresh baseline sync
@@ -359,21 +378,22 @@ async function runWatch(opts: CliOptions): Promise<number> {
     }
   };
 
-  // Initial poll
-  await poll();
-
-  // Schedule recurring polls
-  const intervalId = setInterval(() => {
+  // Recursive poll loop — schedules next poll only after the current one completes,
+  // preventing overlapping polls that can cause duplicate wakes and state corruption.
+  async function pollLoop() {
+    await poll();
     if (!shuttingDown) {
-      void poll();
+      setTimeout(() => { void pollLoop(); }, pollIntervalMs);
     }
-  }, pollIntervalMs);
+  }
+
+  // Start the poll loop
+  void pollLoop();
 
   // Keep the process alive — wait for shutdown signal
   return new Promise<number>((resolve) => {
     const checkShutdown = () => {
       if (shuttingDown) {
-        clearInterval(intervalId);
         resolve(0);
       } else {
         setTimeout(checkShutdown, 500);
