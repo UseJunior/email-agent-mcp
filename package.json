@@ -16,7 +16,10 @@
     "test:run": "npm run test:run --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "clean": "npm run clean --workspaces --if-present",
-    "check:spec-coverage": "node scripts/check-spec-coverage.mjs"
+    "check:spec-coverage": "node scripts/check-spec-coverage.mjs",
+    "dev:serve": "npx tsx packages/email-mcp/src/serve-entry.ts",
+    "dev:watch": "npx tsx packages/email-mcp/src/cli.ts watch",
+    "dev:configure": "npx tsx packages/email-mcp/src/cli.ts configure"
   },
   "repository": {
     "type": "git",
