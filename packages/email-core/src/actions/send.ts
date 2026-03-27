@@ -2,7 +2,7 @@
 import { z } from 'zod';
 import { readFile, realpath, lstat } from 'node:fs/promises';
 import { resolve, relative, isAbsolute, extname } from 'node:path';
-import type { EmailAction, ActionContext } from './registry.js';
+import type { EmailAction } from './registry.js';
 import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { ProviderError, withRetry } from '../providers/provider.js';
 

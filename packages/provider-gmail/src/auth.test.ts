@@ -1,12 +1,22 @@
 import { describe, it, expect } from 'vitest';
-
-// Spec: provider-gmail — Requirement: OAuth2 Authentication
-// Tests written FIRST (spec-driven). Implementation pending.
+import { GmailAuthManager } from './auth.js';
 
 describe('provider-gmail/OAuth2 Authentication', () => {
   it('Scenario: Gmail OAuth', async () => {
-    // WHEN configure_mailbox is called with {provider: "gmail"}
-    // THEN initiates OAuth2 flow and persists refresh tokens
-    expect.fail('Not implemented — awaiting Gmail OAuth');
+    const auth = new GmailAuthManager({
+      clientId: 'test-client',
+      clientSecret: 'test-secret',
+    });
+
+    // Initiate OAuth2 flow and persist refresh tokens
+    await auth.connect({ access_token: 'gmail-token', refresh_token: 'gmail-refresh' });
+
+    expect(auth.getAccessToken()).toBe('gmail-token');
+    expect(auth.isTokenExpired()).toBe(false);
+
+    // Refresh works
+    await auth.refresh();
+    expect(auth.getAccessToken()).toBeDefined();
+    expect(auth.isTokenExpired()).toBe(false);
   });
 });

@@ -16,4 +16,5 @@ export type {
   EmailSender,
   EmailSubscriber,
   EmailProvider,
+  AuthManager,
 } from './providers/provider.js';

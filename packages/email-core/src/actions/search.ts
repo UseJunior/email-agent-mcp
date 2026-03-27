@@ -1,6 +1,6 @@
 // search_emails action — full-text search using provider's native query
 import { z } from 'zod';
-import type { EmailAction, ActionContext } from './registry.js';
+import type { EmailAction } from './registry.js';
 
 const SearchEmailsInput = z.object({
   query: z.string(),

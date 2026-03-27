@@ -1,12 +1,12 @@
 // Mailbox configuration actions — configure, remove, list mailboxes
 import { z } from 'zod';
-import type { EmailAction, ActionContext, MailboxEntry } from './registry.js';
-import { discoverProviders, createProvider } from '../providers/provider.js';
+import type { EmailAction, MailboxEntry } from './registry.js';
+import { createProvider } from '../providers/provider.js';
 
 const ConfigureMailboxInput = z.object({
   name: z.string(),
   provider: z.string(),
-  credentials: z.record(z.string()).optional(),
+  credentials: z.record(z.string(), z.string()).optional(),
   default: z.boolean().optional(),
 });
 
@@ -36,7 +36,7 @@ export const configureMailboxAction: EmailAction<
   input: ConfigureMailboxInput,
   output: ConfigureMailboxOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
-  run: async (ctx, input) => {
+  run: async (_ctx, input) => {
     // Check if provider is available
     try {
       const provider = await createProvider(input.provider);

@@ -1,6 +1,5 @@
 // Attachment handling actions
 import { z } from 'zod';
-import { readFile } from 'node:fs/promises';
 import { extname } from 'node:path';
 import type { EmailAction } from './registry.js';
 
@@ -90,7 +89,7 @@ export const listAttachmentsAction: EmailAction<
 // Validate attachment for outbound
 export function validateAttachment(
   content: Buffer,
-  filename: string,
+  _filename: string,
   declaredMimeType?: string,
 ): { valid: boolean; detectedMimeType: string; error?: string } {
   if (content.length > MAX_ATTACHMENT_SIZE) {

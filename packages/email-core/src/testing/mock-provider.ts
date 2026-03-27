@@ -16,7 +16,6 @@ import type {
   EmailSubscriber,
   EmailCategorizer,
   EmailAttachmentHandler,
-  EmailProvider,
 } from '../providers/provider.js';
 
 export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscriber, EmailCategorizer, EmailAttachmentHandler {

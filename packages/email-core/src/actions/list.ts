@@ -1,6 +1,6 @@
 // list_emails action — list recent emails with filtering
 import { z } from 'zod';
-import type { EmailAction, ActionContext } from './registry.js';
+import type { EmailAction } from './registry.js';
 
 const ListEmailsInput = z.object({
   mailbox: z.string().optional(),

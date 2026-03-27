@@ -1,6 +1,6 @@
 // get_mailbox_status action — connection state, unread count, warnings
 import { z } from 'zod';
-import type { EmailAction, ActionContext } from './registry.js';
+import type { EmailAction } from './registry.js';
 import { getMailboxStore } from './configure.js';
 
 const GetMailboxStatusInput = z.object({

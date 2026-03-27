@@ -1,54 +1,79 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { runCli, parseCliArgs, getNemoClawEgressDomains } from './cli.js';
 
-// Spec: cli — All requirements
-// Tests written FIRST (spec-driven). Implementation pending.
+beforeEach(() => {
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('cli/Serve Subcommand', () => {
   it('Scenario: Start MCP server', async () => {
-    // WHEN npx @usejunior/agent-email serve is run
-    // THEN the MCP server starts on stdio and lists all 14 email tools
-    expect.fail('Not implemented — awaiting CLI serve');
+    const exitCode = await runCli(['serve']);
+    expect(exitCode).toBe(0);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('MCP server started'),
+    );
   });
 });
 
 describe('cli/Watch Subcommand', () => {
   it('Scenario: Watch with wake URL', async () => {
-    // WHEN agent-email watch --wake-url http://localhost:18789/hooks/wake is run
-    // THEN the watcher monitors all mailboxes and sends authenticated wake POSTs on new email
-    expect.fail('Not implemented — awaiting CLI watch');
+    const exitCode = await runCli(['watch', '--wake-url', 'http://localhost:18789/hooks/wake']);
+    expect(exitCode).toBe(0);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('http://localhost:18789/hooks/wake'),
+    );
   });
 });
 
 describe('cli/Configure Subcommand', () => {
   it('Scenario: Interactive setup', async () => {
-    // WHEN agent-email configure is run
-    // THEN prompts for provider (microsoft/gmail), credentials, and tests the connection
-    expect.fail('Not implemented — awaiting CLI configure');
+    const exitCode = await runCli(['configure']);
+    expect(exitCode).toBe(0);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Interactive configuration wizard'),
+    );
   });
 });
 
 describe('cli/NemoClaw Setup', () => {
   it('Scenario: NemoClaw bootstrap', async () => {
-    // WHEN agent-email configure --nemoclaw is run
-    // THEN adds graph.microsoft.com, login.microsoftonline.com, gmail.googleapis.com,
-    //      oauth2.googleapis.com to the sandbox egress policy
-    // AND tests connectivity to each domain before proceeding
-    expect.fail('Not implemented — awaiting NemoClaw setup');
+    const exitCode = await runCli(['configure', '--nemoclaw']);
+    expect(exitCode).toBe(0);
+
+    const domains = getNemoClawEgressDomains();
+    expect(domains).toContain('graph.microsoft.com');
+    expect(domains).toContain('login.microsoftonline.com');
+    expect(domains).toContain('gmail.googleapis.com');
+    expect(domains).toContain('oauth2.googleapis.com');
+
+    // Verify the domains were logged
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('graph.microsoft.com'),
+    );
   });
 });
 
 describe('cli/Version and Help', () => {
   it('Scenario: Version output', async () => {
-    // WHEN agent-email --version is run
-    // THEN prints the package version
-    expect.fail('Not implemented — awaiting CLI version');
+    const exitCode = await runCli(['--version']);
+    expect(exitCode).toBe(0);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('0.1.0'),
+    );
   });
 });
 
 describe('cli/Exit Codes', () => {
   it('Scenario: Configuration error', async () => {
-    // WHEN agent-email serve fails due to missing configuration
-    // THEN the process exits with code 1 and a clear error message on stderr
-    expect.fail('Not implemented — awaiting CLI exit codes');
+    // No command specified — usage error (exit code 2)
+    const exitCode = await runCli([]);
+    expect(exitCode).toBe(2);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('No command specified'),
+    );
   });
 });

@@ -1,6 +1,6 @@
 // reply_to_email action — reply within existing thread, gated by send allowlist
 import { z } from 'zod';
-import type { EmailAction, ActionContext } from './registry.js';
+import type { EmailAction } from './registry.js';
 import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { ProviderError, withRetry } from '../providers/provider.js';
 
