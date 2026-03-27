@@ -1,6 +1,6 @@
 // Microsoft Graph authentication — real MSAL device code flow + cache persistence
 import type { AuthManager } from '@usejunior/email-core';
-import { DeviceCodeCredential, useIdentityPlugin, type DeviceCodeInfo, type AuthenticationRecord } from '@azure/identity';
+import { DeviceCodeCredential, ClientSecretCredential, useIdentityPlugin, type DeviceCodeInfo, type AuthenticationRecord } from '@azure/identity';
 import { cachePersistencePlugin } from '@azure/identity-cache-persistence';
 import { randomUUID } from 'node:crypto';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -261,13 +261,15 @@ export class DelegatedAuthManager implements AuthManager {
 
 /**
  * Client credentials auth manager (app-only / daemon).
- * Unchanged — uses ClientSecretCredential.
+ * Uses ClientSecretCredential from @azure/identity for real Azure AD authentication.
  */
 export class ClientCredentialsAuthManager implements AuthManager {
+  private credential: ClientSecretCredential | null = null;
   private accessToken?: string;
   private expiresAt?: number;
-  private tokenCounter = 0;
   private readonly config: MicrosoftAuthConfig;
+
+  private static readonly GRAPH_SCOPE = 'https://graph.microsoft.com/.default';
 
   constructor(config: MicrosoftAuthConfig) {
     this.config = config;
@@ -277,18 +279,29 @@ export class ClientCredentialsAuthManager implements AuthManager {
     if (!this.config.clientSecret || !this.config.tenantId) {
       throw new Error('Client credentials require clientSecret and tenantId');
     }
-    // In real implementation: use ClientSecretCredential from @azure/identity
-    this.accessToken = `app-token-${Date.now()}`;
-    this.expiresAt = Date.now() + 3600000;
+    this.credential = new ClientSecretCredential(
+      this.config.tenantId,
+      this.config.clientId,
+      this.config.clientSecret,
+    );
+    const tokenResponse = await this.credential.getToken(ClientCredentialsAuthManager.GRAPH_SCOPE);
+    if (!tokenResponse) throw new Error('Failed to acquire token via client credentials');
+    this.accessToken = tokenResponse.token;
+    this.expiresAt = tokenResponse.expiresOnTimestamp;
   }
 
   async refresh(): Promise<void> {
-    this.tokenCounter++;
-    this.accessToken = `app-token-${Date.now()}-${this.tokenCounter}`;
-    this.expiresAt = Date.now() + 3600000;
+    if (!this.credential) {
+      throw new Error('Not connected. Call connect() first.');
+    }
+    const tokenResponse = await this.credential.getToken(ClientCredentialsAuthManager.GRAPH_SCOPE);
+    if (!tokenResponse) throw new Error('Failed to refresh token via client credentials');
+    this.accessToken = tokenResponse.token;
+    this.expiresAt = tokenResponse.expiresOnTimestamp;
   }
 
   async disconnect(): Promise<void> {
+    this.credential = null;
     this.accessToken = undefined;
     this.expiresAt = undefined;
   }
@@ -298,7 +311,11 @@ export class ClientCredentialsAuthManager implements AuthManager {
     return Date.now() >= this.expiresAt;
   }
 
-  getAccessToken(): string | undefined {
+  async getAccessToken(): Promise<string | undefined> {
+    if (!this.credential) return undefined;
+    if (this.isTokenExpired()) {
+      await this.refresh();
+    }
     return this.accessToken;
   }
 }

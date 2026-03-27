@@ -22,6 +22,8 @@ function createMockGmailClient(overrides: Partial<GmailApiClient> = {}): GmailAp
     sendMessage: vi.fn().mockResolvedValue({ id: 'sent-1', threadId: 'thread-1' }),
     modifyMessage: vi.fn().mockResolvedValue(undefined),
     getThread: vi.fn().mockResolvedValue({ id: 'thread-1', messages: [] }),
+    createDraft: vi.fn().mockResolvedValue({ id: 'draft-abc', message: { id: 'msg-draft', threadId: 'thread-draft' } }),
+    sendDraft: vi.fn().mockResolvedValue({ id: 'draft-abc', message: { id: 'sent-draft-msg', threadId: 'thread-draft' } }),
     ...overrides,
   };
 }
@@ -72,6 +74,34 @@ describe('provider-gmail/Label Mapping', () => {
     expect(client.listMessages).toHaveBeenCalledWith(
       expect.objectContaining({ labelIds: ['SPAM'] }),
     );
+  });
+});
+
+describe('provider-gmail/Draft Operations', () => {
+  it('Scenario: createDraft sends raw message to Gmail API', async () => {
+    const client = createMockGmailClient();
+    const provider = new GmailEmailProvider(client);
+
+    const result = await provider.createDraft({
+      to: [{ email: 'bob@corp.com', name: 'Bob' }],
+      subject: 'Draft subject',
+      body: '<p>Draft body</p>',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.draftId).toBe('draft-abc');
+    expect(client.createDraft).toHaveBeenCalledWith(expect.any(String));
+  });
+
+  it('Scenario: sendDraft calls Gmail API with draft ID', async () => {
+    const client = createMockGmailClient();
+    const provider = new GmailEmailProvider(client);
+
+    const result = await provider.sendDraft('draft-abc');
+
+    expect(result.success).toBe(true);
+    expect(result.messageId).toBe('sent-draft-msg');
+    expect(client.sendDraft).toHaveBeenCalledWith('draft-abc');
   });
 });
 

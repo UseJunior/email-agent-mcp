@@ -10,6 +10,11 @@ const mockDeviceCodeState = vi.hoisted(() => ({
   constructorOptions: [] as Record<string, unknown>[],
 }));
 
+const mockClientSecretState = vi.hoisted(() => ({
+  getTokenCalls: 0,
+  constructorArgs: [] as unknown[][],
+}));
+
 // Mock @azure/identity to avoid real Azure calls in unit tests
 vi.mock('@azure/identity', () => {
   class MockDeviceCodeCredential {
@@ -27,8 +32,21 @@ vi.mock('@azure/identity', () => {
       return { authority: 'https://login.microsoftonline.com', homeAccountId: 'test', clientId: 'test', tenantId: 'test' };
     }
   }
+
+  class MockClientSecretCredential {
+    constructor(tenantId: string, clientId: string, clientSecret: string) {
+      mockClientSecretState.constructorArgs.push([tenantId, clientId, clientSecret]);
+    }
+
+    async getToken() {
+      mockClientSecretState.getTokenCalls++;
+      return { token: `mock-app-token-${mockClientSecretState.getTokenCalls}`, expiresOnTimestamp: Date.now() + 3600000 };
+    }
+  }
+
   return {
     DeviceCodeCredential: MockDeviceCodeCredential,
+    ClientSecretCredential: MockClientSecretCredential,
     useIdentityPlugin: vi.fn(),
   };
 });
@@ -166,6 +184,11 @@ describe('provider-microsoft/Filesystem Safe Key', () => {
 });
 
 describe('provider-microsoft/Client Credentials Authentication', () => {
+  beforeEach(() => {
+    mockClientSecretState.getTokenCalls = 0;
+    mockClientSecretState.constructorArgs.length = 0;
+  });
+
   it('Scenario: Client credentials', async () => {
     const auth = new ClientCredentialsAuthManager({
       mode: 'client_credentials',
@@ -175,12 +198,26 @@ describe('provider-microsoft/Client Credentials Authentication', () => {
     });
 
     await auth.connect({});
-    expect(auth.getAccessToken()).toBeDefined();
+    expect(await auth.getAccessToken()).toBeDefined();
     expect(auth.isTokenExpired()).toBe(false);
 
-    const firstToken = auth.getAccessToken();
+    // Verify ClientSecretCredential was constructed with correct args
+    expect(mockClientSecretState.constructorArgs).toHaveLength(1);
+    expect(mockClientSecretState.constructorArgs[0]).toEqual(['test-tenant', 'test-client-id', 'test-secret']);
+
+    const firstToken = await auth.getAccessToken();
     await auth.refresh();
-    expect(auth.getAccessToken()).toBeDefined();
-    expect(auth.getAccessToken()).not.toBe(firstToken);
+    const refreshedToken = await auth.getAccessToken();
+    expect(refreshedToken).toBeDefined();
+    expect(refreshedToken).not.toBe(firstToken);
+  });
+
+  it('Scenario: Client credentials missing config', async () => {
+    const auth = new ClientCredentialsAuthManager({
+      mode: 'client_credentials',
+      clientId: 'test-client-id',
+    });
+
+    await expect(auth.connect({})).rejects.toThrow('Client credentials require clientSecret and tenantId');
   });
 });

@@ -19,6 +19,8 @@ export interface GmailApiClient {
   sendMessage(raw: string): Promise<{ id: string; threadId: string }>;
   modifyMessage(id: string, opts: { addLabelIds?: string[]; removeLabelIds?: string[] }): Promise<void>;
   getThread(threadId: string): Promise<{ id: string; messages: GmailMessage[] }>;
+  createDraft(raw: string): Promise<{ id: string; message: { id: string; threadId: string } }>;
+  sendDraft(draftId: string): Promise<{ id: string; message: { id: string; threadId: string } }>;
 }
 
 export interface GmailMessage {
@@ -108,12 +110,15 @@ export class GmailEmailProvider {
     return this.sendMessage(replyMsg);
   }
 
-  async createDraft(_msg: ComposeMessage): Promise<DraftResult> {
-    return { success: true, draftId: `draft-${Date.now()}` };
+  async createDraft(msg: ComposeMessage): Promise<DraftResult> {
+    const raw = buildRawMessage(msg);
+    const result = await this.client.createDraft(raw);
+    return { success: true, draftId: result.id };
   }
 
   async sendDraft(draftId: string): Promise<SendResult> {
-    return { success: true, messageId: `sent-${draftId}` };
+    const result = await this.client.sendDraft(draftId);
+    return { success: true, messageId: result.message.id };
   }
 
   // NemoClaw egress domains
