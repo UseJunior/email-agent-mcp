@@ -1,7 +1,8 @@
 // @usejunior/email-core — Actions, content engine, security, and provider interfaces
 export { EMAIL_ACTIONS } from './actions/registry.js';
-export type { EmailAction } from './actions/registry.js';
+export type { EmailAction, AllowlistConfig } from './actions/registry.js';
 export type {
+  EmailAddress,
   EmailMessage,
   EmailThread,
   EmailAttachment,
@@ -18,3 +19,8 @@ export type {
   EmailProvider,
   AuthManager,
 } from './providers/provider.js';
+export {
+  isAllowedSender,
+  loadReceiveAllowlist,
+  getReceiveAllowlistPath,
+} from './security/receive-allowlist.js';

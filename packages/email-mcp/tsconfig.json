@@ -8,5 +8,5 @@
   },
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts"],
-  "references": [{ "path": "../email-core" }]
+  "references": [{ "path": "../email-core" }, { "path": "../provider-microsoft" }]
 }

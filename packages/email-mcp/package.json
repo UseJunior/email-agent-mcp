@@ -23,7 +23,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@usejunior/email-core": "^0.1.0"
+    "@usejunior/email-core": "^0.1.0",
+    "@usejunior/provider-microsoft": "^0.1.0"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

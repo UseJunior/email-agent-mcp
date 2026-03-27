@@ -10,6 +10,7 @@ export interface CliOptions {
   mailbox?: string;
   provider?: string;
   clientId?: string;
+  pollInterval?: number; // seconds
 }
 
 // NemoClaw egress domains for all providers
@@ -57,6 +58,10 @@ export function parseCliArgs(args: string[]): CliOptions {
     }
     if (arg === '--client-id' && i + 1 < args.length) {
       opts.clientId = args[++i];
+      continue;
+    }
+    if (arg === '--poll-interval' && i + 1 < args.length) {
+      opts.pollInterval = parseInt(args[++i]!, 10);
       continue;
     }
 
@@ -116,8 +121,266 @@ async function runServe(_opts: CliOptions): Promise<number> {
 
 async function runWatch(opts: CliOptions): Promise<number> {
   const wakeUrl = opts.wakeUrl ?? 'http://localhost:18789/hooks/wake';
+  const pollIntervalSec = opts.pollInterval ?? 30;
+  const pollIntervalMs = pollIntervalSec * 1000;
+
   console.error(`[agent-email] Watching mailboxes, wake URL: ${wakeUrl}`);
-  return 0;
+  console.error(`[agent-email] Poll interval: ${pollIntervalSec}s`);
+
+  // Dynamic imports to avoid loading heavy dependencies at parse time
+  const {
+    DelegatedAuthManager,
+    RealGraphApiClient,
+    GraphEmailProvider,
+    GraphApiError,
+    listConfiguredMailboxesWithMetadata,
+    toFilesystemSafeKey,
+  } = await import('@usejunior/provider-microsoft');
+  const {
+    isAllowedSender,
+    loadReceiveAllowlist,
+    getReceiveAllowlistPath,
+  } = await import('@usejunior/email-core');
+  const {
+    buildWakePayload,
+    sendWake,
+    getWakeToken,
+    isProcessed,
+    markProcessed,
+    loadDeltaState,
+    saveDeltaState,
+    deleteDeltaState,
+    acquireLock,
+    releaseLock,
+    releaseAllLocks,
+  } = await import('./watcher.js');
+
+  // Load receive allowlist
+  const allowlistPath = getReceiveAllowlistPath();
+  const allowlist = await loadReceiveAllowlist(allowlistPath);
+  if (!allowlist) {
+    console.error('[agent-email] WARNING: No receive allowlist configured — accepting all senders');
+  }
+
+  // Get wake token
+  const token = getWakeToken();
+
+  // Load all configured mailboxes
+  const allMailboxes = await listConfiguredMailboxesWithMetadata();
+  if (allMailboxes.length === 0) {
+    console.error('[agent-email] No configured mailboxes found. Run: agent-email configure');
+    return 1;
+  }
+
+  console.error(`[agent-email] Found ${allMailboxes.length} configured mailbox(es)`);
+
+  // Track which mailboxes we successfully set up for cleanup
+  interface MailboxWatchState {
+    safeKey: string;
+    emailAddress: string;
+    provider: InstanceType<typeof GraphEmailProvider>;
+    deltaLink: string | undefined;
+  }
+
+  const watchStates: MailboxWatchState[] = [];
+  let shuttingDown = false;
+
+  // Graceful shutdown handler
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.error('\n[agent-email] Shutting down watcher...');
+    await releaseAllLocks();
+    console.error('[agent-email] Lock files cleaned up. Goodbye.');
+    process.exit(0);
+  };
+
+  process.on('SIGINT', () => { void shutdown(); });
+  process.on('SIGTERM', () => { void shutdown(); });
+
+  // Set up each mailbox
+  for (const metadata of allMailboxes) {
+    const emailAddress = metadata.emailAddress ?? metadata.mailboxName;
+    const safeKey = metadata.emailAddress
+      ? toFilesystemSafeKey(metadata.emailAddress)
+      : metadata.mailboxName;
+
+    console.error(`[agent-email] Setting up mailbox: ${emailAddress} (key: ${safeKey})`);
+
+    // Acquire lock
+    const gotLock = await acquireLock(safeKey);
+    if (!gotLock) {
+      console.error(`[agent-email] ERROR: Mailbox ${emailAddress} is already being watched by another process. Skipping.`);
+      continue;
+    }
+
+    try {
+      // Create auth manager and reconnect
+      const auth = new DelegatedAuthManager(
+        { mode: 'delegated', clientId: metadata.clientId },
+        metadata.mailboxName,
+      );
+      await auth.reconnect();
+
+      // Create Graph client and provider
+      const graphClient = new RealGraphApiClient(() => auth.getAccessToken());
+      const provider = new GraphEmailProvider(graphClient);
+
+      // Load delta state
+      const savedState = await loadDeltaState(safeKey);
+      let deltaLink: string | undefined;
+
+      if (savedState) {
+        console.error(`[agent-email] Loaded delta state for ${emailAddress} (last updated: ${savedState.lastUpdated})`);
+        deltaLink = savedState.deltaLink;
+      } else {
+        // Baseline sync — consume all pages silently, save deltaLink, don't wake
+        console.error(`[agent-email] No delta state for ${emailAddress} — performing baseline sync...`);
+        try {
+          const baseline = await provider.getDeltaMessages();
+          deltaLink = baseline.nextDeltaLink;
+          await saveDeltaState(safeKey, {
+            deltaLink,
+            lastUpdated: new Date().toISOString(),
+          });
+          // Mark all baseline messages as processed to prevent wakes on restart
+          for (const msg of baseline.messages) {
+            markProcessed(msg.id);
+          }
+          console.error(`[agent-email] Baseline sync complete for ${emailAddress}: ${baseline.messages.length} existing messages consumed`);
+        } catch (err) {
+          console.error(`[agent-email] WARNING: Baseline sync failed for ${emailAddress}: ${err instanceof Error ? err.message : err}`);
+          await releaseLock(safeKey);
+          continue;
+        }
+      }
+
+      watchStates.push({ safeKey, emailAddress, provider, deltaLink });
+    } catch (err) {
+      console.error(`[agent-email] WARNING: Failed to set up ${emailAddress}: ${err instanceof Error ? err.message : err}`);
+      await releaseLock(safeKey);
+      continue;
+    }
+  }
+
+  if (watchStates.length === 0) {
+    console.error('[agent-email] No mailboxes could be set up for watching.');
+    await releaseAllLocks();
+    return 1;
+  }
+
+  console.error(`[agent-email] Watching ${watchStates.length} mailbox(es). Starting poll loop...`);
+
+  // Poll loop
+  const poll = async () => {
+    for (const state of watchStates) {
+      if (shuttingDown) break;
+
+      const now = new Date().toISOString();
+      console.error(`[agent-email] [${now}] Polling ${state.emailAddress}...`);
+
+      try {
+        const delta = await state.provider.getDeltaMessages(state.deltaLink);
+
+        let newCount = 0;
+        let skippedDedup = 0;
+        let skippedAllowlist = 0;
+
+        for (const msg of delta.messages) {
+          // Dedup
+          if (isProcessed(msg.id)) {
+            skippedDedup++;
+            continue;
+          }
+          markProcessed(msg.id);
+
+          // Receive allowlist check
+          const senderEmail = msg.from?.email ?? '';
+          if (!isAllowedSender(senderEmail, allowlist)) {
+            skippedAllowlist++;
+            console.error(`[agent-email] Skipping email from ${senderEmail} (not on receive allowlist)`);
+            continue;
+          }
+
+          // Build and send wake
+          const payload = buildWakePayload(state.emailAddress, msg);
+          console.error(`[agent-email] WAKE: ${payload.text.split('\n')[0]}`);
+
+          const result = await sendWake(wakeUrl, payload, token);
+          if (!result.success) {
+            console.error(`[agent-email] WARNING: Wake POST failed: ${result.error}`);
+          }
+          newCount++;
+        }
+
+        // Update delta state
+        state.deltaLink = delta.nextDeltaLink;
+        await saveDeltaState(state.safeKey, {
+          deltaLink: delta.nextDeltaLink,
+          lastUpdated: new Date().toISOString(),
+        });
+
+        console.error(
+          `[agent-email] Poll complete for ${state.emailAddress}: ` +
+          `${delta.messages.length} changes, ${newCount} wakes, ` +
+          `${skippedDedup} dedup, ${skippedAllowlist} allowlist-blocked`,
+        );
+      } catch (err) {
+        // Handle 410 Gone — delta token expired, do fresh baseline sync
+        if (err instanceof GraphApiError && err.status === 410) {
+          console.error(`[agent-email] 410 Gone for ${state.emailAddress} — delta token expired. Performing fresh baseline sync...`);
+          await deleteDeltaState(state.safeKey);
+          try {
+            const baseline = await state.provider.getDeltaMessages();
+            state.deltaLink = baseline.nextDeltaLink;
+            await saveDeltaState(state.safeKey, {
+              deltaLink: baseline.nextDeltaLink,
+              lastUpdated: new Date().toISOString(),
+            });
+            for (const msg of baseline.messages) {
+              markProcessed(msg.id);
+            }
+            console.error(`[agent-email] Fresh baseline sync complete for ${state.emailAddress}: ${baseline.messages.length} messages consumed`);
+          } catch (resyncErr) {
+            console.error(`[agent-email] WARNING: Fresh baseline sync failed for ${state.emailAddress}: ${resyncErr instanceof Error ? resyncErr.message : resyncErr}`);
+          }
+          continue;
+        }
+
+        // Handle token errors gracefully
+        const errMsg = err instanceof Error ? err.message : String(err);
+        if (errMsg.includes('interaction_required') || errMsg.includes('invalid_grant')) {
+          console.error(`[agent-email] WARNING: Token error for ${state.emailAddress}: ${errMsg}. Run: agent-email configure`);
+          continue;
+        }
+
+        console.error(`[agent-email] WARNING: Poll error for ${state.emailAddress}: ${errMsg}`);
+      }
+    }
+  };
+
+  // Initial poll
+  await poll();
+
+  // Schedule recurring polls
+  const intervalId = setInterval(() => {
+    if (!shuttingDown) {
+      void poll();
+    }
+  }, pollIntervalMs);
+
+  // Keep the process alive — wait for shutdown signal
+  return new Promise<number>((resolve) => {
+    const checkShutdown = () => {
+      if (shuttingDown) {
+        clearInterval(intervalId);
+        resolve(0);
+      } else {
+        setTimeout(checkShutdown, 500);
+      }
+    };
+    checkShutdown();
+  });
 }
 
 async function runConfigure(opts: CliOptions): Promise<number> {
@@ -217,11 +480,12 @@ COMMANDS:
   configure   Interactive setup wizard
 
 OPTIONS:
-  --version           Print version
-  --help, -h          Show this help
-  --wake-url <url>    Wake URL for watch mode
-  --nemoclaw          NemoClaw egress bootstrap
-  --log-level <level> Log level (debug, info, warn, error)
+  --version              Print version
+  --help, -h             Show this help
+  --wake-url <url>       Wake URL for watch mode
+  --poll-interval <sec>  Poll interval in seconds (default 30)
+  --nemoclaw             NemoClaw egress bootstrap
+  --log-level <level>    Log level (debug, info, warn, error)
 `.trim());
 }
 

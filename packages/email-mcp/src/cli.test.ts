@@ -20,12 +20,22 @@ describe('cli/Serve Subcommand', () => {
 });
 
 describe('cli/Watch Subcommand', () => {
-  it('Scenario: Watch with wake URL', async () => {
-    const exitCode = await runCli(['watch', '--wake-url', 'http://localhost:18789/hooks/wake']);
-    expect(exitCode).toBe(0);
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('http://localhost:18789/hooks/wake'),
-    );
+  it('Scenario: Watch with wake URL (parses args correctly)', () => {
+    // runWatch now does real work (loads mailboxes, etc.) so we just test parsing
+    const opts = parseCliArgs(['watch', '--wake-url', 'http://localhost:18789/hooks/wake']);
+    expect(opts.command).toBe('watch');
+    expect(opts.wakeUrl).toBe('http://localhost:18789/hooks/wake');
+  });
+
+  it('Scenario: Watch with custom poll interval', () => {
+    const opts = parseCliArgs(['watch', '--wake-url', 'http://localhost:18789/hooks/wake', '--poll-interval', '10']);
+    expect(opts.command).toBe('watch');
+    expect(opts.pollInterval).toBe(10);
+  });
+
+  it('Scenario: Default poll interval is undefined (defaults to 30 at runtime)', () => {
+    const opts = parseCliArgs(['watch']);
+    expect(opts.pollInterval).toBeUndefined();
   });
 });
 

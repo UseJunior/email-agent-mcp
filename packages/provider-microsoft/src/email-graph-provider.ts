@@ -22,6 +22,15 @@ export interface GraphApiClient {
   delete(url: string): Promise<void>;
 }
 
+/** Delta query select fields for efficiency */
+const DELTA_SELECT = '$select=subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments,id';
+
+/** Result from delta query, including messages and the deltaLink for persistence */
+export interface DeltaResult {
+  messages: EmailMessage[];
+  nextDeltaLink: string;
+}
+
 /**
  * Real Graph API client using fetch + Bearer token.
  * Used when connected to a real mailbox via DelegatedAuthManager.
@@ -224,14 +233,48 @@ export class GraphEmailProvider {
     return { success: true, messageId: draftId };
   }
 
-  // Delta Query polling for watcher (no public URL needed)
-  async getDeltaMessages(deltaLink?: string): Promise<{ messages: EmailMessage[]; nextDeltaLink: string }> {
-    const url = deltaLink ?? `${this.basePath}/mailFolders/Inbox/messages/delta`;
-    const response = await this.client.get(url) as { value?: GraphMessage[]; '@odata.deltaLink'?: string };
-    const messages = (response.value ?? []).map(mapGraphMessage);
+  /**
+   * Delta Query polling for watcher (no public URL needed).
+   *
+   * - Uses $select for efficiency
+   * - Follows all @odata.nextLink pages until a @odata.deltaLink is received
+   * - Filters out @removed tombstones (deleted/moved messages)
+   * - Returns both messages AND the deltaLink for persistence
+   */
+  async getDeltaMessages(deltaLink?: string): Promise<DeltaResult> {
+    // Build initial URL: use saved deltaLink, or start fresh with $select
+    let url = deltaLink ?? `${this.basePath}/mailFolders/Inbox/messages/delta?${DELTA_SELECT}`;
+
+    const allMessages: EmailMessage[] = [];
+    let finalDeltaLink = '';
+
+    // Page through all results (follow @odata.nextLink until @odata.deltaLink)
+    while (url) {
+      const response = await this.client.get(url) as DeltaPageResponse;
+      const items = response.value ?? [];
+
+      // Filter out @removed tombstones and map the rest
+      for (const item of items) {
+        if (item['@removed']) continue; // Deleted/moved message — skip
+        allMessages.push(mapGraphMessage(item as GraphMessage));
+      }
+
+      if (response['@odata.deltaLink']) {
+        // We have the final deltaLink — done paging
+        finalDeltaLink = response['@odata.deltaLink'];
+        break;
+      } else if (response['@odata.nextLink']) {
+        // More pages to fetch
+        url = response['@odata.nextLink'];
+      } else {
+        // No nextLink and no deltaLink — shouldn't happen, but break to avoid infinite loop
+        break;
+      }
+    }
+
     return {
-      messages,
-      nextDeltaLink: response['@odata.deltaLink'] ?? url,
+      messages: allMessages,
+      nextDeltaLink: finalDeltaLink || url,
     };
   }
 
@@ -254,6 +297,18 @@ interface GraphMessage {
   conversationId?: string;
   internetMessageId?: string;
   internetMessageHeaders?: Array<{ name: string; value: string }>;
+}
+
+/** A single item in a delta response — may include @removed for tombstones */
+interface DeltaItem extends GraphMessage {
+  '@removed'?: { reason: string };
+}
+
+/** Shape of a delta query page response */
+interface DeltaPageResponse {
+  value?: DeltaItem[];
+  '@odata.nextLink'?: string;
+  '@odata.deltaLink'?: string;
 }
 
 function mapGraphMessage(msg: GraphMessage): EmailMessage {

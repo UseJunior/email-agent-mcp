@@ -154,6 +154,118 @@ describe('provider-microsoft/Dual Watch Mode', () => {
   });
 });
 
+describe('provider-microsoft/Delta Query Sync Protocol', () => {
+  it('Scenario: Uses $select for efficiency', async () => {
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({
+        value: [],
+        '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/delta?token=abc',
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.getDeltaMessages();
+
+    // Verify the initial URL includes $select
+    expect(client.get).toHaveBeenCalledWith(
+      expect.stringContaining('$select='),
+    );
+    expect(client.get).toHaveBeenCalledWith(
+      expect.stringContaining('subject'),
+    );
+    expect(client.get).toHaveBeenCalledWith(
+      expect.stringContaining('mailFolders/Inbox/messages/delta'),
+    );
+  });
+
+  it('Scenario: Paging with @odata.nextLink', async () => {
+    // Simulate multi-page response: page1 has nextLink, page2 has deltaLink
+    const client = createMockClient({
+      get: vi.fn()
+        .mockResolvedValueOnce({
+          value: [{
+            id: 'msg-1',
+            subject: 'Page 1',
+            from: { emailAddress: { address: 'alice@corp.com' } },
+          }],
+          '@odata.nextLink': 'https://graph.microsoft.com/v1.0/delta?skiptoken=page2',
+        })
+        .mockResolvedValueOnce({
+          value: [{
+            id: 'msg-2',
+            subject: 'Page 2',
+            from: { emailAddress: { address: 'bob@corp.com' } },
+          }],
+          '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/delta?token=final',
+        }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const delta = await provider.getDeltaMessages();
+
+    // Should have followed both pages
+    expect(client.get).toHaveBeenCalledTimes(2);
+    expect(delta.messages).toHaveLength(2);
+    expect(delta.messages[0]!.subject).toBe('Page 1');
+    expect(delta.messages[1]!.subject).toBe('Page 2');
+    expect(delta.nextDeltaLink).toBe('https://graph.microsoft.com/v1.0/delta?token=final');
+  });
+
+  it('Scenario: Tombstone filtering', async () => {
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({
+        value: [
+          {
+            id: 'msg-new',
+            subject: 'New Email',
+            from: { emailAddress: { address: 'alice@corp.com' } },
+          },
+          {
+            id: 'msg-deleted',
+            subject: 'Deleted Email',
+            '@removed': { reason: 'deleted' },
+          },
+          {
+            id: 'msg-moved',
+            subject: 'Moved Email',
+            '@removed': { reason: 'changed' },
+          },
+        ],
+        '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/delta?token=abc',
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const delta = await provider.getDeltaMessages();
+
+    // Tombstones should be filtered out
+    expect(delta.messages).toHaveLength(1);
+    expect(delta.messages[0]!.id).toBe('msg-new');
+  });
+
+  it('Scenario: Subsequent poll with deltaLink', async () => {
+    const savedDeltaLink = 'https://graph.microsoft.com/v1.0/delta?token=saved';
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({
+        value: [{
+          id: 'new-since-last',
+          subject: 'New Since Last Poll',
+          from: { emailAddress: { address: 'charlie@corp.com' } },
+        }],
+        '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/delta?token=updated',
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const delta = await provider.getDeltaMessages(savedDeltaLink);
+
+    // Should use the saved deltaLink, not the initial URL
+    expect(client.get).toHaveBeenCalledWith(savedDeltaLink);
+    expect(delta.messages).toHaveLength(1);
+    expect(delta.nextDeltaLink).toBe('https://graph.microsoft.com/v1.0/delta?token=updated');
+  });
+});
+
 describe('provider-microsoft/ESM Compatibility', () => {
   it('Scenario: ESM import resolution', async () => {
     // Verify all imports in the module use explicit .js extensions
