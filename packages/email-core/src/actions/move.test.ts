@@ -1,28 +1,44 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { MockEmailProvider } from '../testing/mock-provider.js';
+import { flagEmailAction, markReadAction } from './label.js';
+import { moveToFolderAction } from './move.js';
+import type { ActionContext } from './registry.js';
 
-// Spec: email-categorize — Requirements: Flag Email, Mark Read State, Move to Folder
-// Tests written FIRST (spec-driven). Implementation pending.
+let provider: MockEmailProvider;
+let ctx: ActionContext;
+
+beforeEach(() => {
+  provider = new MockEmailProvider();
+  provider.addMessage({ id: 'msg123', subject: 'Test', folder: 'inbox', isRead: false, isFlagged: false });
+  ctx = { provider };
+});
 
 describe('email-categorize/Flag Email', () => {
   it('Scenario: Flag as important', async () => {
-    // WHEN flag_email is called with {id: "msg123"}
-    // THEN sets the importance flag (Graph: flag, Gmail: star)
-    expect.fail('Not implemented — awaiting flag_email action');
+    const result = await flagEmailAction.run(ctx, { id: 'msg123', flagged: true });
+    expect(result.success).toBe(true);
+
+    const msg = await provider.getMessage('msg123');
+    expect(msg.isFlagged).toBe(true);
   });
 });
 
 describe('email-categorize/Mark Read State', () => {
   it('Scenario: Mark as read', async () => {
-    // WHEN mark_read is called with {id: "msg123"}
-    // THEN marks the email as read
-    expect.fail('Not implemented — awaiting mark_read action');
+    const result = await markReadAction.run(ctx, { id: 'msg123', is_read: true });
+    expect(result.success).toBe(true);
+
+    const msg = await provider.getMessage('msg123');
+    expect(msg.isRead).toBe(true);
   });
 });
 
 describe('email-categorize/Move to Folder', () => {
   it('Scenario: Archive email', async () => {
-    // WHEN move_to_folder is called with {id: "msg123", folder: "archive"}
-    // THEN moves the email to the archive folder
-    expect.fail('Not implemented — awaiting move_to_folder action');
+    const result = await moveToFolderAction.run(ctx, { id: 'msg123', folder: 'archive' });
+    expect(result.success).toBe(true);
+
+    const msg = await provider.getMessage('msg123');
+    expect(msg.folder).toBe('archive');
   });
 });

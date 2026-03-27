@@ -1,12 +1,25 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { MockEmailProvider } from '../testing/mock-provider.js';
+import { getMailboxStatusAction } from './status.js';
+import type { ActionContext } from './registry.js';
 
-// Spec: mailbox-config — Requirement: Mailbox Status
-// Tests written FIRST (spec-driven). Implementation pending.
+let ctx: ActionContext;
+
+beforeEach(() => {
+  ctx = {
+    provider: new MockEmailProvider(),
+    sendAllowlist: undefined, // No allowlist configured
+  };
+});
 
 describe('mailbox-config/Mailbox Status', () => {
   it('Scenario: Status with warning', async () => {
     // WHEN get_mailbox_status is called and no send allowlist is configured
-    // THEN result includes warnings: ["Outbound email disabled — configure send allowlist to enable replies and sends"]
-    expect.fail('Not implemented — awaiting get_mailbox_status action');
+    const result = await getMailboxStatusAction.run(ctx, {});
+
+    // THEN result includes warnings about outbound email being disabled
+    expect(result.warnings).toContain(
+      'Outbound email disabled — configure send allowlist to enable replies and sends',
+    );
   });
 });

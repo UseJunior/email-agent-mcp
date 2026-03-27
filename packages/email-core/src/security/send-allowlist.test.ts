@@ -1,49 +1,86 @@
 import { describe, it, expect } from 'vitest';
-
-// Spec: email-security — Requirements: Send Allowlist, Allowlist Protection, Rate Limiting
-// Tests written FIRST (spec-driven). Implementation pending.
+import { isAllowedRecipient, checkSendAllowlist, SendRateLimiter, getSendAllowlistPath } from './send-allowlist.js';
+import type { AllowlistConfig } from '../actions/registry.js';
 
 describe('email-security/Send Allowlist', () => {
-  it('Scenario: Empty allowlist blocks all outbound including replies', async () => {
+  it('Scenario: Empty allowlist blocks all outbound including replies', () => {
     // WHEN no send allowlist is configured
-    // THEN all send AND reply attempts return an error
-    // AND reply is NOT auto-allowed (prevents hacker auto-reply attacks)
-    // AND get_mailbox_status includes a warning that outbound is disabled
-    expect.fail('Not implemented — awaiting send allowlist');
+    const noAllowlist: AllowlistConfig | undefined = undefined;
+
+    // THEN all send AND reply attempts are blocked
+    expect(isAllowedRecipient('alice@example.com', noAllowlist)).toBe(false);
+    expect(isAllowedRecipient('bob@corp.com', noAllowlist)).toBe(false);
+
+    // Also empty entries blocks all
+    const emptyEntries: AllowlistConfig = { entries: [] };
+    expect(isAllowedRecipient('alice@example.com', emptyEntries)).toBe(false);
+
+    // checkSendAllowlist returns clear error message
+    const error = checkSendAllowlist(['alice@example.com'], noAllowlist);
+    expect(error).toContain('Send allowlist not configured');
+    expect(error).toContain('all outbound email is disabled');
   });
 
-  it('Scenario: Domain wildcard match', async () => {
-    // WHEN *@lawfirm.com is in the send allowlist
-    // AND reply_to_email targets partner@lawfirm.com
-    // THEN the reply is allowed
-    expect.fail('Not implemented — awaiting send allowlist');
+  it('Scenario: Domain wildcard match', () => {
+    const allowlist: AllowlistConfig = { entries: ['*@lawfirm.com'] };
+
+    // WHEN *@lawfirm.com is in the allowlist, THEN partner@lawfirm.com is allowed
+    expect(isAllowedRecipient('partner@lawfirm.com', allowlist)).toBe(true);
+    expect(isAllowedRecipient('associate@lawfirm.com', allowlist)).toBe(true);
+
+    // Other domains blocked
+    expect(isAllowedRecipient('hacker@evil.com', allowlist)).toBe(false);
   });
 
-  it('Scenario: Wildcard allows all', async () => {
-    // WHEN * is in the send allowlist
-    // THEN all outbound email is allowed
-    expect.fail('Not implemented — awaiting send allowlist');
+  it('Scenario: Wildcard allows all', () => {
+    const allowlist: AllowlistConfig = { entries: ['*'] };
+
+    // WHEN * is in the send allowlist, THEN all outbound is allowed
+    expect(isAllowedRecipient('anyone@anywhere.com', allowlist)).toBe(true);
+    expect(isAllowedRecipient('hacker@evil.com', allowlist)).toBe(true);
   });
 });
 
 describe('email-security/Allowlist Protection', () => {
   it('Scenario: Agent cannot modify allowlist', async () => {
-    // WHEN the agent attempts to write to the allowlist file path
-    // THEN no MCP tool exists for this purpose — the attempt fails
-    expect.fail('Not implemented — awaiting allowlist protection');
+    // Verify the send-allowlist module exports no mutation functions
+    const mod = await import('./send-allowlist.js');
+    const exportedNames = Object.keys(mod);
+    const mutationFns = exportedNames.filter(
+      name => name.startsWith('set') || name.startsWith('update') ||
+              name.startsWith('write') || name.startsWith('modify'),
+    );
+    expect(mutationFns).toHaveLength(0);
   });
 
-  it('Scenario: NemoClaw read-only storage', async () => {
+  it('Scenario: NemoClaw read-only storage', () => {
     // WHEN running in NemoClaw sandbox
-    // THEN the allowlist is stored in /sandbox/.openclaw (read-only filesystem policy)
-    expect.fail('Not implemented — awaiting NemoClaw support');
+    // THEN the allowlist path comes from env var
+    const originalEnv = process.env['AGENT_EMAIL_SEND_ALLOWLIST'];
+    try {
+      process.env['AGENT_EMAIL_SEND_ALLOWLIST'] = '/sandbox/.openclaw/send-allowlist.json';
+      expect(getSendAllowlistPath()).toBe('/sandbox/.openclaw/send-allowlist.json');
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env['AGENT_EMAIL_SEND_ALLOWLIST'];
+      } else {
+        process.env['AGENT_EMAIL_SEND_ALLOWLIST'] = originalEnv;
+      }
+    }
   });
 });
 
 describe('email-security/Rate Limiting', () => {
-  it('Scenario: Rate limit exceeded', async () => {
-    // WHEN the agent exceeds the configured send rate
+  it('Scenario: Rate limit exceeded', () => {
+    const limiter = new SendRateLimiter(2, 60000); // 2 per minute
+
+    limiter.recordUsage('send_email');
+    limiter.recordUsage('send_email');
+
     // THEN returns an error with retry-after guidance
-    expect.fail('Not implemented — awaiting rate limiter');
+    const result = limiter.checkLimit('send_email');
+    expect(result.allowed).toBe(false);
+    expect(result.retryAfter).toBeDefined();
+    expect(result.retryAfter!).toBeGreaterThan(0);
   });
 });

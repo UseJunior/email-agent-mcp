@@ -1,12 +1,14 @@
 import { describe, it, expect } from 'vitest';
-
-// Spec: content-engine — Requirement: Signature Stripping
-// Tests written FIRST (spec-driven). Implementation pending.
+import { stripSignature } from './signatures.js';
 
 describe('content-engine/Signature Stripping', () => {
-  it('Scenario: Common signature pattern', async () => {
-    // WHEN an email ends with "-- \nJohn Doe\nSenior Partner"
-    // THEN strips the signature from the body content
-    expect.fail('Not implemented — awaiting signature stripping');
+  it('Scenario: Common signature pattern', () => {
+    const body = 'Thanks for the update on the contract.\n\nLet me know if you need anything else.\n-- \nJohn Doe\nSenior Partner';
+
+    const result = stripSignature(body);
+    expect(result).toContain('Thanks for the update');
+    expect(result).toContain('Let me know if you need anything else');
+    expect(result).not.toContain('John Doe');
+    expect(result).not.toContain('Senior Partner');
   });
 });
