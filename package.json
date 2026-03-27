@@ -15,7 +15,8 @@
     "test": "npm run test --workspaces --if-present",
     "test:run": "npm run test:run --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
-    "clean": "npm run clean --workspaces --if-present"
+    "clean": "npm run clean --workspaces --if-present",
+    "check:spec-coverage": "node scripts/check-spec-coverage.mjs"
   },
   "repository": {
     "type": "git",
