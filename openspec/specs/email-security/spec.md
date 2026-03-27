@@ -11,9 +11,10 @@ Defines security controls for email operations: send allowlist (gates all outbou
 
 The system SHALL gate ALL outbound email (both `send_email` and `reply_to_email`) against a configurable allowlist. The allowlist supports exact email addresses, domain wildcards (`*@example.com`), or both. Default is EMPTY — blocks all outbound until configured.
 
-#### Scenario: Empty allowlist blocks all outbound
+#### Scenario: Empty allowlist blocks all outbound including replies
 - **WHEN** no send allowlist is configured
-- **THEN** all send and reply attempts return an error with a clear message that outbound email is disabled
+- **THEN** all send AND reply attempts return an error with a clear message that outbound email is disabled
+- **AND** reply is NOT auto-allowed — a hacker could send an email requesting credentials and the agent might auto-reply with sensitive info
 - **AND** `get_mailbox_status` includes a warning that outbound is disabled
 
 #### Scenario: Domain wildcard match
@@ -41,9 +42,10 @@ The allowlist file SHALL be loaded at startup from a path set via environment va
 
 The system SHALL provide a receive allowlist that controls which inbound emails trigger the watcher. Default is accept all (wildcard `*`). Same format as send allowlist.
 
-#### Scenario: Accept all by default
+#### Scenario: Accept all by default with warning
 - **WHEN** no receive allowlist is configured
 - **THEN** all inbound emails trigger the watcher
+- **AND** the system logs a warning that no receive allowlist is configured (but does NOT fail)
 
 ### Requirement: Delete Policy
 
@@ -69,6 +71,7 @@ The system SHALL check email authentication headers on inbound emails. Configura
 #### Scenario: Gmail anti-spoofing
 - **WHEN** an inbound email arrives via Gmail
 - **THEN** the system checks `Authentication-Results` header from raw message headers
+- **AND** checks Gmail's `spamVerdict` metadata for additional signal
 
 ### Requirement: Rate Limiting
 

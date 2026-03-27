@@ -54,6 +54,18 @@ The system SHALL accept an optional `body_file` parameter (local file path) as a
 - **WHEN** `body_file` points to a binary file (image, PDF)
 - **THEN** the system rejects with an error: "body_file must be a text file (.md, .html, .txt)"
 
+#### Scenario: Symlink escape rejected
+- **WHEN** `body_file` is a symlink pointing outside the working directory
+- **THEN** the system rejects with an error: "body_file symlink targets outside working directory"
+
+#### Scenario: File not found
+- **WHEN** `body_file` points to a non-existent file
+- **THEN** the system rejects with an error: "body_file not found: draft.md"
+
+#### Scenario: Configured safe directory
+- **WHEN** a safe directory is configured via `AGENT_EMAIL_SAFE_DIR` env var
+- **THEN** `body_file` paths are resolved relative to that directory
+
 ### Requirement: Draft Workflow
 
 The system SHALL support a draft-then-send pattern: create a draft, allow review/modification, then send. For Microsoft Graph, this uses `createReplyAll` to preserve embedded images and CID references.

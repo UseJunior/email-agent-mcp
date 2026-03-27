@@ -43,6 +43,14 @@ The system SHALL provide a `move_to_folder` action to move emails between folder
 - **WHEN** `move_to_folder` is called with `{id: "msg123", folder: "archive"}`
 - **THEN** the system moves the email to the archive folder
 
+### Requirement: Mailbox Routing
+
+Categorize actions SHALL accept an optional `mailbox` parameter. If omitted, the system defaults to the mailbox that owns the referenced message ID. When multiple mailboxes are configured, the system resolves the owning mailbox from the message ID.
+
+#### Scenario: Categorize without mailbox param
+- **WHEN** `label_email` is called with `{id: "msg123", labels: ["important"]}` and no `mailbox` param
+- **THEN** the system identifies which mailbox owns `msg123` and applies the label via that mailbox's provider
+
 ### Requirement: No Delete in v1
 
 The system SHALL NOT provide a delete action by default. Delete is disabled in configuration and requires explicit enablement plus `user_explicitly_requested_deletion: true`.

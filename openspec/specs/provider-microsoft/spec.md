@@ -100,6 +100,26 @@ The system SHALL use a custom extended property (`AgentEmailTrackingId`) on outb
 - **WHEN** a reply is sent and the system needs the sent message ID for threading
 - **THEN** it queries Sent Items by `AgentEmailTrackingId` with exponential backoff for propagation delay
 
+### Requirement: Dual Watch Mode
+
+The system SHALL support two email detection modes: Delta Query polling (default, works behind NAT/local) and webhook-based change notifications (production, requires public HTTPS URL).
+
+#### Scenario: Delta Query polling (local)
+- **WHEN** no public webhook URL is configured
+- **THEN** the system polls via Delta Query at a configurable interval (default 30s)
+
+#### Scenario: Webhook mode (production)
+- **WHEN** a public HTTPS webhook URL is configured
+- **THEN** the system registers for Graph change notifications
+
+### Requirement: ESM Compatibility
+
+The system SHALL use explicit `.js` import extensions for the Microsoft Graph SDK to satisfy Node.js 20+ ESM resolution requirements. If SDK interop friction appears, the system SHALL fallback to direct REST + token auth.
+
+#### Scenario: ESM import resolution
+- **WHEN** the provider is imported in an ESM TypeScript project
+- **THEN** all Graph SDK imports use explicit `.js` extensions
+
 ### Requirement: NemoClaw Compatibility
 
 The system SHALL document required egress domains for NemoClaw sandbox policy: `graph.microsoft.com`, `login.microsoftonline.com`.
