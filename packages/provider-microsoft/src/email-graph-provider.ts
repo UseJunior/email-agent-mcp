@@ -22,13 +22,93 @@ export interface GraphApiClient {
   delete(url: string): Promise<void>;
 }
 
+/**
+ * Real Graph API client using fetch + Bearer token.
+ * Used when connected to a real mailbox via DelegatedAuthManager.
+ */
+export class RealGraphApiClient implements GraphApiClient {
+  private getToken: () => Promise<string>;
+
+  constructor(getToken: () => Promise<string>) {
+    this.getToken = getToken;
+  }
+
+  async get(url: string): Promise<{ value?: unknown[]; [key: string]: unknown }> {
+    const token = await this.getToken();
+    const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
+    const resp = await fetch(fullUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!resp.ok) {
+      throw new GraphApiError(resp.status, await resp.text());
+    }
+    return resp.json() as Promise<{ value?: unknown[]; [key: string]: unknown }>;
+  }
+
+  async post(url: string, body: unknown): Promise<{ id?: string; [key: string]: unknown }> {
+    const token = await this.getToken();
+    const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
+    const resp = await fetch(fullUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    // sendMail returns 202 with no body
+    if (resp.status === 202) return {};
+    if (!resp.ok) {
+      throw new GraphApiError(resp.status, await resp.text());
+    }
+    const text = await resp.text();
+    return text ? JSON.parse(text) as { id?: string; [key: string]: unknown } : {};
+  }
+
+  async patch(url: string, body: unknown): Promise<void> {
+    const token = await this.getToken();
+    const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
+    const resp = await fetch(fullUrl, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      throw new GraphApiError(resp.status, await resp.text());
+    }
+  }
+
+  async delete(url: string): Promise<void> {
+    const token = await this.getToken();
+    const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
+    const resp = await fetch(fullUrl, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!resp.ok) {
+      throw new GraphApiError(resp.status, await resp.text());
+    }
+  }
+}
+
+export class GraphApiError extends Error {
+  constructor(public status: number, public body: string) {
+    super(`Graph API error ${status}: ${body.slice(0, 200)}`);
+    this.name = 'GraphApiError';
+  }
+}
+
 export class GraphEmailProvider {
   private client: GraphApiClient;
-  private userId: string;
+  private basePath: string;
 
   constructor(client: GraphApiClient, userId = 'me') {
     this.client = client;
-    this.userId = userId;
+    // For delegated auth, use /me/. For app-only, use /users/{id}/.
+    this.basePath = userId === 'me' ? '/me' : `/users/${userId}`;
   }
 
   async listMessages(opts: ListOptions): Promise<EmailMessage[]> {
@@ -42,20 +122,20 @@ export class GraphEmailProvider {
     if (filters.length > 0) params.set('$filter', filters.join(' and '));
 
     const folder = opts.folder ?? 'inbox';
-    const url = `/users/${this.userId}/mailFolders/${folder}/messages?${params}`;
+    const url = `${this.basePath}/mailFolders/${folder}/messages?${params}`;
     const response = await this.client.get(url);
     return ((response.value ?? []) as GraphMessage[]).map(mapGraphMessage);
   }
 
   async getMessage(id: string): Promise<EmailMessage> {
-    const response = await this.client.get(`/users/${this.userId}/messages/${id}`) as unknown as GraphMessage;
+    const response = await this.client.get(`${this.basePath}/messages/${id}`) as unknown as GraphMessage;
     return mapGraphMessage(response);
   }
 
   async searchMessages(query: string): Promise<EmailMessage[]> {
     const params = new URLSearchParams();
     params.set('$search', `"${query}"`);
-    const response = await this.client.get(`/users/${this.userId}/messages?${params}`);
+    const response = await this.client.get(`${this.basePath}/messages?${params}`);
     return ((response.value ?? []) as GraphMessage[]).map(mapGraphMessage);
   }
 
@@ -67,7 +147,7 @@ export class GraphEmailProvider {
       const params = new URLSearchParams();
       params.set('$filter', `conversationId eq '${conversationId}'`);
       params.set('$orderby', 'receivedDateTime asc');
-      const response = await this.client.get(`/users/${this.userId}/messages?${params}`);
+      const response = await this.client.get(`${this.basePath}/messages?${params}`);
       const messages = ((response.value ?? []) as GraphMessage[]).map(mapGraphMessage);
 
       return {
@@ -93,26 +173,27 @@ export class GraphEmailProvider {
       ],
     };
 
-    const response = await this.client.post(`/users/${this.userId}/sendMail`, { message: graphMsg });
-    return { success: true, messageId: response.id ?? trackingId };
+    await this.client.post(`${this.basePath}/sendMail`, { message: graphMsg });
+    // sendMail returns 202 with no body — use tracking ID for sent message lookup
+    return { success: true, messageId: trackingId };
   }
 
   async replyToMessage(messageId: string, body: string, opts?: ReplyOptions): Promise<SendResult> {
     // Use createReplyAll to preserve embedded images and CID references
     try {
       const draft = await this.client.post(
-        `/users/${this.userId}/messages/${messageId}/createReplyAll`,
+        `${this.basePath}/messages/${messageId}/createReplyAll`,
         {},
       );
 
       if (draft.id) {
         // Update draft body
-        await this.client.patch(`/users/${this.userId}/messages/${draft.id}`, {
+        await this.client.patch(`${this.basePath}/messages/${draft.id}`, {
           body: { contentType: 'HTML', content: truncateBody(body) },
         });
 
         // Send the draft
-        await this.client.post(`/users/${this.userId}/messages/${draft.id}/send`, {});
+        await this.client.post(`${this.basePath}/messages/${draft.id}/send`, {});
         return { success: true, messageId: draft.id };
       }
     } catch {
@@ -134,18 +215,18 @@ export class GraphEmailProvider {
       toRecipients: msg.to.map(r => ({ emailAddress: { address: r.email, name: r.name } })),
     };
 
-    const response = await this.client.post(`/users/${this.userId}/messages`, graphMsg);
+    const response = await this.client.post(`${this.basePath}/messages`, graphMsg);
     return { success: true, draftId: response.id };
   }
 
   async sendDraft(draftId: string): Promise<SendResult> {
-    await this.client.post(`/users/${this.userId}/messages/${draftId}/send`, {});
+    await this.client.post(`${this.basePath}/messages/${draftId}/send`, {});
     return { success: true, messageId: draftId };
   }
 
   // Delta Query polling for watcher (no public URL needed)
   async getDeltaMessages(deltaLink?: string): Promise<{ messages: EmailMessage[]; nextDeltaLink: string }> {
-    const url = deltaLink ?? `/users/${this.userId}/mailFolders/Inbox/messages/delta`;
+    const url = deltaLink ?? `${this.basePath}/mailFolders/Inbox/messages/delta`;
     const response = await this.client.get(url) as { value?: GraphMessage[]; '@odata.deltaLink'?: string };
     const messages = (response.value ?? []).map(mapGraphMessage);
     return {

@@ -7,6 +7,9 @@ export interface CliOptions {
   version?: boolean;
   help?: boolean;
   logLevel?: string;
+  mailbox?: string;
+  provider?: string;
+  clientId?: string;
 }
 
 // NemoClaw egress domains for all providers
@@ -42,6 +45,18 @@ export function parseCliArgs(args: string[]): CliOptions {
     }
     if (arg === '--log-level' && i + 1 < args.length) {
       opts.logLevel = args[++i];
+      continue;
+    }
+    if (arg === '--mailbox' && i + 1 < args.length) {
+      opts.mailbox = args[++i];
+      continue;
+    }
+    if (arg === '--provider' && i + 1 < args.length) {
+      opts.provider = args[++i];
+      continue;
+    }
+    if (arg === '--client-id' && i + 1 < args.length) {
+      opts.clientId = args[++i];
       continue;
     }
 
@@ -114,8 +129,56 @@ async function runConfigure(opts: CliOptions): Promise<number> {
     return 0;
   }
 
-  console.error('[agent-email] Interactive configuration wizard');
-  return 0;
+  const mailboxName = opts.mailbox ?? 'default';
+  const provider = opts.provider ?? 'microsoft';
+
+  if (provider !== 'microsoft') {
+    console.error(`[agent-email] Provider "${provider}" not yet supported for configure. Use --provider microsoft`);
+    return 1;
+  }
+
+  // Get client ID from flag, env var, or use Junior local app default
+  const clientId = opts.clientId
+    ?? process.env['AGENT_EMAIL_CLIENT_ID']
+    ?? 'c4f91d3e-d2d9-4f8b-826f-6a3c19280241'; // Junior local app
+
+  console.error(`[agent-email] Configuring mailbox "${mailboxName}" with Microsoft Graph`);
+  console.error(`[agent-email] Client ID: ${clientId}`);
+  console.error('');
+
+  try {
+    const { DelegatedAuthManager } = await import('@usejunior/provider-microsoft');
+    const auth = new DelegatedAuthManager(
+      { mode: 'delegated', clientId },
+      mailboxName,
+    );
+
+    // This triggers device code flow — user sees URL + code on stderr
+    await auth.connect({});
+
+    // Test connection by getting user profile
+    const token = await auth.getAccessToken();
+    const resp = await fetch('https://graph.microsoft.com/v1.0/me', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (resp.ok) {
+      const profile = await resp.json() as { displayName?: string; mail?: string };
+      console.error('');
+      console.error(`✅ Connected as: ${profile.displayName ?? 'Unknown'} (${profile.mail ?? 'no email'})`);
+      console.error(`   Mailbox "${mailboxName}" saved to ~/.agent-email/tokens/${mailboxName}.json`);
+      console.error('');
+      console.error('You can now run: agent-email serve');
+    } else {
+      console.error('');
+      console.error(`⚠️  Authentication succeeded but profile fetch failed (${resp.status})`);
+      console.error('   The mailbox is configured but may have limited permissions.');
+    }
+
+    return 0;
+  } catch (err) {
+    console.error(`\n❌ Configuration failed: ${err instanceof Error ? err.message : err}`);
+    return 1;
+  }
 }
 
 function printHelp(): void {

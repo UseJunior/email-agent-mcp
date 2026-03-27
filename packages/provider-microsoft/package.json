@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@azure/identity": "^4.0.0",
+    "@azure/identity-cache-persistence": "^1.2.0",
     "@microsoft/microsoft-graph-client": "^3.0.0",
     "@usejunior/email-core": "^0.1.0"
   },

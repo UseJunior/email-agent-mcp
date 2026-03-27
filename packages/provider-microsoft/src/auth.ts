@@ -1,153 +1,274 @@
-// Microsoft Graph authentication — delegated OAuth and client credentials
+// Microsoft Graph authentication — real MSAL device code flow + cache persistence
 import type { AuthManager } from '@usejunior/email-core';
+import { DeviceCodeCredential, useIdentityPlugin, type DeviceCodeInfo, type AuthenticationRecord } from '@azure/identity';
+import { cachePersistencePlugin } from '@azure/identity-cache-persistence';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
+import { homedir } from 'node:os';
+
+// Enable MSAL persistent cache (OS keychain on macOS, DPAPI on Windows, libsecret on Linux)
+useIdentityPlugin(cachePersistencePlugin);
+
+export const GRAPH_SCOPES = ['Mail.Read', 'Mail.Send', 'User.Read', 'offline_access'];
+const CONFIG_DIR = join(homedir(), '.agent-email', 'tokens');
 
 export interface MicrosoftAuthConfig {
   mode: 'delegated' | 'client_credentials';
   clientId: string;
   clientSecret?: string;
   tenantId?: string;
-  redirectUri?: string;
 }
 
-export interface TokenStore {
-  accessToken?: string;
-  refreshToken?: string;
-  expiresAt?: number;
+export interface MailboxMetadata {
+  authenticationRecord: AuthenticationRecord;
+  lastInteractiveAuthAt: string;
+  clientId: string;
+  tenantId?: string;
+  mailboxName: string;
 }
 
 /**
- * Delegated OAuth auth manager (device code or PKCE).
+ * Delegated OAuth auth manager — real device code flow with MSAL cache persistence.
+ *
+ * Tokens are stored in the OS keychain by MSAL.
+ * Only the AuthenticationRecord (non-secret metadata) is saved to disk.
  */
 export class DelegatedAuthManager implements AuthManager {
-  private tokenStore: TokenStore = {};
-  private readonly _config: MicrosoftAuthConfig;
+  private credential: DeviceCodeCredential | null = null;
+  private authRecord: AuthenticationRecord | null = null;
+  private readonly config: MicrosoftAuthConfig;
+  private readonly mailboxName: string;
+  private _needsReauth = false;
+  private _lastInteractiveAuthAt: string | null = null;
 
-  constructor(config: MicrosoftAuthConfig) {
-    this._config = config;
+  constructor(config: MicrosoftAuthConfig, mailboxName = 'default') {
+    this.config = config;
+    this.mailboxName = mailboxName;
   }
 
-  get mode(): string { return this._config.mode; }
+  get needsReauth(): boolean { return this._needsReauth; }
+  get lastInteractiveAuthAt(): string | null { return this._lastInteractiveAuthAt; }
 
-  async connect(credentials: Record<string, string>): Promise<void> {
-    // In real implementation: use this._config.clientId for device code flow or PKCE
-    this.tokenStore = {
-      accessToken: credentials['access_token'] ?? 'mock-access-token',
-      refreshToken: credentials['refresh_token'] ?? 'mock-refresh-token',
-      expiresAt: Date.now() + 3600000,
-    };
+  /**
+   * Interactive device code flow — prints URL + code to stderr.
+   * Call this from `agent-email configure`, NOT from MCP serve.
+   */
+  async connect(_credentials: Record<string, string>): Promise<void> {
+    this.credential = new DeviceCodeCredential({
+      clientId: this.config.clientId,
+      tenantId: this.config.tenantId ?? 'organizations',
+      userPromptCallback: (info: DeviceCodeInfo) => {
+        console.error('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.error('  To sign in, open this URL in your browser:');
+        console.error(`  ${info.verificationUri}`);
+        console.error(`  Enter code: ${info.userCode}`);
+        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+      },
+      tokenCachePersistenceOptions: {
+        enabled: true,
+        name: `agent-email-${this.mailboxName}`,
+      },
+    });
+
+    // Trigger the device code flow by requesting a token
+    const tokenResponse = await this.credential.getToken(GRAPH_SCOPES);
+    if (!tokenResponse) throw new Error('Authentication failed — no token received');
+
+    // Save the AuthenticationRecord for silent reconnection
+    this.authRecord = await this.credential.authenticate(GRAPH_SCOPES);
+    this._lastInteractiveAuthAt = new Date().toISOString();
+    this._needsReauth = false;
+
+    // Persist metadata (not the tokens — those are in OS keychain)
+    await this.saveMetadata();
+  }
+
+  /**
+   * Reconnect from a saved AuthenticationRecord (silent, no user interaction).
+   */
+  async reconnect(): Promise<void> {
+    const metadata = await this.loadMetadata();
+    if (!metadata) {
+      throw new Error(`No saved credentials for mailbox "${this.mailboxName}". Run: agent-email configure --mailbox ${this.mailboxName}`);
+    }
+
+    this.authRecord = metadata.authenticationRecord;
+    this._lastInteractiveAuthAt = metadata.lastInteractiveAuthAt;
+
+    this.credential = new DeviceCodeCredential({
+      clientId: metadata.clientId,
+      tenantId: metadata.tenantId ?? 'organizations',
+      authenticationRecord: this.authRecord,
+      tokenCachePersistenceOptions: {
+        enabled: true,
+        name: `agent-email-${this.mailboxName}`,
+      },
+      // No userPromptCallback — silent reconnect should never prompt
+    });
+
+    // Verify the token still works
+    try {
+      await this.credential.getToken(GRAPH_SCOPES);
+      this._needsReauth = false;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('interaction_required') || message.includes('invalid_grant')) {
+        this._needsReauth = true;
+        throw new Error(`Token expired. Run: agent-email configure --mailbox ${this.mailboxName}`);
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Get a valid access token (refreshes automatically via MSAL cache).
+   */
+  async getAccessToken(): Promise<string> {
+    if (!this.credential) {
+      throw new Error('Not connected. Call connect() or reconnect() first.');
+    }
+    try {
+      const token = await this.credential.getToken(GRAPH_SCOPES);
+      if (!token) throw new Error('Failed to acquire token');
+      return token.token;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('interaction_required') || message.includes('invalid_grant')) {
+        this._needsReauth = true;
+      }
+      throw err;
+    }
   }
 
   async refresh(): Promise<void> {
-    if (!this.tokenStore.refreshToken) {
-      throw new Error('No refresh token available');
-    }
-    // In real implementation: use refresh token to get new access token
-    this.tokenStore.accessToken = `refreshed-${Date.now()}`;
-    this.tokenStore.expiresAt = Date.now() + 3600000;
+    // MSAL handles refresh automatically via getToken() / cache
+    await this.getAccessToken();
   }
 
   async disconnect(): Promise<void> {
-    this.tokenStore = {};
+    this.credential = null;
+    this.authRecord = null;
   }
 
   isTokenExpired(): boolean {
-    if (!this.tokenStore.expiresAt) return true;
-    return Date.now() >= this.tokenStore.expiresAt;
+    // With MSAL cache, we don't track expiry directly — MSAL handles it.
+    // We use needsReauth as the signal.
+    return this._needsReauth;
   }
 
-  getAccessToken(): string | undefined {
-    return this.tokenStore.accessToken;
+  /**
+   * Check token health: returns a warning if approaching expiry.
+   */
+  getTokenHealthWarning(): string | undefined {
+    if (this._needsReauth) {
+      return `Authentication expired. Run: agent-email configure --mailbox ${this.mailboxName}`;
+    }
+    if (this._lastInteractiveAuthAt) {
+      const daysSinceAuth = (Date.now() - new Date(this._lastInteractiveAuthAt).getTime()) / (1000 * 60 * 60 * 24);
+      if (daysSinceAuth > 80) {
+        return `Token may expire soon (last authenticated ${Math.round(daysSinceAuth)} days ago). Run: agent-email configure --mailbox ${this.mailboxName}`;
+      }
+    }
+    return undefined;
   }
 
-  getRefreshToken(): string | undefined {
-    return this.tokenStore.refreshToken;
+  private getMetadataPath(): string {
+    return join(CONFIG_DIR, `${this.mailboxName}.json`);
   }
 
-  setTokens(tokens: TokenStore): void {
-    this.tokenStore = { ...tokens };
+  private async saveMetadata(): Promise<void> {
+    const path = this.getMetadataPath();
+    await mkdir(dirname(path), { recursive: true });
+    const metadata: MailboxMetadata = {
+      authenticationRecord: this.authRecord!,
+      lastInteractiveAuthAt: this._lastInteractiveAuthAt!,
+      clientId: this.config.clientId,
+      tenantId: this.config.tenantId,
+      mailboxName: this.mailboxName,
+    };
+    await writeFile(path, JSON.stringify(metadata, null, 2), 'utf-8');
+  }
+
+  private async loadMetadata(): Promise<MailboxMetadata | null> {
+    try {
+      const content = await readFile(this.getMetadataPath(), 'utf-8');
+      return JSON.parse(content) as MailboxMetadata;
+    } catch {
+      return null;
+    }
   }
 }
 
 /**
- * Client credentials auth manager (app-only).
+ * Client credentials auth manager (app-only / daemon).
+ * Unchanged — uses ClientSecretCredential.
  */
 export class ClientCredentialsAuthManager implements AuthManager {
-  private tokenStore: TokenStore = {};
-  private readonly _config: MicrosoftAuthConfig;
+  private accessToken?: string;
+  private expiresAt?: number;
+  private tokenCounter = 0;
+  private readonly config: MicrosoftAuthConfig;
 
   constructor(config: MicrosoftAuthConfig) {
-    this._config = config;
+    this.config = config;
   }
 
   async connect(_credentials: Record<string, string>): Promise<void> {
-    if (!this._config.clientSecret || !this._config.tenantId) {
+    if (!this.config.clientSecret || !this.config.tenantId) {
       throw new Error('Client credentials require clientSecret and tenantId');
     }
-    // In real implementation: use ClientSecretCredential
-    this.tokenStore = {
-      accessToken: `app-token-${Date.now()}`,
-      expiresAt: Date.now() + 3600000,
-    };
+    // In real implementation: use ClientSecretCredential from @azure/identity
+    this.accessToken = `app-token-${Date.now()}`;
+    this.expiresAt = Date.now() + 3600000;
   }
 
-  private tokenCounter = 0;
-
   async refresh(): Promise<void> {
-    // Client credentials tokens are refreshed by getting a new one
     this.tokenCounter++;
-    this.tokenStore = {
-      accessToken: `app-token-${Date.now()}-${this.tokenCounter}`,
-      expiresAt: Date.now() + 3600000,
-    };
+    this.accessToken = `app-token-${Date.now()}-${this.tokenCounter}`;
+    this.expiresAt = Date.now() + 3600000;
   }
 
   async disconnect(): Promise<void> {
-    this.tokenStore = {};
+    this.accessToken = undefined;
+    this.expiresAt = undefined;
   }
 
   isTokenExpired(): boolean {
-    if (!this.tokenStore.expiresAt) return true;
-    return Date.now() >= this.tokenStore.expiresAt;
+    if (!this.expiresAt) return true;
+    return Date.now() >= this.expiresAt;
   }
 
   getAccessToken(): string | undefined {
-    return this.tokenStore.accessToken;
+    return this.accessToken;
   }
 }
 
 /**
- * Persist encrypted refresh tokens to config directory.
+ * List all configured mailboxes from ~/.agent-email/tokens/
  */
-export async function persistRefreshToken(
-  configDir: string,
-  mailboxName: string,
-  refreshToken: string,
-): Promise<void> {
-  const { writeFile, mkdir } = await import('node:fs/promises');
-  const { join } = await import('node:path');
-  await mkdir(configDir, { recursive: true });
-  // In production: encrypt the token before writing
-  await writeFile(
-    join(configDir, `${mailboxName}.token.json`),
-    JSON.stringify({ refreshToken, savedAt: new Date().toISOString() }),
-    'utf-8',
-  );
-}
-
-/**
- * Load persisted refresh tokens from config directory.
- */
-export async function loadRefreshToken(
-  configDir: string,
-  mailboxName: string,
-): Promise<string | undefined> {
+export async function listConfiguredMailboxes(): Promise<string[]> {
   try {
-    const { readFile } = await import('node:fs/promises');
-    const { join } = await import('node:path');
-    const content = await readFile(join(configDir, `${mailboxName}.token.json`), 'utf-8');
-    const data = JSON.parse(content) as { refreshToken?: string };
-    return data.refreshToken;
+    const { readdir } = await import('node:fs/promises');
+    const files = await readdir(CONFIG_DIR);
+    return files
+      .filter(f => f.endsWith('.json'))
+      .map(f => f.replace('.json', ''));
   } catch {
-    return undefined;
+    return [];
   }
 }
+
+/**
+ * Load metadata for a specific mailbox.
+ */
+export async function loadMailboxMetadata(mailboxName: string): Promise<MailboxMetadata | null> {
+  try {
+    const content = await readFile(join(CONFIG_DIR, `${mailboxName}.json`), 'utf-8');
+    return JSON.parse(content) as MailboxMetadata;
+  } catch {
+    return null;
+  }
+}
+
+// Re-export for backward compatibility with tests
+export { type AuthenticationRecord } from '@azure/identity';

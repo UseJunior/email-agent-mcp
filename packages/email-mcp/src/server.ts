@@ -136,10 +136,185 @@ function generateJsonSchema(schema: z.ZodType): Record<string, unknown> {
 
 /**
  * Run the MCP server on stdio.
+ * Checks for saved auth tokens and connects to real Graph API if available.
+ * Falls back to demo mode if no tokens found.
  */
 export async function runServer(): Promise<void> {
-  // In real implementation: use @modelcontextprotocol/sdk
-  console.error('[agent-email] MCP server started');
+  const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
+  const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
+  const { ListToolsRequestSchema, CallToolRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
+
+  // Try to load real provider from saved tokens
+  let actions: EmailActionDef[];
+  let actionCtx: unknown = {};
+
+  try {
+    const { listConfiguredMailboxes, DelegatedAuthManager, GRAPH_SCOPES } = await import('@usejunior/provider-microsoft');
+    const { RealGraphApiClient, GraphEmailProvider } = await import('@usejunior/provider-microsoft');
+    const mailboxes = await listConfiguredMailboxes();
+
+    if (mailboxes.length > 0) {
+      const mailboxName = mailboxes[0]!;
+      const { loadMailboxMetadata } = await import('@usejunior/provider-microsoft');
+      const metadata = await loadMailboxMetadata(mailboxName);
+
+      if (metadata) {
+        const auth = new DelegatedAuthManager(
+          { mode: 'delegated', clientId: metadata.clientId, tenantId: metadata.tenantId },
+          mailboxName,
+        );
+        await auth.reconnect();
+        const client = new RealGraphApiClient(() => auth.getAccessToken());
+        const provider = new GraphEmailProvider(client);
+
+        // Build real actions from the provider
+        actions = buildRealActions(provider, auth);
+        console.error(`[agent-email] Connected to mailbox "${mailboxName}" (${metadata.clientId})`);
+      } else {
+        actions = buildDemoActions();
+        console.error('[agent-email] No valid metadata found — running in demo mode');
+      }
+    } else {
+      actions = buildDemoActions();
+      console.error('[agent-email] No configured mailboxes — running in demo mode');
+      console.error('[agent-email] Run: agent-email configure --mailbox <name> --provider microsoft');
+    }
+  } catch (err) {
+    actions = buildDemoActions();
+    console.error(`[agent-email] Could not connect to real provider: ${err instanceof Error ? err.message : err}`);
+    console.error('[agent-email] Running in demo mode');
+  }
+
+  const server = new Server(
+    { name: 'agent-email', version: '0.1.0' },
+    { capabilities: { tools: {} } },
+  );
+
+  const tools = actionsToMcpTools(actions);
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    try {
+      return await handleToolCall(actions, actionCtx, name, (args ?? {}) as Record<string, unknown>);
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  });
+
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error(`[agent-email] MCP server started on stdio (${tools.length} tools)`);
+}
+
+// Import z lazily for action definitions
+function buildRealActions(provider: { listMessages: Function; getMessage: Function; searchMessages: Function }, auth: { getTokenHealthWarning: () => string | undefined }): EmailActionDef[] {
+  const { z } = require('zod') as typeof import('zod');
+  return [
+    {
+      name: 'list_emails',
+      description: 'List recent emails with filtering by unread status, folder, sender, and limit',
+      input: z.object({ mailbox: z.string().optional(), unread: z.boolean().optional(), limit: z.number().optional(), folder: z.string().optional() }),
+      output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean() })) }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      run: async (_ctx, input) => {
+        const inp = input as { unread?: boolean; limit?: number; folder?: string };
+        const messages = await provider.listMessages({ unread: inp.unread, limit: inp.limit ?? 25, folder: inp.folder ?? 'inbox' });
+        return {
+          emails: (messages as Array<{ id: string; subject: string; from: { email: string; name?: string }; receivedAt: string; isRead: boolean; hasAttachments: boolean }>).map(m => ({
+            id: m.id,
+            subject: m.subject,
+            from: m.from.name ? `${m.from.name} <${m.from.email}>` : m.from.email,
+            receivedAt: m.receivedAt,
+            isRead: m.isRead,
+            hasAttachments: m.hasAttachments,
+          })),
+        };
+      },
+    },
+    {
+      name: 'read_email',
+      description: 'Read the full content of an email by ID, transformed to token-efficient markdown',
+      input: z.object({ id: z.string(), mailbox: z.string().optional() }),
+      output: z.object({ id: z.string(), subject: z.string(), from: z.string(), to: z.array(z.string()), body: z.string(), receivedAt: z.string() }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      run: async (_ctx, input) => {
+        const inp = input as { id: string };
+        const msg = await provider.getMessage(inp.id) as { id: string; subject: string; from: { email: string; name?: string }; to: Array<{ email: string; name?: string }>; receivedAt: string; body?: string; bodyHtml?: string };
+        return {
+          id: msg.id,
+          subject: msg.subject,
+          from: msg.from.name ? `${msg.from.name} <${msg.from.email}>` : msg.from.email,
+          to: msg.to.map(a => a.name ? `${a.name} <${a.email}>` : a.email),
+          body: msg.bodyHtml ?? msg.body ?? '',
+          receivedAt: msg.receivedAt,
+        };
+      },
+    },
+    {
+      name: 'search_emails',
+      description: 'Search emails using full-text query across one or all mailboxes',
+      input: z.object({ query: z.string(), mailbox: z.string().optional(), limit: z.number().optional() }),
+      output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean() })) }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      run: async (_ctx, input) => {
+        const inp = input as { query: string };
+        const results = await provider.searchMessages(inp.query) as Array<{ id: string; subject: string; from: { email: string; name?: string }; receivedAt: string; isRead: boolean; hasAttachments: boolean }>;
+        return {
+          emails: results.map(m => ({
+            id: m.id,
+            subject: m.subject,
+            from: m.from.name ? `${m.from.name} <${m.from.email}>` : m.from.email,
+            receivedAt: m.receivedAt,
+            isRead: m.isRead,
+            hasAttachments: m.hasAttachments,
+          })),
+        };
+      },
+    },
+    {
+      name: 'get_mailbox_status',
+      description: 'Get mailbox connection status, unread count, and warnings',
+      input: z.object({ mailbox: z.string().optional() }),
+      output: z.object({ name: z.string(), provider: z.string(), status: z.string(), isDefault: z.boolean(), warnings: z.array(z.string()) }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      run: async () => {
+        const warnings: string[] = [];
+        const healthWarning = auth.getTokenHealthWarning();
+        if (healthWarning) warnings.push(healthWarning);
+        return { name: 'default', provider: 'microsoft', status: 'connected', isDefault: true, warnings };
+      },
+    },
+  ];
+}
+
+function buildDemoActions(): EmailActionDef[] {
+  const { z } = require('zod') as typeof import('zod');
+  return [
+    {
+      name: 'list_emails', description: 'List recent emails', input: z.object({ unread: z.boolean().optional(), limit: z.number().optional(), folder: z.string().optional() }), output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean() })) }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      run: async () => ({ emails: [{ id: 'demo-1', subject: 'Demo mode — run agent-email configure to connect', from: 'system@agent-email.dev', receivedAt: new Date().toISOString(), isRead: false, hasAttachments: false }] }),
+    },
+    {
+      name: 'read_email', description: 'Read email by ID', input: z.object({ id: z.string() }), output: z.object({ id: z.string(), subject: z.string(), from: z.string(), to: z.array(z.string()), body: z.string(), receivedAt: z.string() }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      run: async (_ctx, input) => ({ id: (input as {id:string}).id, subject: 'Demo mode', from: 'system@agent-email.dev', to: ['user@example.com'], body: 'No mailbox configured. Run: agent-email configure --mailbox <name> --provider microsoft', receivedAt: new Date().toISOString() }),
+    },
+    {
+      name: 'search_emails', description: 'Search emails', input: z.object({ query: z.string() }), output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean() })) }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      run: async () => ({ emails: [] }),
+    },
+    {
+      name: 'get_mailbox_status', description: 'Get mailbox status', input: z.object({ mailbox: z.string().optional() }), output: z.object({ name: z.string(), provider: z.string(), status: z.string(), isDefault: z.boolean(), warnings: z.array(z.string()) }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      run: async () => ({ name: 'none', provider: 'none', status: 'not configured', isDefault: false, warnings: ['No mailbox configured. Run: agent-email configure --mailbox <name> --provider microsoft'] }),
+    },
+  ];
 }
 
 /**
