@@ -11,7 +11,7 @@ async function main() {
   // Launch agent-email MCP server as a child process
   const transport = new StdioClientTransport({
     command: 'npx',
-    args: ['tsx', 'packages/email-mcp/src/mcp-serve.ts'],
+    args: ['tsx', 'packages/email-mcp/src/serve-entry.ts'],
   });
 
   const client = new Client(
@@ -45,9 +45,10 @@ async function main() {
     }
     console.log();
 
-    // Step 4: Call read_email
-    console.log('4️⃣  Calling read_email {id: "demo-1"}...');
-    const readResult = await client.callTool({ name: 'read_email', arguments: { id: 'demo-1' } });
+    // Step 4: Call read_email on the first email from the list
+    const firstEmailId = listData.emails[0]?.id ?? 'demo-1';
+    console.log(`4️⃣  Calling read_email {id: "${firstEmailId}"}...`);
+    const readResult = await client.callTool({ name: 'read_email', arguments: { id: firstEmailId } });
     const readData = JSON.parse(readResult.content[0].text);
     console.log(`   ✅ Read email: "${readData.subject}"`);
     console.log(`      From: ${readData.from}`);

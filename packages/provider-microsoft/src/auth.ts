@@ -69,6 +69,7 @@ export class DelegatedAuthManager implements AuthManager {
       clientId: this.config.clientId,
       tenantId: this.config.tenantId,
       cacheName: this.cacheName,
+      disableAutomaticAuthentication: true, // Force interactive in connect()
       userPromptCallback: (info: DeviceCodeInfo) => {
         console.error('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.error('  To sign in, open this URL in your browser:');
@@ -191,12 +192,13 @@ export class DelegatedAuthManager implements AuthManager {
     cacheName: string;
     authenticationRecord?: AuthenticationRecord;
     userPromptCallback?: (info: DeviceCodeInfo) => void;
+    disableAutomaticAuthentication?: boolean;
   }): DeviceCodeCredential {
     return new DeviceCodeCredential({
       clientId: options.clientId,
       tenantId: options.tenantId ?? 'organizations',
       authenticationRecord: options.authenticationRecord,
-      disableAutomaticAuthentication: true,
+      disableAutomaticAuthentication: options.disableAutomaticAuthentication ?? false,
       userPromptCallback: options.userPromptCallback,
       tokenCachePersistenceOptions: {
         enabled: true,

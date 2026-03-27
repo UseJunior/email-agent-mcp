@@ -168,19 +168,19 @@ export async function runServer(): Promise<void> {
         const provider = new GraphEmailProvider(client);
 
         // Build real actions from the provider
-        actions = buildRealActions(provider, auth);
+        actions = await buildRealActions(provider, auth);
         console.error(`[agent-email] Connected to mailbox "${mailboxName}" (${metadata.clientId})`);
       } else {
-        actions = buildDemoActions();
+        actions = await buildDemoActions();
         console.error('[agent-email] No valid metadata found — running in demo mode');
       }
     } else {
-      actions = buildDemoActions();
+      actions = await buildDemoActions();
       console.error('[agent-email] No configured mailboxes — running in demo mode');
       console.error('[agent-email] Run: agent-email configure --mailbox <name> --provider microsoft');
     }
   } catch (err) {
-    actions = buildDemoActions();
+    actions = await buildDemoActions();
     console.error(`[agent-email] Could not connect to real provider: ${err instanceof Error ? err.message : err}`);
     console.error('[agent-email] Running in demo mode');
   }
@@ -212,8 +212,8 @@ export async function runServer(): Promise<void> {
 }
 
 // Import z lazily for action definitions
-function buildRealActions(provider: { listMessages: Function; getMessage: Function; searchMessages: Function }, auth: { getTokenHealthWarning: () => string | undefined }): EmailActionDef[] {
-  const { z } = require('zod') as typeof import('zod');
+async function buildRealActions(provider: { listMessages: Function; getMessage: Function; searchMessages: Function }, auth: { getTokenHealthWarning: () => string | undefined }): Promise<EmailActionDef[]> {
+  const { z } = await import('zod');
   return [
     {
       name: 'list_emails',
@@ -292,8 +292,8 @@ function buildRealActions(provider: { listMessages: Function; getMessage: Functi
   ];
 }
 
-function buildDemoActions(): EmailActionDef[] {
-  const { z } = require('zod') as typeof import('zod');
+async function buildDemoActions(): Promise<EmailActionDef[]> {
+  const { z } = await import('zod');
   return [
     {
       name: 'list_emails', description: 'List recent emails', input: z.object({ unread: z.boolean().optional(), limit: z.number().optional(), folder: z.string().optional() }), output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean() })) }),

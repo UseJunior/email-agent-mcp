@@ -167,7 +167,8 @@ async function runConfigure(opts: CliOptions): Promise<number> {
       console.error(`✅ Connected as: ${profile.displayName ?? 'Unknown'} (${profile.mail ?? 'no email'})`);
       console.error(`   Mailbox "${mailboxName}" saved to ~/.agent-email/tokens/${mailboxName}.json`);
       console.error('');
-      console.error('You can now run: agent-email serve');
+      console.error('To start the MCP server, run:');
+      console.error('   npx @usejunior/agent-email serve');
     } else {
       console.error('');
       console.error(`⚠️  Authentication succeeded but profile fetch failed (${resp.status})`);
