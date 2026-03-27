@@ -205,3 +205,14 @@ OPTIONS:
 export function getNemoClawEgressDomains(): string[] {
   return [...NEMOCLAW_EGRESS_DOMAINS];
 }
+
+// Auto-execute when run directly (not imported as a module in tests)
+const isDirectRun = process.argv[1]?.endsWith('cli.ts') || process.argv[1]?.endsWith('cli.js');
+if (isDirectRun) {
+  runCli(process.argv.slice(2)).then(code => {
+    process.exit(code);
+  }).catch(err => {
+    console.error('Fatal:', err);
+    process.exit(1);
+  });
+}

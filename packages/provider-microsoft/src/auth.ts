@@ -2,6 +2,7 @@
 import type { AuthManager } from '@usejunior/email-core';
 import { DeviceCodeCredential, useIdentityPlugin, type DeviceCodeInfo, type AuthenticationRecord } from '@azure/identity';
 import { cachePersistencePlugin } from '@azure/identity-cache-persistence';
+import { randomUUID } from 'node:crypto';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
@@ -10,6 +11,13 @@ import { homedir } from 'node:os';
 useIdentityPlugin(cachePersistencePlugin);
 
 export const GRAPH_SCOPES = ['Mail.Read', 'Mail.Send', 'User.Read', 'offline_access'];
+// Full URL scopes for device code flow (ensures correct audience in the token)
+export const GRAPH_SCOPES_FULL = [
+  'https://graph.microsoft.com/Mail.Read',
+  'https://graph.microsoft.com/Mail.Send',
+  'https://graph.microsoft.com/User.Read',
+  'offline_access',
+];
 const CONFIG_DIR = join(homedir(), '.agent-email', 'tokens');
 
 export interface MicrosoftAuthConfig {
@@ -21,6 +29,7 @@ export interface MicrosoftAuthConfig {
 
 export interface MailboxMetadata {
   authenticationRecord: AuthenticationRecord;
+  cacheName?: string;
   lastInteractiveAuthAt: string;
   clientId: string;
   tenantId?: string;
@@ -36,6 +45,7 @@ export interface MailboxMetadata {
 export class DelegatedAuthManager implements AuthManager {
   private credential: DeviceCodeCredential | null = null;
   private authRecord: AuthenticationRecord | null = null;
+  private cacheName: string | null = null;
   private readonly config: MicrosoftAuthConfig;
   private readonly mailboxName: string;
   private _needsReauth = false;
@@ -54,9 +64,11 @@ export class DelegatedAuthManager implements AuthManager {
    * Call this from `agent-email configure`, NOT from MCP serve.
    */
   async connect(_credentials: Record<string, string>): Promise<void> {
-    this.credential = new DeviceCodeCredential({
+    this.cacheName = this.createCacheName();
+    this.credential = this.createPersistentCredential({
       clientId: this.config.clientId,
-      tenantId: this.config.tenantId ?? 'organizations',
+      tenantId: this.config.tenantId,
+      cacheName: this.cacheName,
       userPromptCallback: (info: DeviceCodeInfo) => {
         console.error('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.error('  To sign in, open this URL in your browser:');
@@ -64,22 +76,14 @@ export class DelegatedAuthManager implements AuthManager {
         console.error(`  Enter code: ${info.userCode}`);
         console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
       },
-      tokenCachePersistenceOptions: {
-        enabled: true,
-        name: `agent-email-${this.mailboxName}`,
-      },
     });
 
-    // Trigger the device code flow by requesting a token
-    const tokenResponse = await this.credential.getToken(GRAPH_SCOPES);
-    if (!tokenResponse) throw new Error('Authentication failed — no token received');
-
-    // Save the AuthenticationRecord for silent reconnection
-    this.authRecord = await this.credential.authenticate(GRAPH_SCOPES);
+    this.authRecord = (await this.credential.authenticate(GRAPH_SCOPES_FULL)) ?? null;
+    if (!this.authRecord) throw new Error('Authentication failed — no record received');
     this._lastInteractiveAuthAt = new Date().toISOString();
     this._needsReauth = false;
 
-    // Persist metadata (not the tokens — those are in OS keychain)
+    // Persist metadata (not the tokens — those are in OS keychain via MSAL)
     await this.saveMetadata();
   }
 
@@ -93,22 +97,18 @@ export class DelegatedAuthManager implements AuthManager {
     }
 
     this.authRecord = metadata.authenticationRecord;
+    this.cacheName = metadata.cacheName ?? this.getLegacyCacheName();
     this._lastInteractiveAuthAt = metadata.lastInteractiveAuthAt;
-
-    this.credential = new DeviceCodeCredential({
+    this.credential = this.createPersistentCredential({
       clientId: metadata.clientId,
-      tenantId: metadata.tenantId ?? 'organizations',
+      tenantId: metadata.tenantId,
       authenticationRecord: this.authRecord,
-      tokenCachePersistenceOptions: {
-        enabled: true,
-        name: `agent-email-${this.mailboxName}`,
-      },
-      // No userPromptCallback — silent reconnect should never prompt
+      cacheName: this.cacheName,
     });
 
     // Verify the token still works
     try {
-      await this.credential.getToken(GRAPH_SCOPES);
+      await this.credential.getToken(GRAPH_SCOPES_FULL);
       this._needsReauth = false;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -128,7 +128,7 @@ export class DelegatedAuthManager implements AuthManager {
       throw new Error('Not connected. Call connect() or reconnect() first.');
     }
     try {
-      const token = await this.credential.getToken(GRAPH_SCOPES);
+      const token = await this.credential.getToken(GRAPH_SCOPES_FULL);
       if (!token) throw new Error('Failed to acquire token');
       return token.token;
     } catch (err) {
@@ -148,6 +148,7 @@ export class DelegatedAuthManager implements AuthManager {
   async disconnect(): Promise<void> {
     this.credential = null;
     this.authRecord = null;
+    this.cacheName = null;
   }
 
   isTokenExpired(): boolean {
@@ -176,11 +177,41 @@ export class DelegatedAuthManager implements AuthManager {
     return join(CONFIG_DIR, `${this.mailboxName}.json`);
   }
 
+  private getLegacyCacheName(): string {
+    return `agent-email-${this.mailboxName}`;
+  }
+
+  private createCacheName(): string {
+    return `${this.getLegacyCacheName()}-${randomUUID()}`;
+  }
+
+  private createPersistentCredential(options: {
+    clientId: string;
+    tenantId?: string;
+    cacheName: string;
+    authenticationRecord?: AuthenticationRecord;
+    userPromptCallback?: (info: DeviceCodeInfo) => void;
+  }): DeviceCodeCredential {
+    return new DeviceCodeCredential({
+      clientId: options.clientId,
+      tenantId: options.tenantId ?? 'organizations',
+      authenticationRecord: options.authenticationRecord,
+      disableAutomaticAuthentication: true,
+      userPromptCallback: options.userPromptCallback,
+      tokenCachePersistenceOptions: {
+        enabled: true,
+        name: options.cacheName,
+        unsafeAllowUnencryptedStorage: process.platform === 'linux',
+      },
+    });
+  }
+
   private async saveMetadata(): Promise<void> {
     const path = this.getMetadataPath();
     await mkdir(dirname(path), { recursive: true });
     const metadata: MailboxMetadata = {
       authenticationRecord: this.authRecord!,
+      cacheName: this.cacheName ?? undefined,
       lastInteractiveAuthAt: this._lastInteractiveAuthAt!,
       clientId: this.config.clientId,
       tenantId: this.config.tenantId,

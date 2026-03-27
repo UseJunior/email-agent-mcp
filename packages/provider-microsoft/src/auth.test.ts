@@ -1,16 +1,29 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { DelegatedAuthManager, ClientCredentialsAuthManager, listConfiguredMailboxes, loadMailboxMetadata } from './auth.js';
+import { DelegatedAuthManager, ClientCredentialsAuthManager } from './auth.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdir, writeFile, rm } from 'node:fs/promises';
 
+const mockDeviceCodeState = vi.hoisted(() => ({
+  authenticateCalls: 0,
+  getTokenCalls: 0,
+  constructorOptions: [] as Record<string, unknown>[],
+}));
+
 // Mock @azure/identity to avoid real Azure calls in unit tests
 vi.mock('@azure/identity', () => {
   class MockDeviceCodeCredential {
+    constructor(options: Record<string, unknown> = {}) {
+      mockDeviceCodeState.constructorOptions.push(options);
+    }
+
     async getToken() {
+      mockDeviceCodeState.getTokenCalls++;
       return { token: 'mock-access-token', expiresOnTimestamp: Date.now() + 3600000 };
     }
+
     async authenticate() {
+      mockDeviceCodeState.authenticateCalls++;
       return { authority: 'https://login.microsoftonline.com', homeAccountId: 'test', clientId: 'test', tenantId: 'test' };
     }
   }
@@ -25,6 +38,12 @@ vi.mock('@azure/identity-cache-persistence', () => ({
 }));
 
 describe('provider-microsoft/Delegated OAuth Authentication', () => {
+  beforeEach(() => {
+    mockDeviceCodeState.authenticateCalls = 0;
+    mockDeviceCodeState.getTokenCalls = 0;
+    mockDeviceCodeState.constructorOptions.length = 0;
+  });
+
   it('Scenario: Device code flow', async () => {
     const auth = new DelegatedAuthManager(
       { mode: 'delegated', clientId: 'test-client-id' },
@@ -33,11 +52,54 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
 
     // connect() triggers device code flow (mocked) and saves AuthenticationRecord
     await auth.connect({});
+    expect(mockDeviceCodeState.authenticateCalls).toBe(1);
+    expect(mockDeviceCodeState.getTokenCalls).toBe(0);
+    expect(mockDeviceCodeState.constructorOptions).toHaveLength(1);
+
+    const [credentialOptions] = mockDeviceCodeState.constructorOptions;
+    const persistenceOptions = credentialOptions?.tokenCachePersistenceOptions as { enabled?: boolean; name?: string } | undefined;
+    expect(credentialOptions?.disableAutomaticAuthentication).toBe(true);
+    expect(persistenceOptions?.enabled).toBe(true);
+    expect(persistenceOptions?.name).toMatch(/^agent-email-test-mailbox-/);
 
     // Should be able to get an access token after connecting
     const token = await auth.getAccessToken();
     expect(token).toBe('mock-access-token');
+    expect(mockDeviceCodeState.getTokenCalls).toBe(1);
     expect(auth.isTokenExpired()).toBe(false);
+    expect(auth.needsReauth).toBe(false);
+  });
+
+  it('Scenario: Silent reconnect uses persisted cache name', async () => {
+    const auth = new DelegatedAuthManager(
+      { mode: 'delegated', clientId: 'test-client-id' },
+      'work',
+    );
+
+    vi.spyOn(auth as unknown as { loadMetadata: () => Promise<unknown> }, 'loadMetadata').mockResolvedValue({
+      authenticationRecord: {
+        authority: 'https://login.microsoftonline.com',
+        homeAccountId: 'test-home-id',
+        clientId: 'test-client-id',
+        tenantId: 'test-tenant',
+      },
+      cacheName: 'agent-email-work-cache-id',
+      lastInteractiveAuthAt: new Date().toISOString(),
+      clientId: 'test-client-id',
+      tenantId: 'test-tenant',
+      mailboxName: 'work',
+    });
+
+    await auth.reconnect();
+
+    expect(mockDeviceCodeState.authenticateCalls).toBe(0);
+    expect(mockDeviceCodeState.getTokenCalls).toBe(1);
+    expect(mockDeviceCodeState.constructorOptions).toHaveLength(1);
+
+    const [credentialOptions] = mockDeviceCodeState.constructorOptions;
+    const persistenceOptions = credentialOptions?.tokenCachePersistenceOptions as { enabled?: boolean; name?: string } | undefined;
+    expect(credentialOptions?.disableAutomaticAuthentication).toBe(true);
+    expect(persistenceOptions?.name).toBe('agent-email-work-cache-id');
     expect(auth.needsReauth).toBe(false);
   });
 
@@ -62,10 +124,7 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
 
     await writeFile(join(tokensDir, 'work.json'), JSON.stringify(metadata), 'utf-8');
 
-    // Load it back (simulating server restart)
-    const loaded = await loadMailboxMetadata('work');
-    // Note: loadMailboxMetadata uses ~/.agent-email/tokens/ — test with custom dir via writeFile
-    // For this test, verify the format is correct by reading directly
+    // Verify the saved metadata format directly
     const { readFile } = await import('node:fs/promises');
     const content = JSON.parse(await readFile(join(tokensDir, 'work.json'), 'utf-8'));
     expect(content.authenticationRecord).toBeDefined();

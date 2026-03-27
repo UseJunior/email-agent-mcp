@@ -149,7 +149,7 @@ export async function runServer(): Promise<void> {
   let actionCtx: unknown = {};
 
   try {
-    const { listConfiguredMailboxes, DelegatedAuthManager, GRAPH_SCOPES } = await import('@usejunior/provider-microsoft');
+    const { listConfiguredMailboxes, DelegatedAuthManager } = await import('@usejunior/provider-microsoft');
     const { RealGraphApiClient, GraphEmailProvider } = await import('@usejunior/provider-microsoft');
     const mailboxes = await listConfiguredMailboxes();
 
@@ -193,7 +193,8 @@ export async function runServer(): Promise<void> {
   const tools = actionsToMcpTools(actions);
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  server.setRequestHandler(CallToolRequestSchema, (async (request: any) => {
     const { name, arguments: args } = request.params;
     try {
       return await handleToolCall(actions, actionCtx, name, (args ?? {}) as Record<string, unknown>);
@@ -203,7 +204,7 @@ export async function runServer(): Promise<void> {
         isError: true,
       };
     }
-  });
+  }) as never);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

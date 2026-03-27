@@ -102,7 +102,8 @@ async function main(): Promise<void> {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 
   // Register tools/call handler
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  server.setRequestHandler(CallToolRequestSchema, (async (request: any) => {
     const { name, arguments: args } = request.params;
     try {
       return await handleToolCall(demoActions, {}, name, (args ?? {}) as Record<string, unknown>);
@@ -112,7 +113,7 @@ async function main(): Promise<void> {
         isError: true,
       };
     }
-  });
+  }) as never);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
