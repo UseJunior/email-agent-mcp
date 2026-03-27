@@ -34,6 +34,20 @@ export interface MailboxMetadata {
   clientId: string;
   tenantId?: string;
   mailboxName: string;
+  emailAddress?: string;
+}
+
+/**
+ * Convert an email address to a filesystem-safe key.
+ * Lowercase, replace `@` with `-at-`, replace `.` with `-`, strip anything not [a-z0-9-].
+ * Example: `steven@usejunior.com` → `steven-at-usejunior-com`
+ */
+export function toFilesystemSafeKey(email: string): string {
+  return email
+    .toLowerCase()
+    .replace(/@/g, '-at-')
+    .replace(/\./g, '-')
+    .replace(/[^a-z0-9-]/g, '');
 }
 
 /**
@@ -50,10 +64,21 @@ export class DelegatedAuthManager implements AuthManager {
   private readonly mailboxName: string;
   private _needsReauth = false;
   private _lastInteractiveAuthAt: string | null = null;
+  private _emailAddress: string | null = null;
 
   constructor(config: MicrosoftAuthConfig, mailboxName = 'default') {
     this.config = config;
     this.mailboxName = mailboxName;
+  }
+
+  /** Set the email address for this mailbox (called after profile fetch during configure). */
+  setEmailAddress(email: string): void {
+    this._emailAddress = email;
+  }
+
+  /** Get the email address for this mailbox (may be null if not yet fetched). */
+  get emailAddress(): string | null {
+    return this._emailAddress;
   }
 
   get needsReauth(): boolean { return this._needsReauth; }
@@ -100,6 +125,7 @@ export class DelegatedAuthManager implements AuthManager {
     this.authRecord = metadata.authenticationRecord;
     this.cacheName = metadata.cacheName ?? this.getLegacyCacheName();
     this._lastInteractiveAuthAt = metadata.lastInteractiveAuthAt;
+    this._emailAddress = metadata.emailAddress ?? null;
     this.credential = this.createPersistentCredential({
       clientId: metadata.clientId,
       tenantId: metadata.tenantId,
@@ -175,6 +201,9 @@ export class DelegatedAuthManager implements AuthManager {
   }
 
   private getMetadataPath(): string {
+    if (this._emailAddress) {
+      return join(CONFIG_DIR, `${toFilesystemSafeKey(this._emailAddress)}.json`);
+    }
     return join(CONFIG_DIR, `${this.mailboxName}.json`);
   }
 
@@ -208,7 +237,7 @@ export class DelegatedAuthManager implements AuthManager {
     });
   }
 
-  private async saveMetadata(): Promise<void> {
+  async saveMetadata(): Promise<void> {
     const path = this.getMetadataPath();
     await mkdir(dirname(path), { recursive: true });
     const metadata: MailboxMetadata = {
@@ -218,17 +247,15 @@ export class DelegatedAuthManager implements AuthManager {
       clientId: this.config.clientId,
       tenantId: this.config.tenantId,
       mailboxName: this.mailboxName,
+      emailAddress: this._emailAddress ?? undefined,
     };
     await writeFile(path, JSON.stringify(metadata, null, 2), 'utf-8');
   }
 
   private async loadMetadata(): Promise<MailboxMetadata | null> {
-    try {
-      const content = await readFile(this.getMetadataPath(), 'utf-8');
-      return JSON.parse(content) as MailboxMetadata;
-    } catch {
-      return null;
-    }
+    // Use the public loadMailboxMetadata which handles both old-style (name-based)
+    // and new-style (email-based) filenames, plus fallback search
+    return loadMailboxMetadata(this.mailboxName);
   }
 }
 
@@ -278,6 +305,7 @@ export class ClientCredentialsAuthManager implements AuthManager {
 
 /**
  * List all configured mailboxes from ~/.agent-email/tokens/
+ * Returns mailbox names (filename stems) for backward compatibility.
  */
 export async function listConfiguredMailboxes(): Promise<string[]> {
   try {
@@ -292,15 +320,62 @@ export async function listConfiguredMailboxes(): Promise<string[]> {
 }
 
 /**
- * Load metadata for a specific mailbox.
+ * List all configured mailboxes with their full metadata.
  */
-export async function loadMailboxMetadata(mailboxName: string): Promise<MailboxMetadata | null> {
+export async function listConfiguredMailboxesWithMetadata(): Promise<MailboxMetadata[]> {
+  const names = await listConfiguredMailboxes();
+  const results: MailboxMetadata[] = [];
+  for (const name of names) {
+    const metadata = await loadMailboxMetadata(name);
+    if (metadata) results.push(metadata);
+  }
+  return results;
+}
+
+/**
+ * Load metadata for a specific mailbox.
+ * Accepts a mailbox name (filename stem), an email address, or a filesystem-safe key.
+ */
+export async function loadMailboxMetadata(identifier: string): Promise<MailboxMetadata | null> {
+  // Try direct filename match first (e.g., "work" → "work.json", or safe key → safe key.json)
   try {
-    const content = await readFile(join(CONFIG_DIR, `${mailboxName}.json`), 'utf-8');
+    const content = await readFile(join(CONFIG_DIR, `${identifier}.json`), 'utf-8');
     return JSON.parse(content) as MailboxMetadata;
   } catch {
-    return null;
+    // Not found by direct name
   }
+
+  // Try as email address: convert to filesystem-safe key
+  if (identifier.includes('@')) {
+    try {
+      const safeKey = toFilesystemSafeKey(identifier);
+      const content = await readFile(join(CONFIG_DIR, `${safeKey}.json`), 'utf-8');
+      return JSON.parse(content) as MailboxMetadata;
+    } catch {
+      // Not found
+    }
+  }
+
+  // Fall back: search all metadata files for matching mailboxName or emailAddress
+  try {
+    const { readdir } = await import('node:fs/promises');
+    const files = await readdir(CONFIG_DIR);
+    for (const file of files.filter(f => f.endsWith('.json'))) {
+      try {
+        const content = await readFile(join(CONFIG_DIR, file), 'utf-8');
+        const metadata = JSON.parse(content) as MailboxMetadata;
+        if (metadata.mailboxName === identifier || metadata.emailAddress === identifier) {
+          return metadata;
+        }
+      } catch {
+        // Skip unreadable files
+      }
+    }
+  } catch {
+    // No config dir
+  }
+
+  return null;
 }
 
 // Re-export for backward compatibility with tests

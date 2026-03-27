@@ -147,7 +147,7 @@ async function runConfigure(opts: CliOptions): Promise<number> {
   console.error('');
 
   try {
-    const { DelegatedAuthManager } = await import('@usejunior/provider-microsoft');
+    const { DelegatedAuthManager, toFilesystemSafeKey } = await import('@usejunior/provider-microsoft');
     const auth = new DelegatedAuthManager(
       { mode: 'delegated', clientId },
       mailboxName,
@@ -156,16 +156,38 @@ async function runConfigure(opts: CliOptions): Promise<number> {
     // This triggers device code flow — user sees URL + code on stderr
     await auth.connect({});
 
-    // Test connection by getting user profile
+    // Test connection by getting user profile and extract email address
     const token = await auth.getAccessToken();
     const resp = await fetch('https://graph.microsoft.com/v1.0/me', {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (resp.ok) {
-      const profile = await resp.json() as { displayName?: string; mail?: string };
-      console.error('');
-      console.error(`✅ Connected as: ${profile.displayName ?? 'Unknown'} (${profile.mail ?? 'no email'})`);
-      console.error(`   Mailbox "${mailboxName}" saved to ~/.agent-email/tokens/${mailboxName}.json`);
+      const profile = await resp.json() as { displayName?: string; mail?: string; userPrincipalName?: string };
+      const emailAddress = profile.mail ?? profile.userPrincipalName;
+
+      if (emailAddress) {
+        // Set email on the auth manager and re-save metadata with email-based filename
+        auth.setEmailAddress(emailAddress);
+        await auth.saveMetadata();
+        const safeKey = toFilesystemSafeKey(emailAddress);
+
+        // Clean up the old mailbox-name-based file if the new filename is different
+        if (safeKey !== mailboxName) {
+          const { join } = await import('node:path');
+          const { homedir } = await import('node:os');
+          const { unlink } = await import('node:fs/promises');
+          const oldPath = join(homedir(), '.agent-email', 'tokens', `${mailboxName}.json`);
+          try { await unlink(oldPath); } catch { /* may not exist */ }
+        }
+
+        console.error('');
+        console.error(`✅ Connected as: ${profile.displayName ?? 'Unknown'} (${emailAddress})`);
+        console.error(`   Mailbox saved to ~/.agent-email/tokens/${safeKey}.json`);
+      } else {
+        console.error('');
+        console.error(`✅ Connected as: ${profile.displayName ?? 'Unknown'} (no email found)`);
+        console.error(`   Mailbox "${mailboxName}" saved to ~/.agent-email/tokens/${mailboxName}.json`);
+      }
       console.error('');
       console.error('To start the MCP server, run:');
       console.error('   npx @usejunior/agent-email serve');

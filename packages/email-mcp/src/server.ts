@@ -167,9 +167,11 @@ export async function runServer(): Promise<void> {
         const client = new RealGraphApiClient(() => auth.getAccessToken());
         const provider = new GraphEmailProvider(client);
 
+        const displayName = metadata.emailAddress ?? mailboxName;
+
         // Build real actions from the provider
         actions = await buildRealActions(provider, auth);
-        console.error(`[agent-email] Connected to mailbox "${mailboxName}" (${metadata.clientId})`);
+        console.error(`[agent-email] Connected to mailbox "${displayName}" (${metadata.clientId})`);
       } else {
         actions = await buildDemoActions();
         console.error('[agent-email] No valid metadata found — running in demo mode');

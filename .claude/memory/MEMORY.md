@@ -1,0 +1,1 @@
+- [Thoroughness](feedback_thoroughness.md) — Front-load hard work, no shortcuts, test everything E2E, audit stubs before claiming done

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { DelegatedAuthManager, ClientCredentialsAuthManager } from './auth.js';
+import { DelegatedAuthManager, ClientCredentialsAuthManager, toFilesystemSafeKey } from './auth.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdir, writeFile, rm } from 'node:fs/promises';
@@ -98,7 +98,8 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
 
     const [credentialOptions] = mockDeviceCodeState.constructorOptions;
     const persistenceOptions = credentialOptions?.tokenCachePersistenceOptions as { enabled?: boolean; name?: string } | undefined;
-    expect(credentialOptions?.disableAutomaticAuthentication).toBe(true);
+    // reconnect uses disableAutomaticAuthentication: false to allow silent token refresh via MSAL cache
+    expect(credentialOptions?.disableAutomaticAuthentication).toBe(false);
     expect(persistenceOptions?.name).toBe('agent-email-work-cache-id');
     expect(auth.needsReauth).toBe(false);
   });
@@ -137,6 +138,30 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
     expect(auth.getTokenHealthWarning()).toBeUndefined();
 
     await rm(testDir, { recursive: true, force: true });
+  });
+});
+
+describe('provider-microsoft/Filesystem Safe Key', () => {
+  it('Scenario: Email to filesystem-safe key', () => {
+    expect(toFilesystemSafeKey('steven@usejunior.com')).toBe('steven-at-usejunior-com');
+    expect(toFilesystemSafeKey('Steven@UseJunior.com')).toBe('steven-at-usejunior-com');
+    expect(toFilesystemSafeKey('alice+tag@example.co.uk')).toBe('alicetag-at-example-co-uk');
+    expect(toFilesystemSafeKey('user@domain.com')).toBe('user-at-domain-com');
+  });
+
+  it('Scenario: Strips invalid characters', () => {
+    expect(toFilesystemSafeKey('a!b#c$d@test.com')).toBe('abcd-at-test-com');
+  });
+
+  it('Scenario: Email address stored in metadata', async () => {
+    const auth = new DelegatedAuthManager(
+      { mode: 'delegated', clientId: 'test-client-id' },
+      'test-mailbox',
+    );
+
+    expect(auth.emailAddress).toBeNull();
+    auth.setEmailAddress('steven@usejunior.com');
+    expect(auth.emailAddress).toBe('steven@usejunior.com');
   });
 });
 

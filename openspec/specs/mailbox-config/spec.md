@@ -5,15 +5,45 @@ feature: Mailbox Management
 
 ## Purpose
 
-Defines multi-mailbox configuration: connecting named mailboxes to providers, setting defaults, listing status, and provider discovery via dynamic import. Supports simultaneous Graph + Gmail connections.
+Defines multi-mailbox configuration: connecting named mailboxes to providers, setting defaults, listing status, and provider discovery via dynamic import. Supports simultaneous Graph + Gmail connections. Each mailbox is canonically identified by its email address, with an optional user-defined alias for convenience.
+
+### Requirement: Mailbox Canonical Identity
+
+The canonical ID of a mailbox SHALL be its email address (e.g., `steven@usejunior.com`). The user MAY provide an optional alias (e.g., "work") for convenience. Tool inputs that accept a mailbox identifier SHALL accept either the email address or the alias, resolving to the same mailbox.
+
+#### Scenario: Identify mailbox by email address
+- **WHEN** a tool input specifies `mailbox: "steven@usejunior.com"`
+- **THEN** the system resolves it to the mailbox configured with that email address
+
+#### Scenario: Identify mailbox by alias
+- **WHEN** a tool input specifies `mailbox: "work"` and the alias "work" maps to `steven@usejunior.com`
+- **THEN** the system resolves it to the mailbox configured with email `steven@usejunior.com`
+
+#### Scenario: Ambiguous identifier rejected
+- **WHEN** a tool input specifies a string that matches neither a configured email address nor an alias
+- **THEN** the system returns an error listing available mailboxes
+
+### Requirement: Filesystem-Safe Storage Key
+
+Mailbox metadata files SHALL be stored using a filesystem-safe derived key from the email address: lowercase, with all non-alphanumeric characters replaced by `-`. The raw email address SHALL be stored inside the JSON metadata, not in the filename.
+
+#### Scenario: Derived filename from email
+- **WHEN** a mailbox is configured for `steven@usejunior.com`
+- **THEN** the metadata file is stored as `steven-usejunior-com.json`
+- **AND** the JSON content includes `"emailAddress": "steven@usejunior.com"`
+
+#### Scenario: Filename avoids special characters
+- **WHEN** a mailbox is configured for `Alice.O'Brien+tag@corp.co.uk`
+- **THEN** the metadata file is stored as `alice-o-brien-tag-corp-co-uk.json`
 
 ### Requirement: Configure Mailbox
 
-The system SHALL provide a `configure_mailbox` action that connects a named mailbox to a provider with credentials.
+The system SHALL provide a `configure_mailbox` action that connects a named mailbox to a provider with credentials. The resulting metadata SHALL include the `emailAddress` field fetched from the provider during configuration.
 
 #### Scenario: Add work mailbox
 - **WHEN** `configure_mailbox` is called with `{name: "work", provider: "microsoft", credentials: {...}, default: true}`
-- **THEN** the system connects to the Microsoft Graph API and marks "work" as the default mailbox
+- **THEN** the system connects to the Microsoft Graph API, fetches the email address, and marks "work" as the default mailbox
+- **AND** the stored metadata includes `emailAddress`
 
 ### Requirement: Default Mailbox
 
@@ -33,19 +63,19 @@ The system SHALL provide a `remove_mailbox` action that disconnects a named mail
 
 ### Requirement: List Mailboxes
 
-The system SHALL provide a `list_mailboxes` action that returns all configured mailboxes with their status.
+The system SHALL provide a `list_mailboxes` action that returns all configured mailboxes with their status, including the `emailAddress` field.
 
 #### Scenario: List all mailboxes
 - **WHEN** `list_mailboxes` is called
-- **THEN** the system returns `[{name: "work", provider: "microsoft", isDefault: true, status: "connected"}, ...]`
+- **THEN** the system returns `[{name: "work", emailAddress: "steven@usejunior.com", provider: "microsoft", isDefault: true, status: "connected"}, ...]`
 
 ### Requirement: Mailbox Status
 
-The system SHALL provide a `get_mailbox_status` action returning connection state, unread count, provider type, subscription status, and warnings (e.g., "outbound disabled — no send allowlist configured").
+The system SHALL provide a `get_mailbox_status` action returning connection state, unread count, provider type, subscription status, `emailAddress`, and warnings (e.g., "outbound disabled — no send allowlist configured").
 
 #### Scenario: Status with warning
 - **WHEN** `get_mailbox_status` is called and no send allowlist is configured
-- **THEN** the result includes `warnings: ["Outbound email disabled — configure send allowlist to enable replies and sends"]`
+- **THEN** the result includes `emailAddress` and `warnings: ["Outbound email disabled — configure send allowlist to enable replies and sends"]`
 
 ### Requirement: Provider Discovery
 

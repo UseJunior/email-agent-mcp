@@ -15,6 +15,7 @@ export interface ActionContext {
 
 export interface MailboxEntry {
   name: string;
+  emailAddress?: string;
   provider: EmailProvider;
   providerType: string;
   isDefault: boolean;

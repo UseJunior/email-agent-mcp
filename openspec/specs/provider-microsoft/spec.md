@@ -84,13 +84,21 @@ Email body max 3.5MB (Graph allows ~4MB, leave headroom for JSON envelope). Atta
 - **WHEN** email body exceeds 3.5MB
 - **THEN** graceful truncation is applied (see email-write spec)
 
-### Requirement: Subscription Resource Security
+### Requirement: Inbox-Scoped Message Access
 
-The system SHALL subscribe to `users/{id}/mailFolders/Inbox/messages` — NEVER bare `/messages` (which exposes sent items, drafts, and other folders).
+The system SHALL NEVER use bare `/messages` for any read or subscription operation — it MUST always scope to `/mailFolders/Inbox/messages`. Bare `/messages` returns ALL folders (junk, sent, deleted, drafts) which is incorrect for inbox monitoring and email reading.
 
 #### Scenario: Inbox-only subscription
 - **WHEN** creating a Graph subscription
 - **THEN** the resource path targets `mailFolders/Inbox/messages` only
+
+#### Scenario: Inbox-scoped message listing
+- **WHEN** listing or fetching messages from Graph
+- **THEN** the API call uses `/me/mailFolders/Inbox/messages`, never `/me/messages`
+
+#### Scenario: Inbox-scoped delta query
+- **WHEN** the watcher performs a delta query
+- **THEN** the API call uses `/me/mailFolders/Inbox/messages/delta`, never `/me/messages/delta`
 
 ### Requirement: Sent Message Tracking
 
@@ -111,6 +119,31 @@ The system SHALL support two email detection modes: Delta Query polling (default
 #### Scenario: Webhook mode (production)
 - **WHEN** a public HTTPS webhook URL is configured
 - **THEN** the system registers for Graph change notifications
+
+### Requirement: Delta Query Field Selection
+
+The system SHALL use `$select=subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments` on Delta Query requests for efficiency. This avoids fetching full message bodies during watcher polling.
+
+#### Scenario: Delta query uses $select
+- **WHEN** the system issues a Delta Query request for inbox messages
+- **THEN** the request includes `$select=subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments`
+
+#### Scenario: Selected fields sufficient for wake payload
+- **WHEN** the watcher constructs a wake payload from delta query results
+- **THEN** all required payload fields (sender, recipients, subject, attachment indicator) are available from the `$select` fields
+
+### Requirement: Email Address Retrieval from /me
+
+During `configure_mailbox`, the system SHALL fetch the user's email address from the Graph `/me` endpoint. The `mail` property SHALL be used as the canonical email address. If `mail` is null (common for B2B/guest accounts), the system SHALL fall back to `userPrincipalName`.
+
+#### Scenario: Email from /me mail property
+- **WHEN** `configure_mailbox` fetches `/me` and the response includes `mail: "steven@usejunior.com"`
+- **THEN** the stored `emailAddress` is `steven@usejunior.com`
+
+#### Scenario: Fallback to userPrincipalName
+- **WHEN** `configure_mailbox` fetches `/me` and `mail` is null
+- **AND** `userPrincipalName` is `steven@usejunior.onmicrosoft.com`
+- **THEN** the stored `emailAddress` is `steven@usejunior.onmicrosoft.com`
 
 ### Requirement: ESM Compatibility
 
