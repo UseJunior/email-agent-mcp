@@ -24,3 +24,4 @@ export {
   loadReceiveAllowlist,
   getReceiveAllowlistPath,
 } from './security/receive-allowlist.js';
+export { htmlToMarkdown, transformEmailContent } from './content/sanitize.js';

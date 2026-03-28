@@ -362,8 +362,8 @@ function mapGraphMessage(msg: GraphMessage): EmailMessage {
     receivedAt: msg.receivedDateTime ?? new Date().toISOString(),
     isRead: msg.isRead ?? false,
     hasAttachments: msg.hasAttachments ?? false,
-    body: msg.body?.contentType === 'Text' ? msg.body.content : undefined,
-    bodyHtml: msg.body?.contentType === 'HTML' ? msg.body.content : undefined,
+    body: msg.body?.contentType?.toLowerCase() === 'text' ? msg.body.content : undefined,
+    bodyHtml: msg.body?.contentType?.toLowerCase() === 'html' ? msg.body.content : undefined,
     conversationId: msg.conversationId,
     messageId: msg.internetMessageId,
   };

@@ -253,12 +253,26 @@ async function buildRealActions(provider: { listMessages: Function; getMessage: 
       run: async (_ctx, input) => {
         const inp = input as { id: string };
         const msg = await provider.getMessage(inp.id) as { id: string; subject: string; from: { email: string; name?: string }; to: Array<{ email: string; name?: string }>; receivedAt: string; body?: string; bodyHtml?: string };
+
+        // Transform HTML to markdown, or use plaintext body
+        let emailBody = '';
+        if (msg.bodyHtml) {
+          try {
+            const { htmlToMarkdown } = await import('@usejunior/email-core');
+            emailBody = htmlToMarkdown(msg.bodyHtml);
+          } catch {
+            emailBody = msg.bodyHtml; // fallback to raw HTML
+          }
+        } else if (msg.body) {
+          emailBody = msg.body;
+        }
+
         return {
           id: msg.id,
           subject: msg.subject,
           from: msg.from.name ? `${msg.from.name} <${msg.from.email}>` : msg.from.email,
           to: msg.to.map(a => a.name ? `${a.name} <${a.email}>` : a.email),
-          body: msg.bodyHtml ?? msg.body ?? '',
+          body: emailBody,
           receivedAt: msg.receivedAt,
         };
       },
