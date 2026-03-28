@@ -32,3 +32,5 @@ export {
   SendRateLimiter,
 } from './security/send-allowlist.js';
 export { htmlToMarkdown, transformEmailContent } from './content/sanitize.js';
+export { sendEmailAction } from './actions/send.js';
+export { replyToEmailAction } from './actions/reply.js';

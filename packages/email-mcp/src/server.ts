@@ -232,6 +232,11 @@ export async function runServer(): Promise<void> {
 // Import z lazily for action definitions
 async function buildRealActions(provider: { listMessages: Function; getMessage: Function; searchMessages: Function }, auth: { getTokenHealthWarning: () => string | undefined }, sendAllowlist?: { entries: string[] }): Promise<EmailActionDef[]> {
   const { z } = await import('zod');
+  const { sendEmailAction, replyToEmailAction } = await import('@usejunior/email-core');
+
+  // Build ActionContext for send/reply actions
+  const actionCtx = { provider: provider as never, sendAllowlist };
+
   return [
     {
       name: 'list_emails',
@@ -323,6 +328,22 @@ async function buildRealActions(provider: { listMessages: Function; getMessage: 
         }
         return { name: 'default', provider: 'microsoft', status: 'connected', isDefault: true, warnings };
       },
+    },
+    {
+      name: sendEmailAction.name,
+      description: sendEmailAction.description,
+      input: sendEmailAction.input,
+      output: sendEmailAction.output,
+      annotations: sendEmailAction.annotations,
+      run: async (_ctx, input) => sendEmailAction.run(actionCtx as never, input as never),
+    },
+    {
+      name: replyToEmailAction.name,
+      description: replyToEmailAction.description,
+      input: replyToEmailAction.input,
+      output: replyToEmailAction.output,
+      annotations: replyToEmailAction.annotations,
+      run: async (_ctx, input) => replyToEmailAction.run(actionCtx as never, input as never),
     },
   ];
 }
