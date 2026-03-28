@@ -234,31 +234,23 @@ export class GraphEmailProvider {
   }
 
   /**
-   * Get a deltaLink pointing to "right now" — skips all existing inbox contents.
-   * Uses $deltatoken=latest to avoid syncing the full inbox on first run.
-   * The returned deltaLink can be saved and used with getDeltaMessages() to
-   * only receive emails that arrive AFTER this call.
+   * Get new inbox messages received after a given timestamp.
+   * Uses simple $filter=receivedDateTime gt {since} — instant, no full-inbox sync.
+   * This is the primary method for the watcher polling loop.
    */
-  async getLatestDeltaLink(): Promise<string> {
-    const url = `${this.basePath}/mailFolders/Inbox/messages/delta?${DELTA_SELECT}&$deltatoken=latest`;
-    const response = await this.client.get(url) as DeltaPageResponse;
-    const deltaLink = response['@odata.deltaLink'];
-    if (!deltaLink) {
-      throw new Error('Failed to get latest deltaLink from Graph API');
-    }
-    return deltaLink;
+  async getNewMessages(since: string): Promise<EmailMessage[]> {
+    const filter = `receivedDateTime gt ${since}`;
+    const params = `$filter=${encodeURIComponent(filter)}&$orderby=receivedDateTime desc&$top=50&${DELTA_SELECT}`;
+    const url = `${this.basePath}/mailFolders/Inbox/messages?${params}`;
+    const response = await this.client.get(url);
+    return ((response.value ?? []) as GraphMessage[]).map(mapGraphMessage);
   }
 
   /**
-   * Delta Query polling for watcher (no public URL needed).
-   *
-   * - Uses $select for efficiency
-   * - Follows all @odata.nextLink pages until a @odata.deltaLink is received
-   * - Filters out @removed tombstones (deleted/moved messages)
-   * - Returns both messages AND the deltaLink for persistence
-   *
-   * IMPORTANT: Always pass a saved deltaLink. For first run, call
-   * getLatestDeltaLink() first to get a checkpoint at "right now".
+   * Delta Query polling — follows all pages.
+   * Note: Delta Query requires paging through the ENTIRE inbox on first use,
+   * even with $deltatoken=latest. Use getNewMessages() for the watcher instead.
+   * This method is kept for scenarios that need full sync (e.g., offline sync).
    */
   async getDeltaMessages(deltaLink: string): Promise<DeltaResult> {
     let url = deltaLink;

@@ -132,7 +132,6 @@ async function runWatch(opts: CliOptions): Promise<number> {
     DelegatedAuthManager,
     RealGraphApiClient,
     GraphEmailProvider,
-    GraphApiError,
     listConfiguredMailboxesWithMetadata,
     toFilesystemSafeKey,
   } = await import('@usejunior/provider-microsoft');
@@ -179,7 +178,7 @@ async function runWatch(opts: CliOptions): Promise<number> {
     safeKey: string;
     emailAddress: string;
     provider: InstanceType<typeof GraphEmailProvider>;
-    deltaLink: string | undefined;
+    lastCheckedAt: string;
   }
 
   const watchStates: MailboxWatchState[] = [];
@@ -226,32 +225,21 @@ async function runWatch(opts: CliOptions): Promise<number> {
       const graphClient = new RealGraphApiClient(() => auth.getAccessToken());
       const provider = new GraphEmailProvider(graphClient);
 
-      // Load delta state
+      // Load last checked timestamp or start from now
       const savedState = await loadDeltaState(safeKey);
-      let deltaLink: string | undefined;
+      let lastCheckedAt: string;
 
       if (savedState) {
-        console.error(`[agent-email] Loaded delta state for ${emailAddress} (last updated: ${savedState.lastUpdated})`);
-        deltaLink = savedState.deltaLink;
+        lastCheckedAt = savedState.lastUpdated;
+        console.error(`[agent-email] Resuming watch for ${emailAddress} (last checked: ${lastCheckedAt})`);
       } else {
-        // First run: get a deltaLink pointing to "right now" using $deltatoken=latest.
-        // This skips all existing inbox contents — we only watch for NEW emails.
-        console.error(`[agent-email] First run for ${emailAddress} — setting checkpoint to now...`);
-        try {
-          deltaLink = await provider.getLatestDeltaLink();
-          await saveDeltaState(safeKey, {
-            deltaLink,
-            lastUpdated: new Date().toISOString(),
-          });
-          console.error(`[agent-email] Checkpoint set for ${emailAddress} — watching for new emails only`);
-        } catch (err) {
-          console.error(`[agent-email] WARNING: Failed to initialize delta for ${emailAddress}: ${err instanceof Error ? err.message : err}`);
-          await releaseLock(safeKey);
-          continue;
-        }
+        // First run: start from NOW — no historical sync needed
+        lastCheckedAt = new Date().toISOString();
+        await saveDeltaState(safeKey, { deltaLink: '', lastUpdated: lastCheckedAt });
+        console.error(`[agent-email] Watching ${emailAddress} for new emails starting now`);
       }
 
-      watchStates.push({ safeKey, emailAddress, provider, deltaLink });
+      watchStates.push({ safeKey, emailAddress, provider, lastCheckedAt });
     } catch (err) {
       console.error(`[agent-email] WARNING: Failed to set up ${emailAddress}: ${err instanceof Error ? err.message : err}`);
       await releaseLock(safeKey);
@@ -267,34 +255,28 @@ async function runWatch(opts: CliOptions): Promise<number> {
 
   console.error(`[agent-email] Watching ${watchStates.length} mailbox(es). Starting poll loop...`);
 
-  // Poll loop
+  // Poll loop — uses simple timestamp filtering instead of Delta Query.
+  // Delta Query requires paging through the ENTIRE inbox on first use (even with $deltatoken=latest).
+  // Timestamp-based polling is instant: only fetch emails received after lastCheckedAt.
   const poll = async () => {
     for (const state of watchStates) {
       if (shuttingDown) break;
 
       const now = new Date().toISOString();
-      console.error(`[agent-email] [${now}] Polling ${state.emailAddress}...`);
+      console.error(`[agent-email] [${now}] Polling ${state.emailAddress} (since ${state.lastCheckedAt})...`);
 
       try {
-        const delta = await state.provider.getDeltaMessages(state.deltaLink);
+        const newMessages = await state.provider.getNewMessages(state.lastCheckedAt);
 
-        let newCount = 0;
+        let wakeCount = 0;
         let skippedDedup = 0;
         let skippedAllowlist = 0;
-        let skippedRead = 0;
         let wakeFailed = false;
 
-        for (const msg of delta.messages) {
+        for (const msg of newMessages) {
           // Dedup
           if (isProcessed(msg.id)) {
             skippedDedup++;
-            continue;
-          }
-
-          // Only wake for unread messages — filters out read-status changes,
-          // flag changes, and other updates to existing messages from delta results.
-          if (msg.isRead) {
-            skippedRead++;
             continue;
           }
 
@@ -313,52 +295,30 @@ async function runWatch(opts: CliOptions): Promise<number> {
 
           const result = await sendWake(wakeUrl, payload, token);
           if (result.success) {
-            // Only mark processed AFTER successful wake — if wake fails,
-            // the message will be re-processed on the next poll.
             markProcessed(msg.id);
-            newCount++;
+            wakeCount++;
           } else {
             console.error(`[agent-email] WARNING: Wake POST failed for ${msg.id}: ${result.error} — will retry next poll`);
             wakeFailed = true;
           }
         }
 
-        // Only advance delta state if all wakes succeeded.
-        // If any wake failed, keep the old deltaLink so failed messages are re-processed.
+        // Only advance timestamp if all wakes succeeded
         if (!wakeFailed) {
-          state.deltaLink = delta.nextDeltaLink;
+          state.lastCheckedAt = now;
           await saveDeltaState(state.safeKey, {
-            deltaLink: delta.nextDeltaLink,
-            lastUpdated: new Date().toISOString(),
+            deltaLink: '', // Not using delta anymore — kept for interface compat
+            lastUpdated: now,
           });
-        } else {
-          console.error(`[agent-email] WARNING: Delta state NOT advanced for ${state.emailAddress} due to wake failure(s)`);
         }
 
-        console.error(
-          `[agent-email] Poll complete for ${state.emailAddress}: ` +
-          `${delta.messages.length} changes, ${newCount} wakes, ` +
-          `${skippedDedup} dedup, ${skippedRead} already-read, ${skippedAllowlist} allowlist-blocked`,
-        );
+        if (newMessages.length > 0) {
+          console.error(
+            `[agent-email] Poll: ${newMessages.length} new, ${wakeCount} wakes, ` +
+            `${skippedDedup} dedup, ${skippedAllowlist} allowlist-blocked`,
+          );
+        }
       } catch (err) {
-        // Handle 410 Gone — delta token expired, do fresh baseline sync
-        if (err instanceof GraphApiError && err.status === 410) {
-          console.error(`[agent-email] 410 Gone for ${state.emailAddress} — delta token expired. Resetting to now...`);
-          await deleteDeltaState(state.safeKey);
-          try {
-            const freshLink = await state.provider.getLatestDeltaLink();
-            state.deltaLink = freshLink;
-            await saveDeltaState(state.safeKey, {
-              deltaLink: freshLink,
-              lastUpdated: new Date().toISOString(),
-            });
-            console.error(`[agent-email] Checkpoint reset for ${state.emailAddress} — watching for new emails only`);
-          } catch (resyncErr) {
-            console.error(`[agent-email] WARNING: Failed to reset delta for ${state.emailAddress}: ${resyncErr instanceof Error ? resyncErr.message : resyncErr}`);
-          }
-          continue;
-        }
-
         // Handle token errors gracefully
         const errMsg = err instanceof Error ? err.message : String(err);
         if (errMsg.includes('interaction_required') || errMsg.includes('invalid_grant')) {
