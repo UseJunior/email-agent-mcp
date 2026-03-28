@@ -3,6 +3,7 @@
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 
 export interface CliOptions {
   command: string;
@@ -32,6 +33,44 @@ const NEMOCLAW_EGRESS_DOMAINS = [
  */
 export function getAgentEmailHome(): string {
   return process.env['AGENT_EMAIL_HOME'] ?? join(homedir(), '.agent-email');
+}
+
+export interface AgentEmailConfig {
+  wakeUrl?: string;
+  hooksToken?: string;
+  pollIntervalSeconds?: number;
+}
+
+/**
+ * Get the config file path: ~/.agent-email/config.json
+ */
+function getConfigPath(): string {
+  return join(getAgentEmailHome(), 'config.json');
+}
+
+/**
+ * Load persisted config from ~/.agent-email/config.json.
+ * Returns empty config if file doesn't exist or is invalid.
+ */
+export async function loadConfig(): Promise<AgentEmailConfig> {
+  try {
+    const raw = await readFile(getConfigPath(), 'utf-8');
+    return JSON.parse(raw) as AgentEmailConfig;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Save config to ~/.agent-email/config.json.
+ * Merges with existing config so callers only need to pass changed fields.
+ */
+export async function saveConfig(updates: Partial<AgentEmailConfig>): Promise<void> {
+  const existing = await loadConfig();
+  const merged = { ...existing, ...updates };
+  const dir = getAgentEmailHome();
+  await mkdir(dir, { recursive: true });
+  await writeFile(getConfigPath(), JSON.stringify(merged, null, 2) + '\n', 'utf-8');
 }
 
 export function parseCliArgs(args: string[]): CliOptions {
@@ -166,8 +205,11 @@ async function runServe(_opts: CliOptions): Promise<number> {
 }
 
 async function runWatch(opts: CliOptions): Promise<number> {
-  const wakeUrl = opts.wakeUrl ?? 'http://localhost:18789/hooks/wake';
-  let pollIntervalSec = opts.pollInterval ?? 30;
+  // Load persisted config for defaults
+  const config = await loadConfig();
+
+  const wakeUrl = opts.wakeUrl ?? config.wakeUrl ?? 'http://localhost:18789/hooks/wake';
+  let pollIntervalSec = opts.pollInterval ?? config.pollIntervalSeconds ?? 10;
 
   // Poll interval validation
   if (pollIntervalSec < 2) {
@@ -198,7 +240,6 @@ async function runWatch(opts: CliOptions): Promise<number> {
   const {
     buildWakePayload,
     sendWake,
-    getWakeToken,
     isProcessed,
     markProcessed,
     loadDeltaState,
@@ -215,8 +256,8 @@ async function runWatch(opts: CliOptions): Promise<number> {
     console.error('[agent-email] WARNING: No receive allowlist configured — accepting all senders');
   }
 
-  // Get wake token
-  const token = getWakeToken();
+  // Get wake token: env var > config > undefined
+  const token = process.env['OPENCLAW_HOOKS_TOKEN'] ?? config.hooksToken;
 
   // Load all configured mailboxes
   const allMailboxes = await listConfiguredMailboxesWithMetadata();
@@ -575,6 +616,21 @@ async function runSetup(opts: CliOptions): Promise<number> {
   const exitCode = await runConfigure(configOpts);
   if (exitCode !== 0) return exitCode;
 
+  // Prompt for hooks token
+  console.error('');
+  const envToken = process.env['OPENCLAW_HOOKS_TOKEN'];
+  if (envToken) {
+    // Auto-save from env var
+    await saveConfig({ hooksToken: envToken });
+    console.error('  OpenClaw hooks token saved from OPENCLAW_HOOKS_TOKEN env var.');
+  } else {
+    const tokenInput = await prompt('  Enter your OpenClaw hooks token (or press Enter to skip): ');
+    if (tokenInput) {
+      await saveConfig({ hooksToken: tokenInput });
+      console.error('  Hooks token saved to ~/.agent-email/config.json');
+    }
+  }
+
   // Ask if they want to start watching
   console.error('');
   const watchAnswer = await prompt('  Start watching for new emails now? [Y/n] ');
@@ -636,8 +692,18 @@ async function runInteractiveMenu(opts: CliOptions, mailboxes: Array<{ emailAddr
   const choice = await prompt('  Enter 1-4: ');
 
   switch (choice) {
-    case '1':
+    case '1': {
+      // Load config and warn if no hooks token is available
+      const config = await loadConfig();
+      const hasToken = !!(process.env['OPENCLAW_HOOKS_TOKEN'] || config.hooksToken);
+      if (!hasToken) {
+        console.error('');
+        console.error('  WARNING: No hooks token configured. Wake POSTs will not be authenticated.');
+        console.error('  Set OPENCLAW_HOOKS_TOKEN or run: agent-email setup');
+        console.error('');
+      }
       return await runWatch(opts);
+    }
     case '2':
       return await runStatus();
     case '3':
@@ -730,7 +796,7 @@ OPTIONS:
   --version              Print version
   --help, -h             Show this help
   --wake-url <url>       Wake URL for watch mode
-  --poll-interval <sec>  Poll interval in seconds (default 30, min 2)
+  --poll-interval <sec>  Poll interval in seconds (default 10, min 2)
   --nemoclaw             NemoClaw egress bootstrap
   --log-level <level>    Log level (debug, info, warn, error)
   --mailbox <name>       Mailbox name (default: "default")

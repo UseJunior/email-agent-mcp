@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { runCli, parseCliArgs, getNemoClawEgressDomains, getAgentEmailHome } from './cli.js';
+import { runCli, parseCliArgs, getNemoClawEgressDomains, getAgentEmailHome, loadConfig, saveConfig } from './cli.js';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -33,7 +36,7 @@ describe('cli/Watch Subcommand', () => {
     expect(opts.pollInterval).toBe(10);
   });
 
-  it('Scenario: Default poll interval is undefined (defaults to 30 at runtime)', () => {
+  it('Scenario: Default poll interval is undefined (defaults to 10 at runtime)', () => {
     const opts = parseCliArgs(['watch']);
     expect(opts.pollInterval).toBeUndefined();
   });
@@ -138,5 +141,66 @@ describe('cli/Poll Interval Validation', () => {
     const opts = parseCliArgs(['watch', '--poll-interval', '1']);
     expect(opts.pollInterval).toBe(1);
     // Clamping happens at runtime in runWatch, not in parseCliArgs
+  });
+});
+
+describe('cli/Config Persistence', () => {
+  let tmpDir: string;
+  let originalHome: string | undefined;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'agent-email-test-'));
+    originalHome = process.env['AGENT_EMAIL_HOME'];
+    process.env['AGENT_EMAIL_HOME'] = tmpDir;
+  });
+
+  afterEach(async () => {
+    if (originalHome === undefined) {
+      delete process.env['AGENT_EMAIL_HOME'];
+    } else {
+      process.env['AGENT_EMAIL_HOME'] = originalHome;
+    }
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('Scenario: loadConfig returns empty object when no config file exists', async () => {
+    const config = await loadConfig();
+    expect(config).toEqual({});
+  });
+
+  it('Scenario: saveConfig creates config.json and loadConfig reads it back', async () => {
+    await saveConfig({ hooksToken: 'test-token-123', pollIntervalSeconds: 15 });
+
+    const config = await loadConfig();
+    expect(config.hooksToken).toBe('test-token-123');
+    expect(config.pollIntervalSeconds).toBe(15);
+  });
+
+  it('Scenario: saveConfig merges with existing config', async () => {
+    await saveConfig({ hooksToken: 'token-1', wakeUrl: 'http://example.com/wake' });
+    await saveConfig({ pollIntervalSeconds: 20 });
+
+    const config = await loadConfig();
+    expect(config.hooksToken).toBe('token-1');
+    expect(config.wakeUrl).toBe('http://example.com/wake');
+    expect(config.pollIntervalSeconds).toBe(20);
+  });
+
+  it('Scenario: saveConfig overwrites individual fields', async () => {
+    await saveConfig({ hooksToken: 'old-token' });
+    await saveConfig({ hooksToken: 'new-token' });
+
+    const config = await loadConfig();
+    expect(config.hooksToken).toBe('new-token');
+  });
+
+  it('Scenario: config.json is valid JSON with pretty formatting', async () => {
+    await saveConfig({ hooksToken: 'pretty-token' });
+
+    const raw = await readFile(join(tmpDir, 'config.json'), 'utf-8');
+    expect(raw).toContain('\n'); // Pretty-printed
+    expect(raw.endsWith('\n')).toBe(true); // Trailing newline
+    const parsed = JSON.parse(raw);
+    expect(parsed.hooksToken).toBe('pretty-token');
   });
 });
