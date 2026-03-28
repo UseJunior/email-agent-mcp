@@ -412,7 +412,7 @@ async function runConfigure(opts: CliOptions): Promise<number> {
         {
           const { join } = await import('node:path');
           const { homedir } = await import('node:os');
-          const { unlink, readdir, readFile: readFileAsync } = await import('node:fs/promises');
+          const { unlink, readdir, readFile: readFileAsync, writeFile, mkdir } = await import('node:fs/promises');
           const tokensDir = join(homedir(), '.agent-email', 'tokens');
           const newFilename = `${safeKey}.json`;
 
@@ -433,6 +433,35 @@ async function runConfigure(opts: CliOptions): Promise<number> {
             }
           } catch {
             // tokens dir may not exist yet — that's fine
+          }
+
+          // Auto-add the authenticated email to the send allowlist
+          const allowlistPath = join(homedir(), '.agent-email', 'send-allowlist.json');
+          try {
+            // Ensure directory exists
+            await mkdir(join(homedir(), '.agent-email'), { recursive: true });
+
+            // Read existing allowlist or start empty
+            let entries: string[] = [];
+            try {
+              const raw = await readFileAsync(allowlistPath, 'utf-8');
+              const data = JSON.parse(raw) as { entries?: string[] };
+              entries = data.entries ?? [];
+            } catch {
+              // File doesn't exist yet — start fresh
+            }
+
+            // Dedupe-add (case-insensitive)
+            const lowerEmail = emailAddress.toLowerCase();
+            if (!entries.some(e => e.toLowerCase() === lowerEmail)) {
+              entries.push(emailAddress);
+            }
+
+            // Write back pretty-printed
+            await writeFile(allowlistPath, JSON.stringify({ entries }, null, 2) + '\n', 'utf-8');
+            console.error(`[agent-email] Send allowlist: ${emailAddress} (outbound email enabled to this address)`);
+          } catch (allowlistErr) {
+            console.error(`[agent-email] WARNING: Could not update send allowlist: ${allowlistErr instanceof Error ? allowlistErr.message : allowlistErr}`);
           }
         }
 

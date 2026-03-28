@@ -144,6 +144,16 @@ export async function runServer(): Promise<void> {
   const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
   const { ListToolsRequestSchema, CallToolRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
 
+  // Load send allowlist at startup (convention: ~/.agent-email/send-allowlist.json)
+  const { loadSendAllowlist, getSendAllowlistPath } = await import('@usejunior/email-core');
+  const sendAllowlistPath = getSendAllowlistPath();
+  const sendAllowlist = await loadSendAllowlist(sendAllowlistPath);
+  if (sendAllowlist && sendAllowlist.entries.length > 0) {
+    console.error(`[agent-email] Send allowlist loaded: ${sendAllowlist.entries.length} entries from ${sendAllowlistPath}`);
+  } else {
+    console.error(`[agent-email] WARNING: Send allowlist empty or not found at ${sendAllowlistPath} — all outbound email is disabled`);
+  }
+
   // Try to load real provider from saved tokens — try each mailbox, skip failures
   let actions: EmailActionDef[] = await buildDemoActions();
   let actionCtx: unknown = {};
@@ -168,7 +178,7 @@ export async function runServer(): Promise<void> {
           const provider = new GraphEmailProvider(client);
 
           // Build real actions from the provider
-          actions = await buildRealActions(provider, auth);
+          actions = await buildRealActions(provider, auth, sendAllowlist);
           console.error(`[agent-email] Connected to mailbox "${displayName}" (${metadata.clientId})`);
           connected = true;
           break;
@@ -220,7 +230,7 @@ export async function runServer(): Promise<void> {
 }
 
 // Import z lazily for action definitions
-async function buildRealActions(provider: { listMessages: Function; getMessage: Function; searchMessages: Function }, auth: { getTokenHealthWarning: () => string | undefined }): Promise<EmailActionDef[]> {
+async function buildRealActions(provider: { listMessages: Function; getMessage: Function; searchMessages: Function }, auth: { getTokenHealthWarning: () => string | undefined }, sendAllowlist?: { entries: string[] }): Promise<EmailActionDef[]> {
   const { z } = await import('zod');
   return [
     {
@@ -308,6 +318,9 @@ async function buildRealActions(provider: { listMessages: Function; getMessage: 
         const warnings: string[] = [];
         const healthWarning = auth.getTokenHealthWarning();
         if (healthWarning) warnings.push(healthWarning);
+        if (!sendAllowlist || sendAllowlist.entries.length === 0) {
+          warnings.push('Send allowlist not configured — all outbound email is disabled. Run: agent-email configure');
+        }
         return { name: 'default', provider: 'microsoft', status: 'connected', isDefault: true, warnings };
       },
     },

@@ -2,6 +2,8 @@
 // Default: EMPTY — blocks all outbound until explicitly configured
 // Loaded at startup from config. No MCP tool to modify.
 
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import type { AllowlistConfig } from '../actions/registry.js';
 
 /**
@@ -55,8 +57,9 @@ export async function loadSendAllowlist(filePath?: string): Promise<AllowlistCon
 /**
  * Get the send allowlist file path from environment or config.
  */
-export function getSendAllowlistPath(): string | undefined {
-  return process.env['AGENT_EMAIL_SEND_ALLOWLIST'];
+export function getSendAllowlistPath(): string {
+  return process.env['AGENT_EMAIL_SEND_ALLOWLIST']
+    ?? join(homedir(), '.agent-email', 'send-allowlist.json');
 }
 
 /**

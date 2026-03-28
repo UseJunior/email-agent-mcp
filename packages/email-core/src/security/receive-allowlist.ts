@@ -2,6 +2,8 @@
 // Default: accept all (wildcard *) — agent can READ any email
 // Loaded at startup from config. No MCP tool to modify.
 
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import type { AllowlistConfig } from '../actions/registry.js';
 
 /**
@@ -54,8 +56,9 @@ export async function loadReceiveAllowlist(filePath?: string): Promise<Allowlist
 /**
  * Get the receive allowlist file path from environment or config.
  */
-export function getReceiveAllowlistPath(): string | undefined {
-  return process.env['AGENT_EMAIL_RECEIVE_ALLOWLIST'];
+export function getReceiveAllowlistPath(): string {
+  return process.env['AGENT_EMAIL_RECEIVE_ALLOWLIST']
+    ?? join(homedir(), '.agent-email', 'receive-allowlist.json');
 }
 
 // Delete policy enforcement

@@ -24,4 +24,11 @@ export {
   loadReceiveAllowlist,
   getReceiveAllowlistPath,
 } from './security/receive-allowlist.js';
+export {
+  isAllowedRecipient,
+  loadSendAllowlist,
+  getSendAllowlistPath,
+  checkSendAllowlist,
+  SendRateLimiter,
+} from './security/send-allowlist.js';
 export { htmlToMarkdown, transformEmailContent } from './content/sanitize.js';
