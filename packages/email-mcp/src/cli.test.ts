@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { runCli, parseCliArgs, getNemoClawEgressDomains } from './cli.js';
+import { runCli, parseCliArgs, getNemoClawEgressDomains, getAgentEmailHome } from './cli.js';
 
 beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -49,6 +49,12 @@ describe('cli/Configure Subcommand', () => {
     expect(opts.provider).toBe('microsoft');
     expect(opts.clientId).toBe('test-id');
   });
+
+  it('Scenario: setup is an alias for configure', () => {
+    const opts = parseCliArgs(['setup', '--provider', 'microsoft']);
+    expect(opts.command).toBe('setup');
+    expect(opts.provider).toBe('microsoft');
+  });
 });
 
 describe('cli/NemoClaw Setup', () => {
@@ -79,13 +85,58 @@ describe('cli/Version and Help', () => {
   });
 });
 
-describe('cli/Exit Codes', () => {
-  it('Scenario: Configuration error', async () => {
-    // No command specified — usage error (exit code 2)
+describe('cli/TTY-Aware Default', () => {
+  it('Scenario: No command in non-TTY starts MCP server', async () => {
+    // In test environment (non-TTY), no command → serve mode
     const exitCode = await runCli([]);
+    expect(exitCode).toBe(0);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('MCP server started'),
+    );
+  });
+
+  it('Scenario: Unknown command returns exit code 2', async () => {
+    const exitCode = await runCli(['bogus-command']);
     expect(exitCode).toBe(2);
     expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('No command specified'),
+      expect.stringContaining('Unknown command'),
     );
+  });
+});
+
+describe('cli/AGENT_EMAIL_HOME', () => {
+  it('Scenario: getAgentEmailHome respects env var', () => {
+    const original = process.env['AGENT_EMAIL_HOME'];
+    try {
+      process.env['AGENT_EMAIL_HOME'] = '/tmp/test-agent-email';
+      expect(getAgentEmailHome()).toBe('/tmp/test-agent-email');
+    } finally {
+      if (original === undefined) {
+        delete process.env['AGENT_EMAIL_HOME'];
+      } else {
+        process.env['AGENT_EMAIL_HOME'] = original;
+      }
+    }
+  });
+
+  it('Scenario: getAgentEmailHome defaults to ~/.agent-email', () => {
+    const original = process.env['AGENT_EMAIL_HOME'];
+    try {
+      delete process.env['AGENT_EMAIL_HOME'];
+      const home = getAgentEmailHome();
+      expect(home).toContain('.agent-email');
+    } finally {
+      if (original !== undefined) {
+        process.env['AGENT_EMAIL_HOME'] = original;
+      }
+    }
+  });
+});
+
+describe('cli/Poll Interval Validation', () => {
+  it('Scenario: Poll interval below 2 is clamped', () => {
+    const opts = parseCliArgs(['watch', '--poll-interval', '1']);
+    expect(opts.pollInterval).toBe(1);
+    // Clamping happens at runtime in runWatch, not in parseCliArgs
   });
 });

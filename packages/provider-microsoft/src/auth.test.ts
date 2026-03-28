@@ -1,8 +1,11 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { DelegatedAuthManager, ClientCredentialsAuthManager, toFilesystemSafeKey, listConfiguredMailboxesWithMetadata } from './auth.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdir, writeFile, rm, readdir } from 'node:fs/promises';
+
+// Use a unique temp dir so tests never write to the real ~/.agent-email/
+const testHome = join(tmpdir(), `agent-email-auth-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
 const mockDeviceCodeState = vi.hoisted(() => ({
   authenticateCalls: 0,
@@ -56,10 +59,23 @@ vi.mock('@azure/identity-cache-persistence', () => ({
 }));
 
 describe('provider-microsoft/Delegated OAuth Authentication', () => {
+  let savedAgentEmailHome: string | undefined;
+
   beforeEach(() => {
+    savedAgentEmailHome = process.env['AGENT_EMAIL_HOME'];
+    process.env['AGENT_EMAIL_HOME'] = testHome;
     mockDeviceCodeState.authenticateCalls = 0;
     mockDeviceCodeState.getTokenCalls = 0;
     mockDeviceCodeState.constructorOptions.length = 0;
+  });
+
+  afterEach(async () => {
+    if (savedAgentEmailHome === undefined) {
+      delete process.env['AGENT_EMAIL_HOME'];
+    } else {
+      process.env['AGENT_EMAIL_HOME'] = savedAgentEmailHome;
+    }
+    await rm(testHome, { recursive: true, force: true });
   });
 
   it('Scenario: Device code flow', async () => {

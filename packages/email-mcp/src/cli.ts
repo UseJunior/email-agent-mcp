@@ -1,4 +1,8 @@
-// CLI entry point — serve, watch, configure subcommands
+// CLI entry point — serve, watch, configure, setup subcommands + TTY-aware default
+
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { createInterface } from 'node:readline';
 
 export interface CliOptions {
   command: string;
@@ -21,6 +25,14 @@ const NEMOCLAW_EGRESS_DOMAINS = [
   'oauth2.googleapis.com',
   'pubsub.googleapis.com',
 ];
+
+/**
+ * Resolve the agent-email home directory.
+ * Respects AGENT_EMAIL_HOME env var for test isolation.
+ */
+export function getAgentEmailHome(): string {
+  return process.env['AGENT_EMAIL_HOME'] ?? join(homedir(), '.agent-email');
+}
 
 export function parseCliArgs(args: string[]): CliOptions {
   const opts: CliOptions = { command: '' };
@@ -75,6 +87,19 @@ export function parseCliArgs(args: string[]): CliOptions {
 }
 
 /**
+ * Prompt user for a single line of input via readline (stderr for prompt, stdin for input).
+ */
+function prompt(question: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
+/**
  * Run the CLI with the given arguments.
  * Returns exit code.
  */
@@ -96,12 +121,33 @@ export async function runCli(args: string[]): Promise<number> {
       return await runServe(opts);
     case 'watch':
       return await runWatch(opts);
+    case 'setup':
     case 'configure':
       return await runConfigure(opts);
+    case 'status':
+      return await runStatus();
+    case 'help':
+      printHelp();
+      return 0;
     default:
       if (!opts.command) {
-        console.error('Error: No command specified. Use --help for usage.');
-        return 2;
+        // TTY-aware smart default
+        if (!process.stdout.isTTY) {
+          // Non-TTY: MCP serve mode (what hosts like OpenClaw/Claude Code expect)
+          return await runServe(opts);
+        }
+
+        // TTY: check if any mailboxes are configured
+        const { listConfiguredMailboxesWithMetadata } = await import('@usejunior/provider-microsoft');
+        const mailboxes = await listConfiguredMailboxesWithMetadata();
+
+        if (mailboxes.length === 0) {
+          // No config -> run guided setup
+          return await runSetup(opts);
+        }
+
+        // Has config -> show status menu
+        return await runInteractiveMenu(opts, mailboxes);
       }
       console.error(`Error: Unknown command "${opts.command}". Use --help for usage.`);
       return 2;
@@ -121,7 +167,16 @@ async function runServe(_opts: CliOptions): Promise<number> {
 
 async function runWatch(opts: CliOptions): Promise<number> {
   const wakeUrl = opts.wakeUrl ?? 'http://localhost:18789/hooks/wake';
-  const pollIntervalSec = opts.pollInterval ?? 30;
+  let pollIntervalSec = opts.pollInterval ?? 30;
+
+  // Poll interval validation
+  if (pollIntervalSec < 2) {
+    console.error(`[agent-email] WARNING: --poll-interval ${pollIntervalSec}s is too low, clamping to 2s`);
+    pollIntervalSec = 2;
+  } else if (pollIntervalSec < 5) {
+    console.error(`[agent-email] WARNING: --poll-interval ${pollIntervalSec}s is aggressive — may cause rate limiting`);
+  }
+
   const pollIntervalMs = pollIntervalSec * 1000;
 
   console.error(`[agent-email] Watching mailboxes, wake URL: ${wakeUrl}`);
@@ -407,13 +462,12 @@ async function runConfigure(opts: CliOptions): Promise<number> {
         const safeKey = toFilesystemSafeKey(emailAddress);
 
         // Clean up ALL files that have the same emailAddress but a different filename
-        // This handles: work.json → steven-at-usejunior-com.json migration
+        // This handles: work.json -> steven-at-usejunior-com.json migration
         // and any other stale alias files
         {
-          const { join } = await import('node:path');
-          const { homedir } = await import('node:os');
-          const { unlink, readdir, readFile: readFileAsync, writeFile, mkdir } = await import('node:fs/promises');
-          const tokensDir = join(homedir(), '.agent-email', 'tokens');
+          const { unlink, readdir, readFile: readFileAsync, writeFile: writeFileAsync, mkdir } = await import('node:fs/promises');
+          const agentHome = getAgentEmailHome();
+          const tokensDir = join(agentHome, 'tokens');
           const newFilename = `${safeKey}.json`;
 
           try {
@@ -436,10 +490,10 @@ async function runConfigure(opts: CliOptions): Promise<number> {
           }
 
           // Auto-add the authenticated email to the send allowlist
-          const allowlistPath = join(homedir(), '.agent-email', 'send-allowlist.json');
+          const allowlistPath = join(agentHome, 'send-allowlist.json');
           try {
             // Ensure directory exists
-            await mkdir(join(homedir(), '.agent-email'), { recursive: true });
+            await mkdir(agentHome, { recursive: true });
 
             // Read existing allowlist or start empty
             let entries: string[] = [];
@@ -458,7 +512,7 @@ async function runConfigure(opts: CliOptions): Promise<number> {
             }
 
             // Write back pretty-printed
-            await writeFile(allowlistPath, JSON.stringify({ entries }, null, 2) + '\n', 'utf-8');
+            await writeFileAsync(allowlistPath, JSON.stringify({ entries }, null, 2) + '\n', 'utf-8');
             console.error(`[agent-email] Send allowlist: ${emailAddress} (outbound email enabled to this address)`);
           } catch (allowlistErr) {
             console.error(`[agent-email] WARNING: Could not update send allowlist: ${allowlistErr instanceof Error ? allowlistErr.message : allowlistErr}`);
@@ -490,25 +544,190 @@ async function runConfigure(opts: CliOptions): Promise<number> {
   }
 }
 
+/**
+ * Guided setup for first-time users (TTY, no mailboxes configured).
+ */
+async function runSetup(opts: CliOptions): Promise<number> {
+  console.error('');
+  console.error('  \uD83E\uDD9E agent-email \u2014 Email connectivity for AI agents');
+  console.error('');
+  console.error('  No mailboxes configured. Let\'s set one up!');
+  console.error('');
+  console.error('  Which email provider?');
+  console.error('    1) Outlook');
+  console.error('    2) Gmail');
+  console.error('');
+
+  const choice = await prompt('  Enter 1 or 2: ');
+
+  let provider: string;
+  if (choice === '1') {
+    provider = 'microsoft';
+  } else if (choice === '2') {
+    provider = 'gmail';
+  } else {
+    console.error(`  Invalid choice "${choice}". Please run again and enter 1 or 2.`);
+    return 1;
+  }
+
+  // Run configure with the chosen provider
+  const configOpts: CliOptions = { ...opts, command: 'configure', provider };
+  const exitCode = await runConfigure(configOpts);
+  if (exitCode !== 0) return exitCode;
+
+  // Ask if they want to start watching
+  console.error('');
+  const watchAnswer = await prompt('  Start watching for new emails now? [Y/n] ');
+  if (watchAnswer === '' || watchAnswer.toLowerCase() === 'y' || watchAnswer.toLowerCase() === 'yes') {
+    return await runWatch(opts);
+  }
+
+  return 0;
+}
+
+/**
+ * Interactive menu for TTY users who have configured mailboxes.
+ */
+async function runInteractiveMenu(opts: CliOptions, mailboxes: Array<{ emailAddress?: string; mailboxName: string; lastInteractiveAuthAt?: string }>): Promise<number> {
+  console.error('');
+  console.error('  \uD83E\uDD9E agent-email \u2014 Email connectivity for AI agents');
+  console.error('');
+
+  // Show connected accounts
+  console.error('  Connected accounts:');
+  for (const mb of mailboxes) {
+    const name = mb.emailAddress ?? mb.mailboxName;
+    const lastAuth = mb.lastInteractiveAuthAt
+      ? new Date(mb.lastInteractiveAuthAt).toLocaleDateString()
+      : 'unknown';
+    console.error(`    \u2022 ${name} (last auth: ${lastAuth})`);
+  }
+  console.error('');
+
+  // Load send allowlist count
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const allowlistPath = join(getAgentEmailHome(), 'send-allowlist.json');
+    const raw = await readFile(allowlistPath, 'utf-8');
+    const data = JSON.parse(raw) as { entries?: string[] };
+    const count = data.entries?.length ?? 0;
+    console.error(`  Send allowlist: ${count} address(es)`);
+  } catch {
+    console.error('  Send allowlist: not configured');
+  }
+  console.error('');
+
+  // Menu
+  console.error('  What would you like to do?');
+  console.error('    1) Start watching for new emails');
+  console.error('    2) Show detailed status');
+  console.error('    3) Add another mailbox');
+  console.error('    4) Reconnect a disconnected mailbox');
+  console.error('');
+
+  const choice = await prompt('  Enter 1-4: ');
+
+  switch (choice) {
+    case '1':
+      return await runWatch(opts);
+    case '2':
+      return await runStatus();
+    case '3':
+      return await runSetup(opts);
+    case '4':
+      return await runConfigure(opts);
+    default:
+      console.error(`  Invalid choice "${choice}".`);
+      return 1;
+  }
+}
+
+/**
+ * Show detailed status of all configured mailboxes.
+ */
+async function runStatus(): Promise<number> {
+  const { listConfiguredMailboxesWithMetadata } = await import('@usejunior/provider-microsoft');
+  const mailboxes = await listConfiguredMailboxesWithMetadata();
+
+  console.error('');
+  console.error('  \uD83E\uDD9E agent-email status');
+  console.error('');
+
+  if (mailboxes.length === 0) {
+    console.error('  No mailboxes configured. Run: agent-email setup');
+    return 0;
+  }
+
+  for (const mb of mailboxes) {
+    const name = mb.emailAddress ?? mb.mailboxName;
+    const lastAuth = mb.lastInteractiveAuthAt
+      ? new Date(mb.lastInteractiveAuthAt).toLocaleString()
+      : 'unknown';
+    const daysSinceAuth = mb.lastInteractiveAuthAt
+      ? Math.round((Date.now() - new Date(mb.lastInteractiveAuthAt).getTime()) / (1000 * 60 * 60 * 24))
+      : null;
+
+    console.error(`  Account: ${name}`);
+    console.error(`    Last authenticated: ${lastAuth}`);
+    if (daysSinceAuth !== null) {
+      if (daysSinceAuth > 80) {
+        console.error(`    \u26A0\uFE0F  Token may expire soon (${daysSinceAuth} days old)`);
+      } else {
+        console.error(`    Token age: ${daysSinceAuth} days (healthy)`);
+      }
+    }
+    console.error('');
+  }
+
+  // Send allowlist
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const allowlistPath = join(getAgentEmailHome(), 'send-allowlist.json');
+    const raw = await readFile(allowlistPath, 'utf-8');
+    const data = JSON.parse(raw) as { entries?: string[] };
+    if (data.entries && data.entries.length > 0) {
+      console.error('  Send allowlist:');
+      for (const entry of data.entries) {
+        console.error(`    \u2022 ${entry}`);
+      }
+    } else {
+      console.error('  Send allowlist: empty');
+    }
+  } catch {
+    console.error('  Send allowlist: not configured');
+  }
+  console.error('');
+
+  return 0;
+}
+
 function printHelp(): void {
   console.error(`
 agent-email — Email connectivity for AI agents
 
 USAGE:
-  agent-email <command> [options]
+  agent-email [command] [options]
 
 COMMANDS:
-  serve       Start MCP server on stdio
-  watch       Monitor mailboxes and wake on new email
-  configure   Interactive setup wizard
+  agent-email              Set up (first run) or show status (TTY)
+                           Start MCP server (non-TTY / when spawned by host)
+  agent-email watch        Start email watcher (long-running)
+  agent-email setup        Configure a mailbox (interactive)
+  agent-email configure    Configure a mailbox (interactive, alias for setup)
+  agent-email status       Show account + connection health
+  agent-email serve        Force MCP server mode
+  agent-email help         Show this help
 
 OPTIONS:
   --version              Print version
   --help, -h             Show this help
   --wake-url <url>       Wake URL for watch mode
-  --poll-interval <sec>  Poll interval in seconds (default 30)
+  --poll-interval <sec>  Poll interval in seconds (default 30, min 2)
   --nemoclaw             NemoClaw egress bootstrap
   --log-level <level>    Log level (debug, info, warn, error)
+  --mailbox <name>       Mailbox name (default: "default")
+  --provider <name>      Auth provider (microsoft, gmail)
+  --client-id <id>       OAuth client ID override
 `.trim());
 }
 

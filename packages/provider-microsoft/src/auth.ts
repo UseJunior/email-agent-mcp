@@ -18,7 +18,14 @@ export const GRAPH_SCOPES_FULL = [
   'https://graph.microsoft.com/User.Read',
   'offline_access',
 ];
-const CONFIG_DIR = join(homedir(), '.agent-email', 'tokens');
+/**
+ * Resolve the config directory for token storage.
+ * Supports AGENT_EMAIL_HOME env var override for test isolation.
+ */
+export function getConfigDir(): string {
+  const base = process.env['AGENT_EMAIL_HOME'] ?? join(homedir(), '.agent-email');
+  return join(base, 'tokens');
+}
 
 export interface MicrosoftAuthConfig {
   mode: 'delegated' | 'client_credentials';
@@ -202,9 +209,9 @@ export class DelegatedAuthManager implements AuthManager {
 
   private getMetadataPath(): string {
     if (this._emailAddress) {
-      return join(CONFIG_DIR, `${toFilesystemSafeKey(this._emailAddress)}.json`);
+      return join(getConfigDir(), `${toFilesystemSafeKey(this._emailAddress)}.json`);
     }
-    return join(CONFIG_DIR, `${this.mailboxName}.json`);
+    return join(getConfigDir(), `${this.mailboxName}.json`);
   }
 
   private getLegacyCacheName(): string {
@@ -327,7 +334,7 @@ export class ClientCredentialsAuthManager implements AuthManager {
 export async function listConfiguredMailboxes(): Promise<string[]> {
   try {
     const { readdir } = await import('node:fs/promises');
-    const files = await readdir(CONFIG_DIR);
+    const files = await readdir(getConfigDir());
     return files
       .filter(f => f.endsWith('.json'))
       .map(f => f.replace('.json', ''));
@@ -347,7 +354,7 @@ export async function listConfiguredMailboxesWithMetadata(): Promise<MailboxMeta
 
   let files: string[];
   try {
-    files = (await readdir(CONFIG_DIR)).filter(f => f.endsWith('.json'));
+    files = (await readdir(getConfigDir())).filter(f => f.endsWith('.json'));
   } catch {
     return [];
   }
@@ -356,7 +363,7 @@ export async function listConfiguredMailboxesWithMetadata(): Promise<MailboxMeta
   const entries: Array<{ filename: string; metadata: MailboxMetadata }> = [];
   for (const file of files) {
     try {
-      const content = await readFile(join(CONFIG_DIR, file), 'utf-8');
+      const content = await readFile(join(getConfigDir(), file), 'utf-8');
       const metadata = JSON.parse(content) as MailboxMetadata;
       entries.push({ filename: file, metadata });
     } catch {
@@ -399,7 +406,7 @@ export async function listConfiguredMailboxesWithMetadata(): Promise<MailboxMeta
       const staleFile = group[i]!.filename;
       console.error(`[agent-email] Removing stale token file ${staleFile} (superseded by ${group[0]!.filename} for ${email})`);
       try {
-        await unlink(join(CONFIG_DIR, staleFile));
+        await unlink(join(getConfigDir(), staleFile));
       } catch {
         // Best-effort cleanup
       }
@@ -415,7 +422,7 @@ export async function listConfiguredMailboxesWithMetadata(): Promise<MailboxMeta
     if (superseded) {
       console.error(`[agent-email] Removing legacy token file ${entry.filename} (superseded by email-based file for mailbox "${entry.metadata.mailboxName}")`);
       try {
-        await unlink(join(CONFIG_DIR, entry.filename));
+        await unlink(join(getConfigDir(), entry.filename));
       } catch {
         // Best-effort cleanup
       }
@@ -434,7 +441,7 @@ export async function listConfiguredMailboxesWithMetadata(): Promise<MailboxMeta
 export async function loadMailboxMetadata(identifier: string): Promise<MailboxMetadata | null> {
   // Try direct filename match first (e.g., "work" → "work.json", or safe key → safe key.json)
   try {
-    const content = await readFile(join(CONFIG_DIR, `${identifier}.json`), 'utf-8');
+    const content = await readFile(join(getConfigDir(), `${identifier}.json`), 'utf-8');
     return JSON.parse(content) as MailboxMetadata;
   } catch {
     // Not found by direct name
@@ -444,7 +451,7 @@ export async function loadMailboxMetadata(identifier: string): Promise<MailboxMe
   if (identifier.includes('@')) {
     try {
       const safeKey = toFilesystemSafeKey(identifier);
-      const content = await readFile(join(CONFIG_DIR, `${safeKey}.json`), 'utf-8');
+      const content = await readFile(join(getConfigDir(), `${safeKey}.json`), 'utf-8');
       return JSON.parse(content) as MailboxMetadata;
     } catch {
       // Not found
@@ -454,10 +461,10 @@ export async function loadMailboxMetadata(identifier: string): Promise<MailboxMe
   // Fall back: search all metadata files for matching mailboxName or emailAddress
   try {
     const { readdir } = await import('node:fs/promises');
-    const files = await readdir(CONFIG_DIR);
+    const files = await readdir(getConfigDir());
     for (const file of files.filter(f => f.endsWith('.json'))) {
       try {
-        const content = await readFile(join(CONFIG_DIR, file), 'utf-8');
+        const content = await readFile(join(getConfigDir(), file), 'utf-8');
         const metadata = JSON.parse(content) as MailboxMetadata;
         if (metadata.mailboxName === identifier || metadata.emailAddress === identifier) {
           return metadata;

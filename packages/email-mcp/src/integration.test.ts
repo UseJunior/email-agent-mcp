@@ -319,10 +319,11 @@ describe('cli/Exit Codes — integration', () => {
     expect(exitCode).toBe(0);
   });
 
-  it('Scenario: No args returns exit code 2', async () => {
+  it('Scenario: No args in non-TTY starts MCP server (exit code 0)', async () => {
     const { runCli } = await import('./cli.js');
     const exitCode = await runCli([]);
-    expect(exitCode).toBe(2);
+    // In non-TTY (test environment), no command → serve mode
+    expect(exitCode).toBe(0);
   });
 
   it('Scenario: Unknown command returns exit code 2', async () => {
