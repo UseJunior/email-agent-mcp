@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { GraphEmailProvider, type GraphApiClient } from './email-graph-provider.js';
+import { GraphEmailProvider, GraphApiError, simplifySearchQuery, type GraphApiClient } from './email-graph-provider.js';
 
 function createMockClient(overrides: Partial<GraphApiClient> = {}): GraphApiClient {
   return {
@@ -288,5 +288,77 @@ describe('provider-microsoft/NemoClaw Compatibility', () => {
     const domains = GraphEmailProvider.egressDomains;
     expect(domains).toContain('graph.microsoft.com');
     expect(domains).toContain('login.microsoftonline.com');
+  });
+});
+
+describe('provider-microsoft/Search Hardening', () => {
+  it('Scenario: Empty query returns empty array', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    expect(await provider.searchMessages('')).toEqual([]);
+    expect(await provider.searchMessages('   ')).toEqual([]);
+    // Should not have called the API at all
+    expect(client.get).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Search includes $top=50 in the URL', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.searchMessages('budget report');
+
+    expect(client.get).toHaveBeenCalledTimes(1);
+    const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(url).toContain('%24top=50');
+  });
+
+  it('Scenario: Search auto-simplifies on 400 error', async () => {
+    const client = createMockClient({
+      get: vi.fn()
+        .mockRejectedValueOnce(new GraphApiError(400, 'Bad Request: syntax error'))
+        .mockResolvedValueOnce({
+          value: [{
+            id: 'msg-1',
+            subject: 'Budget Report Q4',
+            from: { emailAddress: { address: 'cfo@corp.com' } },
+            receivedDateTime: '2024-06-01T12:00:00Z',
+          }],
+        }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const results = await provider.searchMessages('from:cfo@corp.com AND subject:budget');
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.subject).toBe('Budget Report Q4');
+    // Should have retried with simplified query
+    expect(client.get).toHaveBeenCalledTimes(2);
+    const retryUrl = (client.get as ReturnType<typeof vi.fn>).mock.calls[1]![0] as string;
+    // Simplified query should not contain field prefixes or boolean operators
+    expect(retryUrl).not.toContain('from%3A');
+    expect(retryUrl).not.toContain('AND');
+  });
+
+  it('Scenario: simplifySearchQuery strips prefixes and operators', () => {
+    expect(simplifySearchQuery('from:alice@corp.com AND subject:"Q4 budget"'))
+      .toBe('alice@corp.com Q4 budget');
+    expect(simplifySearchQuery('body:hello OR to:bob@corp.com NOT spam'))
+      .toBe('hello bob@corp.com spam');
+    expect(simplifySearchQuery('simple keywords')).toBe('simple keywords');
+  });
+});
+
+describe('provider-microsoft/Watcher Timestamp Boundary', () => {
+  it('Scenario: getNewMessages uses ge not gt', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.getNewMessages('2024-06-01T00:00:00Z');
+
+    const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    const decoded = decodeURIComponent(url);
+    expect(decoded).toContain('receivedDateTime ge 2024-06-01T00:00:00Z');
+    expect(decoded).not.toContain('receivedDateTime gt ');
   });
 });

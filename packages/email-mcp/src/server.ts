@@ -144,37 +144,43 @@ export async function runServer(): Promise<void> {
   const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
   const { ListToolsRequestSchema, CallToolRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
 
-  // Try to load real provider from saved tokens
-  let actions: EmailActionDef[];
+  // Try to load real provider from saved tokens — try each mailbox, skip failures
+  let actions: EmailActionDef[] = await buildDemoActions();
   let actionCtx: unknown = {};
 
   try {
-    const { listConfiguredMailboxes, DelegatedAuthManager } = await import('@usejunior/provider-microsoft');
+    const { listConfiguredMailboxesWithMetadata, DelegatedAuthManager } = await import('@usejunior/provider-microsoft');
     const { RealGraphApiClient, GraphEmailProvider } = await import('@usejunior/provider-microsoft');
-    const mailboxes = await listConfiguredMailboxes();
+    const allMailboxes = await listConfiguredMailboxesWithMetadata();
 
-    if (mailboxes.length > 0) {
-      const mailboxName = mailboxes[0]!;
-      const { loadMailboxMetadata } = await import('@usejunior/provider-microsoft');
-      const metadata = await loadMailboxMetadata(mailboxName);
+    if (allMailboxes.length > 0) {
+      let connected = false;
 
-      if (metadata) {
-        const auth = new DelegatedAuthManager(
-          { mode: 'delegated', clientId: metadata.clientId, tenantId: metadata.tenantId },
-          mailboxName,
-        );
-        await auth.reconnect();
-        const client = new RealGraphApiClient(() => auth.getAccessToken());
-        const provider = new GraphEmailProvider(client);
+      for (const metadata of allMailboxes) {
+        const displayName = metadata.emailAddress ?? metadata.mailboxName;
+        try {
+          const auth = new DelegatedAuthManager(
+            { mode: 'delegated', clientId: metadata.clientId, tenantId: metadata.tenantId },
+            metadata.mailboxName,
+          );
+          await auth.reconnect();
+          const client = new RealGraphApiClient(() => auth.getAccessToken());
+          const provider = new GraphEmailProvider(client);
 
-        const displayName = metadata.emailAddress ?? mailboxName;
+          // Build real actions from the provider
+          actions = await buildRealActions(provider, auth);
+          console.error(`[agent-email] Connected to mailbox "${displayName}" (${metadata.clientId})`);
+          connected = true;
+          break;
+        } catch (err) {
+          console.error(`[agent-email] Skipping mailbox "${displayName}": ${err instanceof Error ? err.message : err}`);
+          continue;
+        }
+      }
 
-        // Build real actions from the provider
-        actions = await buildRealActions(provider, auth);
-        console.error(`[agent-email] Connected to mailbox "${displayName}" (${metadata.clientId})`);
-      } else {
+      if (!connected) {
         actions = await buildDemoActions();
-        console.error('[agent-email] No valid metadata found — running in demo mode');
+        console.error('[agent-email] All mailboxes failed to connect — running in demo mode');
       }
     } else {
       actions = await buildDemoActions();

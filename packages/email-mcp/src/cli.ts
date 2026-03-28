@@ -148,7 +148,6 @@ async function runWatch(opts: CliOptions): Promise<number> {
     markProcessed,
     loadDeltaState,
     saveDeltaState,
-    deleteDeltaState,
     acquireLock,
     releaseLock,
     releaseAllLocks,
@@ -407,13 +406,34 @@ async function runConfigure(opts: CliOptions): Promise<number> {
         await auth.saveMetadata();
         const safeKey = toFilesystemSafeKey(emailAddress);
 
-        // Clean up the old mailbox-name-based file if the new filename is different
-        if (safeKey !== mailboxName) {
+        // Clean up ALL files that have the same emailAddress but a different filename
+        // This handles: work.json → steven-at-usejunior-com.json migration
+        // and any other stale alias files
+        {
           const { join } = await import('node:path');
           const { homedir } = await import('node:os');
-          const { unlink } = await import('node:fs/promises');
-          const oldPath = join(homedir(), '.agent-email', 'tokens', `${mailboxName}.json`);
-          try { await unlink(oldPath); } catch { /* may not exist */ }
+          const { unlink, readdir, readFile: readFileAsync } = await import('node:fs/promises');
+          const tokensDir = join(homedir(), '.agent-email', 'tokens');
+          const newFilename = `${safeKey}.json`;
+
+          try {
+            const allFiles = await readdir(tokensDir);
+            for (const file of allFiles) {
+              if (!file.endsWith('.json') || file === newFilename) continue;
+              try {
+                const content = await readFileAsync(join(tokensDir, file), 'utf-8');
+                const meta = JSON.parse(content) as { emailAddress?: string };
+                if (meta.emailAddress && meta.emailAddress.toLowerCase() === emailAddress.toLowerCase()) {
+                  console.error(`[agent-email] Removing superseded token file: ${file}`);
+                  await unlink(join(tokensDir, file));
+                }
+              } catch {
+                // Skip unreadable files
+              }
+            }
+          } catch {
+            // tokens dir may not exist yet — that's fine
+          }
         }
 
         console.error('');

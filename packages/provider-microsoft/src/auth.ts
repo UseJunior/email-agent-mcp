@@ -338,14 +338,92 @@ export async function listConfiguredMailboxes(): Promise<string[]> {
 
 /**
  * List all configured mailboxes with their full metadata.
+ * Deduplicates by emailAddress: if multiple files have the same email,
+ * keeps the one with the most recent lastInteractiveAuthAt and deletes the older file(s).
+ * Legacy files (no emailAddress) are kept only if no email-based file exists for the same mailboxName.
  */
 export async function listConfiguredMailboxesWithMetadata(): Promise<MailboxMetadata[]> {
-  const names = await listConfiguredMailboxes();
-  const results: MailboxMetadata[] = [];
-  for (const name of names) {
-    const metadata = await loadMailboxMetadata(name);
-    if (metadata) results.push(metadata);
+  const { readdir, unlink } = await import('node:fs/promises');
+
+  let files: string[];
+  try {
+    files = (await readdir(CONFIG_DIR)).filter(f => f.endsWith('.json'));
+  } catch {
+    return [];
   }
+
+  // Load all metadata with their filenames
+  const entries: Array<{ filename: string; metadata: MailboxMetadata }> = [];
+  for (const file of files) {
+    try {
+      const content = await readFile(join(CONFIG_DIR, file), 'utf-8');
+      const metadata = JSON.parse(content) as MailboxMetadata;
+      entries.push({ filename: file, metadata });
+    } catch {
+      // Skip unreadable files
+    }
+  }
+
+  // Group by emailAddress for dedup
+  const byEmail = new Map<string, Array<{ filename: string; metadata: MailboxMetadata }>>();
+  const noEmail: Array<{ filename: string; metadata: MailboxMetadata }> = [];
+
+  for (const entry of entries) {
+    if (entry.metadata.emailAddress) {
+      const email = entry.metadata.emailAddress.toLowerCase();
+      const group = byEmail.get(email) ?? [];
+      group.push(entry);
+      byEmail.set(email, group);
+    } else {
+      noEmail.push(entry);
+    }
+  }
+
+  const results: MailboxMetadata[] = [];
+  const emailAddressesSeen = new Set<string>();
+
+  // For each email group, keep the most recent and delete the rest
+  for (const [email, group] of byEmail) {
+    // Sort by lastInteractiveAuthAt descending (most recent first)
+    group.sort((a, b) => {
+      const dateA = new Date(a.metadata.lastInteractiveAuthAt ?? '1970-01-01').getTime();
+      const dateB = new Date(b.metadata.lastInteractiveAuthAt ?? '1970-01-01').getTime();
+      return dateB - dateA;
+    });
+
+    // Keep the first (most recent), delete the rest
+    results.push(group[0]!.metadata);
+    emailAddressesSeen.add(email);
+
+    for (let i = 1; i < group.length; i++) {
+      const staleFile = group[i]!.filename;
+      console.error(`[agent-email] Removing stale token file ${staleFile} (superseded by ${group[0]!.filename} for ${email})`);
+      try {
+        await unlink(join(CONFIG_DIR, staleFile));
+      } catch {
+        // Best-effort cleanup
+      }
+    }
+  }
+
+  // Keep legacy (no email) entries only if no email-based file exists for the same mailboxName
+  for (const entry of noEmail) {
+    // Check if any email-based entry has the same mailboxName
+    const superseded = results.some(r =>
+      r.mailboxName === entry.metadata.mailboxName && r.emailAddress,
+    );
+    if (superseded) {
+      console.error(`[agent-email] Removing legacy token file ${entry.filename} (superseded by email-based file for mailbox "${entry.metadata.mailboxName}")`);
+      try {
+        await unlink(join(CONFIG_DIR, entry.filename));
+      } catch {
+        // Best-effort cleanup
+      }
+    } else {
+      results.push(entry.metadata);
+    }
+  }
+
   return results;
 }
 

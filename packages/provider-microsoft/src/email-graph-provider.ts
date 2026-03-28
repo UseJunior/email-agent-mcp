@@ -141,11 +141,33 @@ export class GraphEmailProvider {
     return mapGraphMessage(response);
   }
 
-  async searchMessages(query: string): Promise<EmailMessage[]> {
+  async searchMessages(query: string, folder?: string): Promise<EmailMessage[]> {
+    if (!query || !query.trim()) return [];
+
     const params = new URLSearchParams();
     params.set('$search', `"${query}"`);
-    const response = await this.client.get(`${this.basePath}/messages?${params}`);
-    return ((response.value ?? []) as GraphMessage[]).map(mapGraphMessage);
+    params.set('$top', '50');
+    const base = folder
+      ? `${this.basePath}/mailFolders/${folder}/messages`
+      : `${this.basePath}/messages`;
+
+    try {
+      const response = await this.client.get(`${base}?${params}`);
+      return ((response.value ?? []) as GraphMessage[]).map(mapGraphMessage);
+    } catch (err) {
+      // On HTTP 400 (syntax error), retry with simplified keywords
+      if (err instanceof GraphApiError && err.status === 400) {
+        const simplified = simplifySearchQuery(query);
+        if (simplified && simplified !== query) {
+          const retryParams = new URLSearchParams();
+          retryParams.set('$search', `"${simplified}"`);
+          retryParams.set('$top', '50');
+          const response = await this.client.get(`${base}?${retryParams}`);
+          return ((response.value ?? []) as GraphMessage[]).map(mapGraphMessage);
+        }
+      }
+      throw err;
+    }
   }
 
   async getThread(messageId: string): Promise<EmailThread> {
@@ -239,7 +261,7 @@ export class GraphEmailProvider {
    * This is the primary method for the watcher polling loop.
    */
   async getNewMessages(since: string): Promise<EmailMessage[]> {
-    const filter = `receivedDateTime gt ${since}`;
+    const filter = `receivedDateTime ge ${since}`;
     const params = `$filter=${encodeURIComponent(filter)}&$orderby=receivedDateTime desc&$top=50&${DELTA_SELECT}`;
     const url = `${this.basePath}/mailFolders/Inbox/messages?${params}`;
     const response = await this.client.get(url);
@@ -345,6 +367,23 @@ function mapGraphMessage(msg: GraphMessage): EmailMessage {
     conversationId: msg.conversationId,
     messageId: msg.internetMessageId,
   };
+}
+
+/**
+ * Simplify a search query by stripping field prefixes, boolean operators, and quotes.
+ * Returns space-separated keywords suitable for a Graph API $search retry.
+ */
+export function simplifySearchQuery(query: string): string {
+  return query
+    // Remove field prefixes (from:, to:, subject:, body:)
+    .replace(/\b(?:from|to|subject|body):/gi, '')
+    // Remove boolean operators
+    .replace(/\b(?:AND|OR|NOT)\b/g, '')
+    // Remove quotes but keep content
+    .replace(/["']/g, '')
+    // Collapse whitespace
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function truncateBody(body: string): string {

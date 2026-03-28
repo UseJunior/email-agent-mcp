@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { DelegatedAuthManager, ClientCredentialsAuthManager, toFilesystemSafeKey } from './auth.js';
+import { DelegatedAuthManager, ClientCredentialsAuthManager, toFilesystemSafeKey, listConfiguredMailboxesWithMetadata } from './auth.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdir, writeFile, rm, readdir } from 'node:fs/promises';
 
 const mockDeviceCodeState = vi.hoisted(() => ({
   authenticateCalls: 0,

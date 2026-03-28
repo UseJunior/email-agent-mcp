@@ -5,6 +5,7 @@ import type { EmailAction } from './registry.js';
 const SearchEmailsInput = z.object({
   query: z.string(),
   mailbox: z.string().nullable().optional(),
+  folder: z.string().optional(),
   limit: z.number().optional().default(25),
 });
 
@@ -35,7 +36,7 @@ export const searchEmailsAction: EmailAction<
     if (input.mailbox === null && ctx.allMailboxes && ctx.allMailboxes.length > 1) {
       const allResults = await Promise.all(
         ctx.allMailboxes.map(async (mb) => {
-          const results = await mb.provider.searchMessages(input.query);
+          const results = await mb.provider.searchMessages(input.query, input.folder);
           return results.map(m => ({ ...m, mailbox: mb.name }));
         }),
       );
@@ -57,7 +58,7 @@ export const searchEmailsAction: EmailAction<
       };
     }
 
-    const results = await ctx.provider.searchMessages(input.query);
+    const results = await ctx.provider.searchMessages(input.query, input.folder);
     return {
       emails: results.slice(0, input.limit).map(m => ({
         id: m.id,

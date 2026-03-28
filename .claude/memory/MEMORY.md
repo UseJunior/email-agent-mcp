@@ -1,1 +1,2 @@
 - [Thoroughness](feedback_thoroughness.md) — Front-load hard work, no shortcuts, test everything E2E, audit stubs before claiming done
+- [Graph Search Gotchas](reference_graph_search_gotchas.md) — Can't combine $search+$filter, auto-simplify pattern, local FTS5 index option
