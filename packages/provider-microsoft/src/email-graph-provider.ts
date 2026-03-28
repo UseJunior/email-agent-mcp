@@ -234,16 +234,34 @@ export class GraphEmailProvider {
   }
 
   /**
+   * Get a deltaLink pointing to "right now" — skips all existing inbox contents.
+   * Uses $deltatoken=latest to avoid syncing the full inbox on first run.
+   * The returned deltaLink can be saved and used with getDeltaMessages() to
+   * only receive emails that arrive AFTER this call.
+   */
+  async getLatestDeltaLink(): Promise<string> {
+    const url = `${this.basePath}/mailFolders/Inbox/messages/delta?${DELTA_SELECT}&$deltatoken=latest`;
+    const response = await this.client.get(url) as DeltaPageResponse;
+    const deltaLink = response['@odata.deltaLink'];
+    if (!deltaLink) {
+      throw new Error('Failed to get latest deltaLink from Graph API');
+    }
+    return deltaLink;
+  }
+
+  /**
    * Delta Query polling for watcher (no public URL needed).
    *
    * - Uses $select for efficiency
    * - Follows all @odata.nextLink pages until a @odata.deltaLink is received
    * - Filters out @removed tombstones (deleted/moved messages)
    * - Returns both messages AND the deltaLink for persistence
+   *
+   * IMPORTANT: Always pass a saved deltaLink. For first run, call
+   * getLatestDeltaLink() first to get a checkpoint at "right now".
    */
-  async getDeltaMessages(deltaLink?: string): Promise<DeltaResult> {
-    // Build initial URL: use saved deltaLink, or start fresh with $select
-    let url = deltaLink ?? `${this.basePath}/mailFolders/Inbox/messages/delta?${DELTA_SELECT}`;
+  async getDeltaMessages(deltaLink: string): Promise<DeltaResult> {
+    let url = deltaLink;
 
     const allMessages: EmailMessage[] = [];
     let finalDeltaLink = '';

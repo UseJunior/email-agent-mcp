@@ -234,22 +234,18 @@ async function runWatch(opts: CliOptions): Promise<number> {
         console.error(`[agent-email] Loaded delta state for ${emailAddress} (last updated: ${savedState.lastUpdated})`);
         deltaLink = savedState.deltaLink;
       } else {
-        // Baseline sync — consume all pages silently, save deltaLink, don't wake
-        console.error(`[agent-email] No delta state for ${emailAddress} — performing baseline sync...`);
+        // First run: get a deltaLink pointing to "right now" using $deltatoken=latest.
+        // This skips all existing inbox contents — we only watch for NEW emails.
+        console.error(`[agent-email] First run for ${emailAddress} — setting checkpoint to now...`);
         try {
-          const baseline = await provider.getDeltaMessages();
-          deltaLink = baseline.nextDeltaLink;
+          deltaLink = await provider.getLatestDeltaLink();
           await saveDeltaState(safeKey, {
             deltaLink,
             lastUpdated: new Date().toISOString(),
           });
-          // Mark all baseline messages as processed to prevent wakes on restart
-          for (const msg of baseline.messages) {
-            markProcessed(msg.id);
-          }
-          console.error(`[agent-email] Baseline sync complete for ${emailAddress}: ${baseline.messages.length} existing messages consumed`);
+          console.error(`[agent-email] Checkpoint set for ${emailAddress} — watching for new emails only`);
         } catch (err) {
-          console.error(`[agent-email] WARNING: Baseline sync failed for ${emailAddress}: ${err instanceof Error ? err.message : err}`);
+          console.error(`[agent-email] WARNING: Failed to initialize delta for ${emailAddress}: ${err instanceof Error ? err.message : err}`);
           await releaseLock(safeKey);
           continue;
         }
@@ -347,21 +343,18 @@ async function runWatch(opts: CliOptions): Promise<number> {
       } catch (err) {
         // Handle 410 Gone — delta token expired, do fresh baseline sync
         if (err instanceof GraphApiError && err.status === 410) {
-          console.error(`[agent-email] 410 Gone for ${state.emailAddress} — delta token expired. Performing fresh baseline sync...`);
+          console.error(`[agent-email] 410 Gone for ${state.emailAddress} — delta token expired. Resetting to now...`);
           await deleteDeltaState(state.safeKey);
           try {
-            const baseline = await state.provider.getDeltaMessages();
-            state.deltaLink = baseline.nextDeltaLink;
+            const freshLink = await state.provider.getLatestDeltaLink();
+            state.deltaLink = freshLink;
             await saveDeltaState(state.safeKey, {
-              deltaLink: baseline.nextDeltaLink,
+              deltaLink: freshLink,
               lastUpdated: new Date().toISOString(),
             });
-            for (const msg of baseline.messages) {
-              markProcessed(msg.id);
-            }
-            console.error(`[agent-email] Fresh baseline sync complete for ${state.emailAddress}: ${baseline.messages.length} messages consumed`);
+            console.error(`[agent-email] Checkpoint reset for ${state.emailAddress} — watching for new emails only`);
           } catch (resyncErr) {
-            console.error(`[agent-email] WARNING: Fresh baseline sync failed for ${state.emailAddress}: ${resyncErr instanceof Error ? resyncErr.message : resyncErr}`);
+            console.error(`[agent-email] WARNING: Failed to reset delta for ${state.emailAddress}: ${resyncErr instanceof Error ? resyncErr.message : resyncErr}`);
           }
           continue;
         }
@@ -473,7 +466,8 @@ async function runConfigure(opts: CliOptions): Promise<number> {
       }
       console.error('');
       console.error('To start the MCP server, run:');
-      console.error('   npx @usejunior/agent-email serve');
+      console.error('   npx tsx packages/email-mcp/src/cli.ts serve   # from source');
+      console.error('   npx @usejunior/agent-email serve             # after npm publish');
     } else {
       console.error('');
       console.error(`⚠️  Authentication succeeded but profile fetch failed (${resp.status})`);

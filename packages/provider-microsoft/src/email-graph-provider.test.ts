@@ -126,7 +126,7 @@ describe('provider-microsoft/Dual Watch Mode', () => {
     });
     const provider = new GraphEmailProvider(client);
 
-    const delta = await provider.getDeltaMessages();
+    const delta = await provider.getDeltaMessages("https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages/delta?$select=subject");
 
     expect(delta.messages).toHaveLength(1);
     expect(delta.messages[0]!.subject).toBe('New Email');
@@ -164,7 +164,7 @@ describe('provider-microsoft/Delta Query Sync Protocol', () => {
     });
     const provider = new GraphEmailProvider(client);
 
-    await provider.getDeltaMessages();
+    await provider.getDeltaMessages("https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages/delta?$select=subject");
 
     // Verify the initial URL includes $select
     expect(client.get).toHaveBeenCalledWith(
@@ -201,7 +201,7 @@ describe('provider-microsoft/Delta Query Sync Protocol', () => {
     });
     const provider = new GraphEmailProvider(client);
 
-    const delta = await provider.getDeltaMessages();
+    const delta = await provider.getDeltaMessages("https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages/delta?$select=subject");
 
     // Should have followed both pages
     expect(client.get).toHaveBeenCalledTimes(2);
@@ -236,7 +236,7 @@ describe('provider-microsoft/Delta Query Sync Protocol', () => {
     });
     const provider = new GraphEmailProvider(client);
 
-    const delta = await provider.getDeltaMessages();
+    const delta = await provider.getDeltaMessages("https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages/delta?$select=subject");
 
     // Tombstones should be filtered out
     expect(delta.messages).toHaveLength(1);
