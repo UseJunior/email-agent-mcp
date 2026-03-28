@@ -604,16 +604,24 @@ async function runInteractiveMenu(opts: CliOptions, mailboxes: Array<{ emailAddr
   }
   console.error('');
 
-  // Load send allowlist count
+  // Load and display send allowlist
   try {
     const { readFile } = await import('node:fs/promises');
     const allowlistPath = join(getAgentEmailHome(), 'send-allowlist.json');
     const raw = await readFile(allowlistPath, 'utf-8');
     const data = JSON.parse(raw) as { entries?: string[] };
-    const count = data.entries?.length ?? 0;
-    console.error(`  Send allowlist: ${count} address(es)`);
+    const entries = data.entries ?? [];
+    if (entries.length === 0) {
+      console.error('  Send allowlist: empty (all outbound blocked)');
+    } else {
+      const shown = entries.slice(0, 10);
+      console.error(`  Send allowlist (can email): ${shown.join(', ')}${entries.length > 10 ? ` +${entries.length - 10} more` : ''}`);
+      if (entries.length > 10) {
+        console.error(`    Full list: ${allowlistPath}`);
+      }
+    }
   } catch {
-    console.error('  Send allowlist: not configured');
+    console.error('  Send allowlist: not configured (all outbound blocked)');
   }
   console.error('');
 
