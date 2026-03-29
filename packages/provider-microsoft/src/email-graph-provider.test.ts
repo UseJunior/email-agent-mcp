@@ -565,7 +565,7 @@ describe('provider-microsoft/Delta Query Field Selection', () => {
           id: 'msg-1',
           subject: 'Quarterly Report',
           from: { emailAddress: { address: 'cfo@corp.com', name: 'CFO' } },
-          toRecipients: [{ emailAddress: { address: 'steven@usejunior.com' } }],
+          toRecipients: [{ emailAddress: { address: 'test-user@example.com' } }],
           ccRecipients: [{ emailAddress: { address: 'team@corp.com' } }],
           receivedDateTime: '2024-06-01T12:00:00Z',
           hasAttachments: true,
@@ -584,7 +584,7 @@ describe('provider-microsoft/Delta Query Field Selection', () => {
     expect(msg.subject).toBe('Quarterly Report');
     expect(msg.from.email).toBe('cfo@corp.com');
     expect(msg.to).toHaveLength(1);
-    expect(msg.to[0]!.email).toBe('steven@usejunior.com');
+    expect(msg.to[0]!.email).toBe('test-user@example.com');
     expect(msg.cc).toHaveLength(1);
     expect(msg.cc![0]!.email).toBe('team@corp.com');
     expect(msg.hasAttachments).toBe(true);
@@ -594,7 +594,7 @@ describe('provider-microsoft/Delta Query Field Selection', () => {
 
 describe('provider-microsoft/Email Address Retrieval from /me', () => {
   it('Scenario: Email from /me mail property', async () => {
-    // WHEN configure_mailbox fetches /me and the response includes mail: "steven@usejunior.com"
+    // WHEN configure_mailbox fetches /me and the response includes mail: "test-user@example.com"
     // The auth manager stores the email address from the /me profile
     const auth = new (await import('./auth.js')).DelegatedAuthManager(
       { mode: 'delegated', clientId: 'test-client-id' },
@@ -602,25 +602,25 @@ describe('provider-microsoft/Email Address Retrieval from /me', () => {
     );
 
     // Simulate setting the email address from /me mail property
-    auth.setEmailAddress('steven@usejunior.com');
+    auth.setEmailAddress('test-user@example.com');
 
-    // THEN the stored emailAddress is steven@usejunior.com
-    expect(auth.emailAddress).toBe('steven@usejunior.com');
+    // THEN the stored emailAddress is test-user@example.com
+    expect(auth.emailAddress).toBe('test-user@example.com');
   });
 
   it('Scenario: Fallback to userPrincipalName', async () => {
     // WHEN configure_mailbox fetches /me and mail is null
-    // AND userPrincipalName is steven@usejunior.onmicrosoft.com
+    // AND userPrincipalName is test-user@example.onmicrosoft.com
     // Simulate the fallback logic from cli.ts runConfigure:
     //   const emailAddress = profile.mail ?? profile.userPrincipalName;
     const profile = {
       mail: null as string | null,
-      userPrincipalName: 'steven@usejunior.onmicrosoft.com',
+      userPrincipalName: 'test-user@example.onmicrosoft.com',
     };
     const emailAddress = profile.mail ?? profile.userPrincipalName;
 
-    // THEN the stored emailAddress is steven@usejunior.onmicrosoft.com
-    expect(emailAddress).toBe('steven@usejunior.onmicrosoft.com');
+    // THEN the stored emailAddress is test-user@example.onmicrosoft.com
+    expect(emailAddress).toBe('test-user@example.onmicrosoft.com');
 
     // Verify the auth manager accepts this fallback value
     const auth = new (await import('./auth.js')).DelegatedAuthManager(
@@ -628,7 +628,7 @@ describe('provider-microsoft/Email Address Retrieval from /me', () => {
       'work',
     );
     auth.setEmailAddress(emailAddress);
-    expect(auth.emailAddress).toBe('steven@usejunior.onmicrosoft.com');
+    expect(auth.emailAddress).toBe('test-user@example.onmicrosoft.com');
   });
 });
 

@@ -88,8 +88,8 @@ describe('cli/Configure Cleanup of Superseded Files', () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => ({
-        displayName: 'Steven Test',
-        mail: 'steven@usejunior.com',
+        displayName: 'Test User',
+        mail: 'test-user@example.com',
       }),
     });
   });
@@ -104,7 +104,7 @@ describe('cli/Configure Cleanup of Superseded Files', () => {
     await writeFile(
       join(tokensDir, 'work.json'),
       JSON.stringify({
-        emailAddress: 'steven@usejunior.com',
+        emailAddress: 'test-user@example.com',
         mailboxName: 'work',
         clientId: 'old-client',
         lastInteractiveAuthAt: '2024-01-01T00:00:00.000Z',
@@ -116,7 +116,7 @@ describe('cli/Configure Cleanup of Superseded Files', () => {
     await writeFile(
       join(tokensDir, 'my-email.json'),
       JSON.stringify({
-        emailAddress: 'steven@usejunior.com',
+        emailAddress: 'test-user@example.com',
         mailboxName: 'my-email',
         clientId: 'old-client-2',
         lastInteractiveAuthAt: '2024-06-01T00:00:00.000Z',
@@ -144,10 +144,10 @@ describe('cli/Configure Cleanup of Superseded Files', () => {
     const remainingFiles = (await readdir(tokensDir)).sort();
 
     // Should have: alice-at-example-com.json (different email, kept)
-    //              steven-at-usejunior-com.json (newly created by saveMetadata)
+    //              test-user-at-example-com.json (newly created by saveMetadata)
     // Should NOT have: work.json, my-email.json (both had same emailAddress)
     expect(remainingFiles).toContain('alice-at-example-com.json');
-    expect(remainingFiles).toContain('steven-at-usejunior-com.json');
+    expect(remainingFiles).toContain('test-user-at-example-com.json');
     expect(remainingFiles).not.toContain('work.json');
     expect(remainingFiles).not.toContain('my-email.json');
     expect(remainingFiles).toHaveLength(2);
@@ -158,7 +158,7 @@ describe('cli/Configure Cleanup of Superseded Files', () => {
     expect(exitCode).toBe(0);
 
     const remainingFiles = await readdir(tokensDir);
-    expect(remainingFiles).toContain('steven-at-usejunior-com.json');
+    expect(remainingFiles).toContain('test-user-at-example-com.json');
     expect(remainingFiles).toHaveLength(1);
   });
 });

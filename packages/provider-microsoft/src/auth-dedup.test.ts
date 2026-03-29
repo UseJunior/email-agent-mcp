@@ -59,18 +59,18 @@ describe('provider-microsoft/Mailbox Deduplication', () => {
       join(tokensDir, 'work.json'),
       JSON.stringify(makeMetadata({
         mailboxName: 'work',
-        emailAddress: 'steven@usejunior.com',
+        emailAddress: 'test-user@example.com',
         lastInteractiveAuthAt: '2025-01-01T00:00:00.000Z',
       })),
     );
 
     // Write a newer email-based file for the same email
-    const safeKey = toFilesystemSafeKey('steven@usejunior.com');
+    const safeKey = toFilesystemSafeKey('test-user@example.com');
     await writeFile(
       join(tokensDir, `${safeKey}.json`),
       JSON.stringify(makeMetadata({
         mailboxName: 'work',
-        emailAddress: 'steven@usejunior.com',
+        emailAddress: 'test-user@example.com',
         lastInteractiveAuthAt: '2025-06-15T12:00:00.000Z',
       })),
     );
@@ -79,7 +79,7 @@ describe('provider-microsoft/Mailbox Deduplication', () => {
 
     // Should return exactly one entry
     expect(results).toHaveLength(1);
-    expect(results[0]!.emailAddress).toBe('steven@usejunior.com');
+    expect(results[0]!.emailAddress).toBe('test-user@example.com');
     // The kept entry should be the more recent one
     expect(results[0]!.lastInteractiveAuthAt).toBe('2025-06-15T12:00:00.000Z');
 
@@ -91,10 +91,10 @@ describe('provider-microsoft/Mailbox Deduplication', () => {
 
   it('Scenario: Two files with different emails — both are kept', async () => {
     await writeFile(
-      join(tokensDir, 'steven-at-usejunior-com.json'),
+      join(tokensDir, 'test-user-at-example-com.json'),
       JSON.stringify(makeMetadata({
         mailboxName: 'work',
-        emailAddress: 'steven@usejunior.com',
+        emailAddress: 'test-user@example.com',
       })),
     );
 
@@ -109,7 +109,7 @@ describe('provider-microsoft/Mailbox Deduplication', () => {
     const results = await listConfiguredMailboxesWithMetadata();
     expect(results).toHaveLength(2);
     const emails = results.map(r => r.emailAddress).sort();
-    expect(emails).toEqual(['alice@example.com', 'steven@usejunior.com']);
+    expect(emails).toEqual(['alice@example.com', 'test-user@example.com']);
   });
 
   it('Scenario: Legacy file without emailAddress is removed when email-based file exists for same mailboxName', async () => {
@@ -123,21 +123,21 @@ describe('provider-microsoft/Mailbox Deduplication', () => {
 
     // New email-based file with same mailboxName
     await writeFile(
-      join(tokensDir, 'steven-at-usejunior-com.json'),
+      join(tokensDir, 'test-user-at-example-com.json'),
       JSON.stringify(makeMetadata({
         mailboxName: 'work',
-        emailAddress: 'steven@usejunior.com',
+        emailAddress: 'test-user@example.com',
       })),
     );
 
     const results = await listConfiguredMailboxesWithMetadata();
     expect(results).toHaveLength(1);
-    expect(results[0]!.emailAddress).toBe('steven@usejunior.com');
+    expect(results[0]!.emailAddress).toBe('test-user@example.com');
 
     // Legacy file should be deleted
     const remainingFiles = await readdir(tokensDir);
     expect(remainingFiles).toHaveLength(1);
-    expect(remainingFiles[0]).toBe('steven-at-usejunior-com.json');
+    expect(remainingFiles[0]).toBe('test-user-at-example-com.json');
   });
 
   it('Scenario: Legacy file without emailAddress is kept when no email-based file exists', async () => {
@@ -161,7 +161,7 @@ describe('provider-microsoft/Mailbox Deduplication', () => {
       join(tokensDir, 'work.json'),
       JSON.stringify(makeMetadata({
         mailboxName: 'work',
-        emailAddress: 'steven@usejunior.com',
+        emailAddress: 'test-user@example.com',
         lastInteractiveAuthAt: '2024-06-01T00:00:00.000Z',
       })),
     );
@@ -170,16 +170,16 @@ describe('provider-microsoft/Mailbox Deduplication', () => {
       join(tokensDir, 'old-alias.json'),
       JSON.stringify(makeMetadata({
         mailboxName: 'old-alias',
-        emailAddress: 'steven@usejunior.com',
+        emailAddress: 'test-user@example.com',
         lastInteractiveAuthAt: '2024-12-01T00:00:00.000Z',
       })),
     );
 
     await writeFile(
-      join(tokensDir, 'steven-at-usejunior-com.json'),
+      join(tokensDir, 'test-user-at-example-com.json'),
       JSON.stringify(makeMetadata({
         mailboxName: 'work',
-        emailAddress: 'steven@usejunior.com',
+        emailAddress: 'test-user@example.com',
         lastInteractiveAuthAt: '2025-06-15T12:00:00.000Z',
       })),
     );
@@ -190,7 +190,7 @@ describe('provider-microsoft/Mailbox Deduplication', () => {
 
     const remainingFiles = await readdir(tokensDir);
     expect(remainingFiles).toHaveLength(1);
-    expect(remainingFiles[0]).toBe('steven-at-usejunior-com.json');
+    expect(remainingFiles[0]).toBe('test-user-at-example-com.json');
   });
 
   it('Scenario: Empty tokens directory returns empty array', async () => {

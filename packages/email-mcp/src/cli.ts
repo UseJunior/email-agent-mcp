@@ -492,7 +492,7 @@ export async function runConfigure(opts: CliOptions): Promise<number> {
         const safeKey = toFilesystemSafeKey(emailAddress);
 
         // Clean up ALL files that have the same emailAddress but a different filename
-        // This handles: work.json -> steven-at-usejunior-com.json migration
+        // This handles: work.json -> test-user-at-example-com.json migration
         // and any other stale alias files
         {
           const { unlink, readdir, readFile: readFileAsync, writeFile: writeFileAsync, mkdir } = await import('node:fs/promises');

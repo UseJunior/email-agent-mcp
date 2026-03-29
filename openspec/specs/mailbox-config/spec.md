@@ -9,15 +9,15 @@ Defines multi-mailbox configuration: connecting named mailboxes to providers, se
 
 ### Requirement: Mailbox Canonical Identity
 
-The canonical ID of a mailbox SHALL be its email address (e.g., `steven@usejunior.com`). The user MAY provide an optional alias (e.g., "work") for convenience. Tool inputs that accept a mailbox identifier SHALL accept either the email address or the alias, resolving to the same mailbox.
+The canonical ID of a mailbox SHALL be its email address (e.g., `test-user@example.com`). The user MAY provide an optional alias (e.g., "work") for convenience. Tool inputs that accept a mailbox identifier SHALL accept either the email address or the alias, resolving to the same mailbox.
 
 #### Scenario: Identify mailbox by email address
-- **WHEN** a tool input specifies `mailbox: "steven@usejunior.com"`
+- **WHEN** a tool input specifies `mailbox: "test-user@example.com"`
 - **THEN** the system resolves it to the mailbox configured with that email address
 
 #### Scenario: Identify mailbox by alias
-- **WHEN** a tool input specifies `mailbox: "work"` and the alias "work" maps to `steven@usejunior.com`
-- **THEN** the system resolves it to the mailbox configured with email `steven@usejunior.com`
+- **WHEN** a tool input specifies `mailbox: "work"` and the alias "work" maps to `test-user@example.com`
+- **THEN** the system resolves it to the mailbox configured with email `test-user@example.com`
 
 #### Scenario: Ambiguous identifier rejected
 - **WHEN** a tool input specifies a string that matches neither a configured email address nor an alias
@@ -28,9 +28,9 @@ The canonical ID of a mailbox SHALL be its email address (e.g., `steven@usejunio
 Mailbox metadata files SHALL be stored using a filesystem-safe derived key from the email address: lowercase, with all non-alphanumeric characters replaced by `-`. The raw email address SHALL be stored inside the JSON metadata, not in the filename.
 
 #### Scenario: Derived filename from email
-- **WHEN** a mailbox is configured for `steven@usejunior.com`
-- **THEN** the metadata file is stored as `steven-usejunior-com.json`
-- **AND** the JSON content includes `"emailAddress": "steven@usejunior.com"`
+- **WHEN** a mailbox is configured for `test-user@example.com`
+- **THEN** the metadata file is stored as `test-user-example-com.json`
+- **AND** the JSON content includes `"emailAddress": "test-user@example.com"`
 
 #### Scenario: Filename avoids special characters
 - **WHEN** a mailbox is configured for `Alice.O'Brien+tag@corp.co.uk`
@@ -67,7 +67,7 @@ The system SHALL provide a `list_mailboxes` action that returns all configured m
 
 #### Scenario: List all mailboxes
 - **WHEN** `list_mailboxes` is called
-- **THEN** the system returns `[{name: "work", emailAddress: "steven@usejunior.com", provider: "microsoft", isDefault: true, status: "connected"}, ...]`
+- **THEN** the system returns `[{name: "work", emailAddress: "test-user@example.com", provider: "microsoft", isDefault: true, status: "connected"}, ...]`
 
 ### Requirement: Mailbox Status
 

@@ -48,7 +48,7 @@ export interface MailboxMetadata {
 /**
  * Convert an email address to a filesystem-safe key.
  * Lowercase, replace `@` with `-at-`, replace `.` with `-`, strip anything not [a-z0-9-].
- * Example: `steven@usejunior.com` → `steven-at-usejunior-com`
+ * Example: `test-user@example.com` → `test-user-at-example-com`
  */
 export function toFilesystemSafeKey(email: string): string {
   return email

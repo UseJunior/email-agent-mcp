@@ -39,5 +39,15 @@
   "publishConfig": {
     "access": "public"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/UseJunior/agent-email.git",
+    "directory": "packages/provider-microsoft"
+  },
+  "homepage": "https://github.com/UseJunior/agent-email#readme",
+  "bugs": {
+    "url": "https://github.com/UseJunior/agent-email/issues"
+  },
+  "keywords": ["email", "microsoft-graph", "outlook", "office365", "oauth", "ai-agent"],
   "license": "Apache-2.0"
 }

@@ -1,0 +1,45 @@
+#!/usr/bin/env node
+
+/**
+ * Validates that server.json version stays in sync with package.json.
+ * Run via: npm run check:server-json
+ */
+
+import { readFileSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const root = resolve(__dirname, '..');
+
+const serverJson = JSON.parse(
+  readFileSync(resolve(root, 'packages/agent-email/server.json'), 'utf-8'),
+);
+const packageJson = JSON.parse(
+  readFileSync(resolve(root, 'packages/agent-email/package.json'), 'utf-8'),
+);
+
+let ok = true;
+
+if (serverJson.version !== packageJson.version) {
+  console.error(
+    `FAIL: server.json version "${serverJson.version}" !== package.json version "${packageJson.version}"`,
+  );
+  ok = false;
+}
+
+const pkgEntry = serverJson.packages?.[0];
+if (pkgEntry && pkgEntry.version !== packageJson.version) {
+  console.error(
+    `FAIL: server.json packages[0].version "${pkgEntry.version}" !== package.json version "${packageJson.version}"`,
+  );
+  ok = false;
+}
+
+if (ok) {
+  console.log(
+    `PASS: server.json version matches package.json (${packageJson.version})`,
+  );
+} else {
+  process.exit(1);
+}

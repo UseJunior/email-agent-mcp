@@ -37,5 +37,15 @@
   "publishConfig": {
     "access": "public"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/UseJunior/agent-email.git",
+    "directory": "packages/email-core"
+  },
+  "homepage": "https://github.com/UseJunior/agent-email#readme",
+  "bugs": {
+    "url": "https://github.com/UseJunior/agent-email/issues"
+  },
+  "keywords": ["email", "mcp", "ai-agent", "email-actions", "content-engine", "typescript"],
   "license": "Apache-2.0"
 }

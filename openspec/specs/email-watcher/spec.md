@@ -61,11 +61,11 @@ The system SHALL POST to the configured wake URL with authentication. Default UR
 The wake payload SHALL be text-only `{text, mode}` for OpenClaw `/hooks/wake` compatibility. OpenClaw's `normalizeWakePayload` strips everything except `text` and `mode`; structured fields are ignored. The `text` field SHALL be self-contained: it MUST include the receiving mailbox email address, sender with display name, full to/cc recipient list, subject, and attachment indicator. The `mode` SHALL be `"now"`.
 
 #### Scenario: Multi-mailbox wake
-- **WHEN** a new email arrives at `steven@usejunior.com` from Alice Smith &lt;alice@corp.com&gt; with subject "Contract Review", to steven@usejunior.com and bob@corp.com, cc team@corp.com, with attachments
-- **THEN** the wake payload is `{text: "New email to steven@usejunior.com from Alice Smith <alice@corp.com>: Contract Review\nTo: steven@usejunior.com, bob@corp.com\nCc: team@corp.com\nAttachments: yes", mode: "now"}`
+- **WHEN** a new email arrives at `test-user@example.com` from Alice Smith &lt;alice@corp.com&gt; with subject "Contract Review", to test-user@example.com and bob@corp.com, cc team@corp.com, with attachments
+- **THEN** the wake payload is `{text: "New email to test-user@example.com from Alice Smith <alice@corp.com>: Contract Review\nTo: test-user@example.com, bob@corp.com\nCc: team@corp.com\nAttachments: yes", mode: "now"}`
 
 #### Scenario: Wake payload without attachments
-- **WHEN** a new email arrives at `steven@usejunior.com` from bob@corp.com with subject "Quick question", no cc, no attachments
+- **WHEN** a new email arrives at `test-user@example.com` from bob@corp.com with subject "Quick question", no cc, no attachments
 - **THEN** the wake payload text does NOT include an "Attachments:" line
 
 #### Scenario: No structured email object in payload
@@ -81,15 +81,15 @@ The watcher SHALL persist the polling checkpoint per mailbox in `~/.agent-email/
 - **THEN** it loads the saved checkpoint from `~/.agent-email/state/` and resumes polling from where it left off
 
 #### Scenario: Checkpoint file per mailbox
-- **WHEN** two mailboxes are configured (`steven@usejunior.com` and `alice@corp.com`)
-- **THEN** two separate checkpoint files exist: `steven-usejunior-com.watcher.json` and `alice-corp-com.watcher.json`
+- **WHEN** two mailboxes are configured (`test-user@example.com` and `alice@corp.com`)
+- **THEN** two separate checkpoint files exist: `test-user-example-com.watcher.json` and `alice-corp-com.watcher.json`
 
 ### Requirement: Per-Mailbox Lock File
 
 The watcher SHALL create a lock file per mailbox at `~/.agent-email/state/{mailbox-id}.watcher.lock` to prevent duplicate watcher instances for the same mailbox.
 
 #### Scenario: Lock prevents duplicate watcher
-- **WHEN** a watcher is already running for `steven@usejunior.com`
+- **WHEN** a watcher is already running for `test-user@example.com`
 - **AND** a second watcher attempts to start for the same mailbox
 - **THEN** the second watcher exits with an error indicating the mailbox is already being watched
 
@@ -129,5 +129,5 @@ The system SHALL NOT re-wake for already-processed emails. Timestamp-based polli
 The system SHALL monitor all configured mailboxes simultaneously.
 
 #### Scenario: Two mailboxes
-- **WHEN** `steven@usejunior.com` (Graph) and `steven@gmail.com` (Gmail) are configured
+- **WHEN** `test-user@example.com` (Graph) and `test-user@gmail.com` (Gmail) are configured
 - **THEN** the watcher monitors both and wakes with the appropriate mailbox email address in the text payload

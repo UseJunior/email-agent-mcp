@@ -177,8 +177,8 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
 
 describe('provider-microsoft/Filesystem Safe Key', () => {
   it('Scenario: Email to filesystem-safe key', () => {
-    expect(toFilesystemSafeKey('steven@usejunior.com')).toBe('steven-at-usejunior-com');
-    expect(toFilesystemSafeKey('Steven@UseJunior.com')).toBe('steven-at-usejunior-com');
+    expect(toFilesystemSafeKey('test-user@example.com')).toBe('test-user-at-example-com');
+    expect(toFilesystemSafeKey('Test-User@Example.com')).toBe('test-user-at-example-com');
     expect(toFilesystemSafeKey('alice+tag@example.co.uk')).toBe('alicetag-at-example-co-uk');
     expect(toFilesystemSafeKey('user@domain.com')).toBe('user-at-domain-com');
   });
@@ -194,8 +194,8 @@ describe('provider-microsoft/Filesystem Safe Key', () => {
     );
 
     expect(auth.emailAddress).toBeNull();
-    auth.setEmailAddress('steven@usejunior.com');
-    expect(auth.emailAddress).toBe('steven@usejunior.com');
+    auth.setEmailAddress('test-user@example.com');
+    expect(auth.emailAddress).toBe('test-user@example.com');
   });
 });
 
@@ -222,43 +222,43 @@ describe('mailbox-config/Mailbox Canonical Identity', () => {
   });
 
   it('Scenario: Identify mailbox by email address', async () => {
-    // WHEN a tool input specifies mailbox: "steven@usejunior.com"
+    // WHEN a tool input specifies mailbox: "test-user@example.com"
     // Store metadata with that email address
     const metadata = {
       authenticationRecord: { authority: 'test', homeAccountId: 'test', clientId: 'test', tenantId: 'test' },
       lastInteractiveAuthAt: new Date().toISOString(),
       clientId: 'test-client-id',
       mailboxName: 'work',
-      emailAddress: 'steven@usejunior.com',
+      emailAddress: 'test-user@example.com',
     };
-    const safeKey = toFilesystemSafeKey('steven@usejunior.com');
+    const safeKey = toFilesystemSafeKey('test-user@example.com');
     await writeFile(join(configDir, `${safeKey}.json`), JSON.stringify(metadata), 'utf-8');
 
     // THEN the system resolves it to the mailbox configured with that email address
     const { loadMailboxMetadata } = await import('./auth.js');
-    const loaded = await loadMailboxMetadata('steven@usejunior.com');
+    const loaded = await loadMailboxMetadata('test-user@example.com');
     expect(loaded).not.toBeNull();
-    expect(loaded!.emailAddress).toBe('steven@usejunior.com');
+    expect(loaded!.emailAddress).toBe('test-user@example.com');
     expect(loaded!.mailboxName).toBe('work');
   });
 
   it('Scenario: Identify mailbox by alias', async () => {
-    // WHEN a tool input specifies mailbox: "work" and the alias "work" maps to steven@usejunior.com
+    // WHEN a tool input specifies mailbox: "work" and the alias "work" maps to test-user@example.com
     const metadata = {
       authenticationRecord: { authority: 'test', homeAccountId: 'test', clientId: 'test', tenantId: 'test' },
       lastInteractiveAuthAt: new Date().toISOString(),
       clientId: 'test-client-id',
       mailboxName: 'work',
-      emailAddress: 'steven@usejunior.com',
+      emailAddress: 'test-user@example.com',
     };
     // Store under legacy alias filename
     await writeFile(join(configDir, 'work.json'), JSON.stringify(metadata), 'utf-8');
 
-    // THEN the system resolves it to the mailbox configured with email steven@usejunior.com
+    // THEN the system resolves it to the mailbox configured with email test-user@example.com
     const { loadMailboxMetadata } = await import('./auth.js');
     const loaded = await loadMailboxMetadata('work');
     expect(loaded).not.toBeNull();
-    expect(loaded!.emailAddress).toBe('steven@usejunior.com');
+    expect(loaded!.emailAddress).toBe('test-user@example.com');
     expect(loaded!.mailboxName).toBe('work');
   });
 
@@ -274,11 +274,11 @@ describe('mailbox-config/Mailbox Canonical Identity', () => {
 
 describe('mailbox-config/Filesystem-Safe Storage Key', () => {
   it('Scenario: Derived filename from email', () => {
-    // WHEN a mailbox is configured for steven@usejunior.com
-    const safeKey = toFilesystemSafeKey('steven@usejunior.com');
+    // WHEN a mailbox is configured for test-user@example.com
+    const safeKey = toFilesystemSafeKey('test-user@example.com');
 
     // THEN the metadata file key is derived from the email
-    expect(safeKey).toBe('steven-at-usejunior-com');
+    expect(safeKey).toBe('test-user-at-example-com');
     // AND the JSON content would include emailAddress (tested via auth manager)
   });
 
@@ -422,12 +422,12 @@ describe('mailbox-config/Convention-Over-Configuration Paths', () => {
 
     // Simulate what runConfigure does after successful auth
     const allowlistPath = join(tmpHome, 'send-allowlist.json');
-    const emailAddress = 'steven@usejunior.com';
+    const emailAddress = 'test-user@example.com';
     await writeFile(allowlistPath, JSON.stringify({ entries: [emailAddress] }, null, 2) + '\n', 'utf-8');
 
     const raw = await readFile(allowlistPath, 'utf-8');
     const data = JSON.parse(raw) as { entries: string[] };
-    expect(data.entries).toContain('steven@usejunior.com');
+    expect(data.entries).toContain('test-user@example.com');
 
     await rm(tmpHome, { recursive: true, force: true });
   });

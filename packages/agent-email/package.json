@@ -20,5 +20,15 @@
   "engines": { "node": ">=20" },
   "files": ["bin", "index.js", "index.d.ts", "server.json"],
   "publishConfig": {"access": "public"},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/UseJunior/agent-email.git",
+    "directory": "packages/agent-email"
+  },
+  "homepage": "https://github.com/UseJunior/agent-email#readme",
+  "bugs": {
+    "url": "https://github.com/UseJunior/agent-email/issues"
+  },
+  "keywords": ["email", "mcp", "ai-agent", "microsoft-graph", "gmail", "model-context-protocol", "claude", "gemini"],
   "license": "Apache-2.0"
 }

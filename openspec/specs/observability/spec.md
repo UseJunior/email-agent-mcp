@@ -53,7 +53,7 @@ The system SHALL NEVER expose internal file paths, API keys, credentials, or sta
 - **AND** the full error is logged to stderr for debugging
 
 #### Scenario: File path in error
-- **WHEN** an error message contains `/Users/stevenobiajulu/.config/credentials.json`
+- **WHEN** an error message contains `/Users/testuser/.config/credentials.json`
 - **THEN** the MCP response contains `[PATH]` instead
 
 ### Requirement: Optional OpenTelemetry

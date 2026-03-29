@@ -137,13 +137,13 @@ The system SHALL use `$select=subject,from,toRecipients,ccRecipients,receivedDat
 During `configure_mailbox`, the system SHALL fetch the user's email address from the Graph `/me` endpoint. The `mail` property SHALL be used as the canonical email address. If `mail` is null (common for B2B/guest accounts), the system SHALL fall back to `userPrincipalName`.
 
 #### Scenario: Email from /me mail property
-- **WHEN** `configure_mailbox` fetches `/me` and the response includes `mail: "steven@usejunior.com"`
-- **THEN** the stored `emailAddress` is `steven@usejunior.com`
+- **WHEN** `configure_mailbox` fetches `/me` and the response includes `mail: "test-user@example.com"`
+- **THEN** the stored `emailAddress` is `test-user@example.com`
 
 #### Scenario: Fallback to userPrincipalName
 - **WHEN** `configure_mailbox` fetches `/me` and `mail` is null
-- **AND** `userPrincipalName` is `steven@usejunior.onmicrosoft.com`
-- **THEN** the stored `emailAddress` is `steven@usejunior.onmicrosoft.com`
+- **AND** `userPrincipalName` is `test-user@example.onmicrosoft.com`
+- **THEN** the stored `emailAddress` is `test-user@example.onmicrosoft.com`
 
 ### Requirement: ESM Compatibility
 

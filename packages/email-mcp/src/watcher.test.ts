@@ -33,7 +33,7 @@ function createTestMessage(overrides: Partial<EmailMessage> = {}): EmailMessage 
     subject: 'Contract Review',
     from: { email: 'alice@corp.com', name: 'Alice Smith' },
     to: [
-      { email: 'steven@usejunior.com' },
+      { email: 'test-user@example.com' },
       { email: 'bob@corp.com' },
     ],
     cc: [{ email: 'team@corp.com' }],
@@ -91,7 +91,7 @@ describe('email-watcher/Authenticated Wake POST', () => {
 
     try {
       const msg = createTestMessage();
-      const payload = buildWakePayload('steven@usejunior.com', msg);
+      const payload = buildWakePayload('test-user@example.com', msg);
       const result = await sendWake('http://localhost:18789/hooks/wake', payload, 'test-token');
 
       expect(result.success).toBe(true);
@@ -114,15 +114,15 @@ describe('email-watcher/Authenticated Wake POST', () => {
 
 describe('email-watcher/Wake Payload', () => {
   it('Scenario: Multi-mailbox wake', () => {
-    // WHEN a new email arrives at steven@usejunior.com from Alice Smith <alice@corp.com>
-    // with subject "Contract Review", to steven@usejunior.com and bob@corp.com,
+    // WHEN a new email arrives at test-user@example.com from Alice Smith <alice@corp.com>
+    // with subject "Contract Review", to test-user@example.com and bob@corp.com,
     // cc team@corp.com, with attachments
     const msg = createTestMessage();
-    const payload = buildWakePayload('steven@usejunior.com', msg);
+    const payload = buildWakePayload('test-user@example.com', msg);
 
     expect(payload.text).toBe(
-      'New email to steven@usejunior.com from Alice Smith <alice@corp.com>: Contract Review\n' +
-      'To: steven@usejunior.com, bob@corp.com\n' +
+      'New email to test-user@example.com from Alice Smith <alice@corp.com>: Contract Review\n' +
+      'To: test-user@example.com, bob@corp.com\n' +
       'Cc: team@corp.com\n' +
       'Attachments: yes',
     );
@@ -133,16 +133,16 @@ describe('email-watcher/Wake Payload', () => {
     // WHEN email has no cc and no attachments
     const msg = createTestMessage({
       from: { email: 'bob@corp.com' },
-      to: [{ email: 'steven@usejunior.com' }],
+      to: [{ email: 'test-user@example.com' }],
       subject: 'Quick question',
       cc: [],
       hasAttachments: false,
     });
-    const payload = buildWakePayload('steven@usejunior.com', msg);
+    const payload = buildWakePayload('test-user@example.com', msg);
 
     expect(payload.text).toBe(
-      'New email to steven@usejunior.com from bob@corp.com: Quick question\n' +
-      'To: steven@usejunior.com',
+      'New email to test-user@example.com from bob@corp.com: Quick question\n' +
+      'To: test-user@example.com',
     );
     // No "Attachments:" line
     expect(payload.text).not.toContain('Attachments');
@@ -153,7 +153,7 @@ describe('email-watcher/Wake Payload', () => {
   it('Scenario: No structured email object in payload', () => {
     // WHEN the system constructs a wake payload
     const msg = createTestMessage();
-    const payload = buildWakePayload('steven@usejunior.com', msg);
+    const payload = buildWakePayload('test-user@example.com', msg);
 
     // THEN the payload contains only text and mode keys
     const keys = Object.keys(payload);
@@ -201,12 +201,12 @@ describe('email-watcher/Multi-Mailbox Monitoring', () => {
   it('Scenario: Two mailboxes', () => {
     // Verify wake payloads include the correct receiving mailbox
     const msg1 = createTestMessage({ from: { email: 'alice@corp.com' }, subject: 'Meeting Notes' });
-    const workPayload = buildWakePayload('steven@usejunior.com', msg1);
-    expect(workPayload.text).toContain('steven@usejunior.com');
+    const workPayload = buildWakePayload('test-user@example.com', msg1);
+    expect(workPayload.text).toContain('test-user@example.com');
 
     const msg2 = createTestMessage({ from: { email: 'friend@gmail.com' }, subject: 'Weekend Plans' });
-    const personalPayload = buildWakePayload('steven@gmail.com', msg2);
-    expect(personalPayload.text).toContain('steven@gmail.com');
+    const personalPayload = buildWakePayload('test-user@gmail.com', msg2);
+    expect(personalPayload.text).toContain('test-user@gmail.com');
 
     // Both should have different content
     expect(workPayload.text).not.toBe(personalPayload.text);
@@ -229,9 +229,9 @@ describe('email-watcher/Delta State Persistence', () => {
   });
 
   it('Scenario: Delta state file per mailbox', () => {
-    const path1 = getDeltaStatePath('steven-usejunior-com');
+    const path1 = getDeltaStatePath('test-user-example-com');
     const path2 = getDeltaStatePath('alice-corp-com');
-    expect(path1).toContain('steven-usejunior-com.delta.json');
+    expect(path1).toContain('test-user-example-com.delta.json');
     expect(path2).toContain('alice-corp-com.delta.json');
     expect(path1).not.toBe(path2);
   });
@@ -377,7 +377,7 @@ describe('email-watcher/Timestamp-Based Polling Protocol', () => {
 
     try {
       const msg = createTestMessage();
-      const payload = buildWakePayload('steven@usejunior.com', msg);
+      const payload = buildWakePayload('test-user@example.com', msg);
       const result = await sendWake('http://localhost:18789/hooks/wake', payload, 'token');
       expect(result.success).toBe(false);
 
@@ -438,9 +438,9 @@ describe('email-watcher/Per-Mailbox Checkpoint Persistence', () => {
   it('Scenario: Checkpoint file per mailbox', () => {
     // WHEN two mailboxes are configured
     // THEN two separate checkpoint files exist
-    const path1 = getDeltaStatePath('steven-usejunior-com');
+    const path1 = getDeltaStatePath('test-user-example-com');
     const path2 = getDeltaStatePath('alice-corp-com');
-    expect(path1).toContain('steven-usejunior-com');
+    expect(path1).toContain('test-user-example-com');
     expect(path2).toContain('alice-corp-com');
     expect(path1).not.toBe(path2);
   });

@@ -17,6 +17,7 @@
     "lint": "npm run lint --workspaces --if-present",
     "clean": "npm run clean --workspaces --if-present",
     "check:spec-coverage": "node scripts/check-spec-coverage.mjs",
+    "check:server-json": "node scripts/check-server-json.mjs",
     "dev:serve": "npx tsx packages/email-mcp/src/serve-entry.ts",
     "dev:watch": "npx tsx packages/email-mcp/src/cli.ts watch",
     "dev:configure": "npx tsx packages/email-mcp/src/cli.ts configure"
@@ -25,5 +26,21 @@
     "type": "git",
     "url": "https://github.com/UseJunior/agent-email.git"
   },
+  "homepage": "https://github.com/UseJunior/agent-email#readme",
+  "bugs": {
+    "url": "https://github.com/UseJunior/agent-email/issues"
+  },
+  "keywords": [
+    "email",
+    "mcp",
+    "ai-agent",
+    "microsoft-graph",
+    "gmail",
+    "model-context-protocol",
+    "claude",
+    "gemini",
+    "typescript"
+  ],
+  "author": "UseJunior (https://usejunior.com)",
   "license": "Apache-2.0"
 }

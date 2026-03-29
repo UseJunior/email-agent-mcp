@@ -1,12 +1,56 @@
+# Node / build
 node_modules/
 dist/
 *.tsbuildinfo
+*.tgz
+
+# Environment
 .env
 .env.*
 !.env.example
+
+# Test artifacts
 coverage/
 allure-results/
 allure-report/
+
+# Logs
 *.log
+
+# OS artifacts
 .DS_Store
+Thumbs.db
+
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temporary files
 tmp/
+
+# Git worktrees
+.worktrees/
+
+# Credentials and secrets
+*-credentials.json
+.sa-key.json
+
+# Claude / Cursor / Gemini local settings
+.claude/settings.local.json
+
+# Python virtual env
+.venv/
+
+# Vercel
+.vercel/
+
+# OpenSpec private drafts
+openspec/private/*
+!openspec/private/.gitkeep
+
+# Stray TypeScript emit in source dirs
+packages/*/src/**/*.js
+packages/*/src/**/*.js.map
+packages/*/src/**/*.d.ts.map

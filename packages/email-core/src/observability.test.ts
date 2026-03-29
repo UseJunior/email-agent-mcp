@@ -92,11 +92,11 @@ describe('observability/Error Sanitization', () => {
   });
 
   it('Scenario: File path in error', () => {
-    const errorMsg = 'Failed to read config: /Users/stevenobiajulu/.config/credentials.json not found';
+    const errorMsg = 'Failed to read config: /Users/testuser/.config/credentials.json not found';
     const sanitized = sanitizeError(errorMsg);
 
     expect(sanitized).toContain('[PATH]');
-    expect(sanitized).not.toContain('/Users/stevenobiajulu');
+    expect(sanitized).not.toContain('/Users/testuser');
   });
 });
 

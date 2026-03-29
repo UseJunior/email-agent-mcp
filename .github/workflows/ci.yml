@@ -1,0 +1,160 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rhysd/actionlint@v1.7.11
+
+  workspace-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies (npm ci with retry)
+        run: |
+          for attempt in 1 2 3; do
+            echo "npm ci attempt ${attempt}/3"
+            if npm ci; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 20))
+            fi
+          done
+          echo "npm ci failed after 3 attempts"
+          exit 1
+      - name: Build workspaces
+        run: npm run build
+      - name: Lint/typecheck workspaces
+        run: npm run lint
+
+  spec-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies (npm ci with retry)
+        run: |
+          for attempt in 1 2 3; do
+            echo "npm ci attempt ${attempt}/3"
+            if npm ci; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 20))
+            fi
+          done
+          echo "npm ci failed after 3 attempts"
+          exit 1
+      - name: Validate OpenSpec traceability coverage
+        run: npm run check:spec-coverage
+
+  server-json-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies (npm ci with retry)
+        run: |
+          for attempt in 1 2 3; do
+            echo "npm ci attempt ${attempt}/3"
+            if npm ci; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 20))
+            fi
+          done
+          echo "npm ci failed after 3 attempts"
+          exit 1
+      - name: Validate server.json version contract
+        run: npm run check:server-json
+
+  workspace-test:
+    runs-on: ubuntu-latest
+    needs: workspace-lint
+    strategy:
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - name: Install dependencies (npm ci with retry)
+        run: |
+          for attempt in 1 2 3; do
+            echo "npm ci attempt ${attempt}/3"
+            if npm ci; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 20))
+            fi
+          done
+          echo "npm ci failed after 3 attempts"
+          exit 1
+      - name: Build workspaces
+        run: npm run build
+      - name: Test workspaces
+        run: npm run test:run
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies (npm ci with retry)
+        run: |
+          for attempt in 1 2 3; do
+            echo "npm ci attempt ${attempt}/3"
+            if npm ci; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 20))
+            fi
+          done
+          echo "npm ci failed after 3 attempts"
+          exit 1
+      - name: Build workspaces
+        run: npm run build
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+  semgrep:
+    uses: ./.github/workflows/semgrep.yml
+    permissions:
+      actions: read
+      contents: read
+      security-events: write

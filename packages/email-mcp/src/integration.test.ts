@@ -50,9 +50,9 @@ describe('provider-interface/Dynamic discovery — dist exports', () => {
   it('Scenario: toFilesystemSafeKey produces safe filenames', async () => {
     const { toFilesystemSafeKey } = await import('@usejunior/provider-microsoft');
 
-    const safeKey = toFilesystemSafeKey('steven@usejunior.com');
+    const safeKey = toFilesystemSafeKey('test-user@example.com');
     // Must be lowercase, @ replaced with -at-, dots replaced with hyphens
-    expect(safeKey).toBe('steven-at-usejunior-com');
+    expect(safeKey).toBe('test-user-at-example-com');
     expect(safeKey).not.toContain('@');
     expect(safeKey).not.toContain('.');
     // Must only contain filesystem-safe characters
@@ -138,7 +138,7 @@ describe('email-watcher/Wake Payload — integration', () => {
       subject: 'Contract Review \u2014 Q1 2024',
       from: { email: 'alice@corp.com', name: 'Alice Smith' },
       to: [
-        { email: 'steven@usejunior.com', name: 'Steven O.' },
+        { email: 'test-user@example.com', name: 'Test User' },
         { email: 'bob@corp.com' },
       ],
       cc: [{ email: 'team@corp.com', name: 'Team DL' }],
@@ -151,17 +151,17 @@ describe('email-watcher/Wake Payload — integration', () => {
       threadId: 'thread-abc-123',
     };
 
-    const payload = buildWakePayload('steven@usejunior.com', message);
+    const payload = buildWakePayload('test-user@example.com', message);
 
     // WakePayload must have exactly {text, mode} — no structured email object
     expect(Object.keys(payload).sort()).toEqual(['mode', 'text']);
     expect(payload.mode).toBe('now');
 
     // Text must be self-contained for LLM readability
-    expect(payload.text).toContain('New email to steven@usejunior.com');
+    expect(payload.text).toContain('New email to test-user@example.com');
     expect(payload.text).toContain('Alice Smith <alice@corp.com>');
     expect(payload.text).toContain('Contract Review');
-    expect(payload.text).toContain('To: steven@usejunior.com, bob@corp.com');
+    expect(payload.text).toContain('To: test-user@example.com, bob@corp.com');
     expect(payload.text).toContain('Cc: team@corp.com');
     expect(payload.text).toContain('Attachments: yes');
 
