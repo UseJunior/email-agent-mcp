@@ -232,7 +232,7 @@ export async function runServer(): Promise<void> {
 // Import z lazily for action definitions
 async function buildRealActions(provider: { listMessages: Function; getMessage: Function; searchMessages: Function }, auth: { getTokenHealthWarning: () => string | undefined }, sendAllowlist?: { entries: string[] }): Promise<EmailActionDef[]> {
   const { z } = await import('zod');
-  const { sendEmailAction, replyToEmailAction } = await import('@usejunior/email-core');
+  const { sendEmailAction, replyToEmailAction, createDraftAction, sendDraftAction, updateDraftAction } = await import('@usejunior/email-core');
 
   // Build ActionContext for send/reply actions
   const actionCtx = { provider: provider as never, sendAllowlist };
@@ -345,6 +345,30 @@ async function buildRealActions(provider: { listMessages: Function; getMessage: 
       annotations: replyToEmailAction.annotations,
       run: async (_ctx, input) => replyToEmailAction.run(actionCtx as never, input as never),
     },
+    {
+      name: createDraftAction.name,
+      description: createDraftAction.description,
+      input: createDraftAction.input,
+      output: createDraftAction.output,
+      annotations: createDraftAction.annotations,
+      run: async (_ctx, input) => createDraftAction.run(actionCtx as never, input as never),
+    },
+    {
+      name: sendDraftAction.name,
+      description: sendDraftAction.description,
+      input: sendDraftAction.input,
+      output: sendDraftAction.output,
+      annotations: sendDraftAction.annotations,
+      run: async (_ctx, input) => sendDraftAction.run(actionCtx as never, input as never),
+    },
+    {
+      name: updateDraftAction.name,
+      description: updateDraftAction.description,
+      input: updateDraftAction.input,
+      output: updateDraftAction.output,
+      annotations: updateDraftAction.annotations,
+      run: async (_ctx, input) => updateDraftAction.run(actionCtx as never, input as never),
+    },
   ];
 }
 
@@ -370,6 +394,21 @@ async function buildDemoActions(): Promise<EmailActionDef[]> {
       name: 'get_mailbox_status', description: 'Get mailbox status', input: z.object({ mailbox: z.string().optional() }), output: z.object({ name: z.string(), provider: z.string(), status: z.string(), isDefault: z.boolean(), warnings: z.array(z.string()) }),
       annotations: { readOnlyHint: true, destructiveHint: false },
       run: async () => ({ name: 'none', provider: 'none', status: 'not configured', isDefault: false, warnings: ['No mailbox configured. Run: agent-email configure --mailbox <name> --provider microsoft'] }),
+    },
+    {
+      name: 'create_draft', description: 'Create email draft', input: z.object({ to: z.string().optional(), subject: z.string().optional(), body: z.string().optional() }), output: z.object({ success: z.boolean(), error: z.object({ code: z.string(), message: z.string(), recoverable: z.boolean() }).optional() }),
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      run: async () => ({ success: false, error: { code: 'DEMO_MODE', message: 'Demo mode — run agent-email configure to connect a mailbox', recoverable: false } }),
+    },
+    {
+      name: 'send_draft', description: 'Send a draft', input: z.object({ draft_id: z.string() }), output: z.object({ success: z.boolean(), error: z.object({ code: z.string(), message: z.string(), recoverable: z.boolean() }).optional() }),
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      run: async () => ({ success: false, error: { code: 'DEMO_MODE', message: 'Demo mode — run agent-email configure to connect a mailbox', recoverable: false } }),
+    },
+    {
+      name: 'update_draft', description: 'Update a draft', input: z.object({ draft_id: z.string(), body: z.string().optional() }), output: z.object({ success: z.boolean(), error: z.object({ code: z.string(), message: z.string(), recoverable: z.boolean() }).optional() }),
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      run: async () => ({ success: false, error: { code: 'DEMO_MODE', message: 'Demo mode — run agent-email configure to connect a mailbox', recoverable: false } }),
     },
   ];
 }

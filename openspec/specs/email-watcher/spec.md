@@ -5,27 +5,47 @@ feature: Email Arrival Detection
 
 ## Purpose
 
-Defines the email watcher that monitors configured mailboxes for new emails and triggers agent wake via authenticated webhook POST. Supports dual mode per provider: Graph Delta Query polling + webhook, Gmail history.list polling + Pub/Sub. Monitors all configured mailboxes and includes mailbox email address in wake payloads. Wake payloads use text-only format for OpenClaw `/hooks/wake` compatibility. The watcher implements Delta Query sync protocol with baseline sync, paging, tombstone filtering, and resync on state expiry.
+Defines the email watcher that monitors configured mailboxes for new emails and triggers agent wake via authenticated webhook POST. Uses timestamp-based polling to detect new messages. Monitors all configured mailboxes and includes mailbox email address in wake payloads. Wake payloads use text-only format for OpenClaw `/hooks/wake` compatibility. The watcher uses `receivedDateTime ge {since}` filtering with a checkpoint that advances only after a successful wake POST.
 
-### Requirement: Dual Mode Per Provider
+### Requirement: Timestamp-Based Polling Protocol
 
-The system SHALL support two detection modes per provider, selectable via configuration.
+The watcher SHALL use timestamp-based polling to detect new emails. On first run, the checkpoint is set to the current time (no historical backfill). Subsequent polls filter messages using `receivedDateTime ge {since}`. The checkpoint advances only after a successful wake POST, ensuring no messages are lost on transient failures.
 
-#### Scenario: Graph Delta Query (default for local)
-- **WHEN** Graph provider is configured without a public webhook URL
-- **THEN** the watcher uses Delta Query polling at a configurable interval (default 30s)
+#### Scenario: First run sets checkpoint to now
+- **WHEN** the watcher starts for a mailbox with no saved state
+- **THEN** it sets the checkpoint to the current time without processing any historical messages
+- **AND** no wake POSTs are sent during the first poll
 
-#### Scenario: Graph Webhook (production)
-- **WHEN** Graph provider is configured with a public HTTPS webhook URL
-- **THEN** the watcher registers for Graph change notifications
+#### Scenario: Subsequent poll uses receivedDateTime filter
+- **WHEN** the watcher polls after the first run
+- **THEN** it queries messages with `receivedDateTime ge {since}` where `{since}` is the saved checkpoint
+- **AND** sends wake POSTs only for messages newer than the checkpoint
 
-#### Scenario: Gmail history.list (default for local)
-- **WHEN** Gmail provider is configured without Pub/Sub
-- **THEN** the watcher polls `history.list` at a configurable interval (default 30s)
+#### Scenario: Checkpoint advances only after successful wake
+- **WHEN** a new email is detected and the wake POST succeeds
+- **THEN** the checkpoint advances to the `receivedDateTime` of the processed message
+- **AND** subsequent polls use the new checkpoint
 
-#### Scenario: Gmail Pub/Sub (production)
-- **WHEN** Gmail Pub/Sub is configured
-- **THEN** the watcher registers for push notifications with auto-renewal every 7 days
+#### Scenario: Checkpoint unchanged on wake failure
+- **WHEN** a new email is detected but the wake POST fails (e.g., network error, 5xx)
+- **THEN** the checkpoint remains unchanged
+- **AND** the message will be retried on the next poll cycle
+
+### Requirement: Poll Interval Validation
+
+The watcher SHALL validate the poll interval to prevent excessive API usage. Minimum interval is 2 seconds (rejected below), intervals below 5 seconds log a warning, and the default is 10 seconds.
+
+#### Scenario: Default poll interval
+- **WHEN** no poll interval is configured
+- **THEN** the watcher uses a 10-second poll interval
+
+#### Scenario: Minimum interval enforced
+- **WHEN** the poll interval is set below 2 seconds
+- **THEN** the watcher rejects the configuration with an error
+
+#### Scenario: Warning for aggressive interval
+- **WHEN** the poll interval is set to a value >= 2s but < 5s
+- **THEN** the watcher logs a warning that the interval is aggressive and may cause rate limiting
 
 ### Requirement: Authenticated Wake POST
 
@@ -52,43 +72,17 @@ The wake payload SHALL be text-only `{text, mode}` for OpenClaw `/hooks/wake` co
 - **WHEN** the system constructs a wake payload
 - **THEN** the payload contains only `text` and `mode` keys at the top level — no `email`, `metadata`, or other structured objects
 
-### Requirement: Delta Query Sync Protocol
+### Requirement: Per-Mailbox Checkpoint Persistence
 
-The watcher SHALL implement a correct Delta Query sync protocol with the following phases: baseline sync on first run (consume all pages silently without waking), subsequent polls using the saved `deltaLink`, `@odata.nextLink` paging, `@removed` tombstone filtering, and `410 Gone` resync.
+The watcher SHALL persist the polling checkpoint per mailbox in `~/.agent-email/state/{mailbox-id}.watcher.json`. This ensures the watcher survives restarts without reprocessing old messages or missing new ones.
 
-#### Scenario: Baseline sync on first run
-- **WHEN** the watcher starts for a mailbox with no saved delta state
-- **THEN** it consumes ALL pages (following `@odata.nextLink`) silently without sending any wake POSTs
-- **AND** saves the final `@odata.deltaLink` for subsequent polls
-
-#### Scenario: Subsequent poll with deltaLink
-- **WHEN** the watcher polls after baseline sync
-- **THEN** it uses the saved `deltaLink` to fetch only new changes since the last poll
-- **AND** sends wake POSTs only for genuinely new messages
-
-#### Scenario: Paging with @odata.nextLink
-- **WHEN** a delta response includes `@odata.nextLink`
-- **THEN** the system follows the link to fetch the next page of results before processing
-
-#### Scenario: Tombstone filtering
-- **WHEN** a delta response includes items with `@removed` (deleted or moved messages)
-- **THEN** those items are filtered out and do NOT trigger wake POSTs
-
-#### Scenario: 410 Gone resync
-- **WHEN** a delta request returns `410 Gone` or `syncStateNotFound`
-- **THEN** the system discards the stale `deltaLink` and performs a full baseline resync (silent, no wakes)
-
-### Requirement: Per-Mailbox Delta State Persistence
-
-The watcher SHALL persist delta state (including `deltaLink`) per mailbox in `~/.agent-email/state/{mailbox-id}.delta.json`. This ensures the watcher survives restarts without reprocessing old messages.
-
-#### Scenario: Delta state persisted across restart
+#### Scenario: Checkpoint persisted across restart
 - **WHEN** the watcher is stopped and restarted
-- **THEN** it loads the saved `deltaLink` from `~/.agent-email/state/` and resumes polling without a full baseline resync
+- **THEN** it loads the saved checkpoint from `~/.agent-email/state/` and resumes polling from where it left off
 
-#### Scenario: Delta state file per mailbox
+#### Scenario: Checkpoint file per mailbox
 - **WHEN** two mailboxes are configured (`steven@usejunior.com` and `alice@corp.com`)
-- **THEN** two separate delta state files exist: `steven-usejunior-com.delta.json` and `alice-corp-com.delta.json`
+- **THEN** two separate checkpoint files exist: `steven-usejunior-com.watcher.json` and `alice-corp-com.watcher.json`
 
 ### Requirement: Per-Mailbox Lock File
 
@@ -124,23 +118,11 @@ The watcher SHALL gate each new message against a receive allowlist BEFORE sendi
 
 ### Requirement: Deduplication
 
-The system SHALL NOT re-wake for already-processed emails. Delta can return duplicates — the system SHALL deduplicate by message ID.
+The system SHALL NOT re-wake for already-processed emails. Timestamp-based polling can return duplicates across poll cycles — the system SHALL deduplicate by message ID.
 
 #### Scenario: Duplicate suppression
 - **WHEN** the same email ID is detected twice (e.g., due to polling overlap or delta replay)
 - **THEN** the second detection is silently skipped
-
-### Requirement: Subscription Lifecycle
-
-The system SHALL auto-renew provider subscriptions before expiry and handle renewal failures gracefully.
-
-#### Scenario: Graph subscription renewal
-- **WHEN** a Graph webhook subscription approaches expiry
-- **THEN** the system verifies it exists (zombie check) and renews it
-
-#### Scenario: Gmail watch renewal
-- **WHEN** the Gmail Pub/Sub watch approaches 7-day expiry
-- **THEN** the system re-calls `users.watch()` to renew
 
 ### Requirement: Multi-Mailbox Monitoring
 

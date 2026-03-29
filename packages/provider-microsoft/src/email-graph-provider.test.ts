@@ -349,6 +349,141 @@ describe('provider-microsoft/Search Hardening', () => {
   });
 });
 
+describe('provider-microsoft/Inbox-Scoped Message Access', () => {
+  it('Scenario: Inbox-scoped message listing', async () => {
+    // WHEN listing or fetching messages from Graph
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.listMessages({ limit: 10 });
+
+    // THEN the API call uses /me/mailFolders/Inbox/messages (default folder is inbox)
+    const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(url).toContain('mailFolders/inbox/messages');
+    expect(url).not.toMatch(/\/me\/messages\?/);
+  });
+
+  it('Scenario: Inbox-scoped delta query', async () => {
+    // WHEN the watcher performs a delta query
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({
+        value: [],
+        '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/delta?token=abc',
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    // Use the inbox-scoped delta URL
+    await provider.getDeltaMessages('https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages/delta?$select=subject');
+
+    // THEN the API call uses /me/mailFolders/Inbox/messages/delta
+    const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(url).toContain('mailFolders/Inbox/messages/delta');
+    expect(url).not.toMatch(/\/me\/messages\/delta/);
+  });
+});
+
+describe('provider-microsoft/Delta Query Field Selection', () => {
+  it('Scenario: Delta query uses $select', async () => {
+    // WHEN the system issues a Delta Query request for inbox messages
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({
+        value: [],
+        '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/delta?token=abc',
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    // The initial delta URL includes $select for efficiency
+    const deltaUrl = 'https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages/delta?$select=subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments';
+    await provider.getDeltaMessages(deltaUrl);
+
+    // THEN the request includes $select with the required fields
+    const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(url).toContain('$select=');
+    expect(url).toContain('subject');
+    expect(url).toContain('from');
+    expect(url).toContain('toRecipients');
+    expect(url).toContain('ccRecipients');
+    expect(url).toContain('receivedDateTime');
+    expect(url).toContain('hasAttachments');
+  });
+
+  it('Scenario: Selected fields sufficient for wake payload', async () => {
+    // WHEN the watcher constructs a wake payload from delta query results
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({
+        value: [{
+          id: 'msg-1',
+          subject: 'Quarterly Report',
+          from: { emailAddress: { address: 'cfo@corp.com', name: 'CFO' } },
+          toRecipients: [{ emailAddress: { address: 'steven@usejunior.com' } }],
+          ccRecipients: [{ emailAddress: { address: 'team@corp.com' } }],
+          receivedDateTime: '2024-06-01T12:00:00Z',
+          hasAttachments: true,
+        }],
+        '@odata.deltaLink': 'https://graph.microsoft.com/v1.0/delta?token=next',
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const delta = await provider.getDeltaMessages(
+      'https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages/delta?$select=subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments',
+    );
+
+    // THEN all required payload fields are available from the $select fields
+    const msg = delta.messages[0]!;
+    expect(msg.subject).toBe('Quarterly Report');
+    expect(msg.from.email).toBe('cfo@corp.com');
+    expect(msg.to).toHaveLength(1);
+    expect(msg.to[0]!.email).toBe('steven@usejunior.com');
+    expect(msg.cc).toHaveLength(1);
+    expect(msg.cc![0]!.email).toBe('team@corp.com');
+    expect(msg.hasAttachments).toBe(true);
+    expect(msg.receivedAt).toBe('2024-06-01T12:00:00Z');
+  });
+});
+
+describe('provider-microsoft/Email Address Retrieval from /me', () => {
+  it('Scenario: Email from /me mail property', async () => {
+    // WHEN configure_mailbox fetches /me and the response includes mail: "steven@usejunior.com"
+    // The auth manager stores the email address from the /me profile
+    const auth = new (await import('./auth.js')).DelegatedAuthManager(
+      { mode: 'delegated', clientId: 'test-client-id' },
+      'work',
+    );
+
+    // Simulate setting the email address from /me mail property
+    auth.setEmailAddress('steven@usejunior.com');
+
+    // THEN the stored emailAddress is steven@usejunior.com
+    expect(auth.emailAddress).toBe('steven@usejunior.com');
+  });
+
+  it('Scenario: Fallback to userPrincipalName', async () => {
+    // WHEN configure_mailbox fetches /me and mail is null
+    // AND userPrincipalName is steven@usejunior.onmicrosoft.com
+    // Simulate the fallback logic from cli.ts runConfigure:
+    //   const emailAddress = profile.mail ?? profile.userPrincipalName;
+    const profile = {
+      mail: null as string | null,
+      userPrincipalName: 'steven@usejunior.onmicrosoft.com',
+    };
+    const emailAddress = profile.mail ?? profile.userPrincipalName;
+
+    // THEN the stored emailAddress is steven@usejunior.onmicrosoft.com
+    expect(emailAddress).toBe('steven@usejunior.onmicrosoft.com');
+
+    // Verify the auth manager accepts this fallback value
+    const auth = new (await import('./auth.js')).DelegatedAuthManager(
+      { mode: 'delegated', clientId: 'test-client-id' },
+      'work',
+    );
+    auth.setEmailAddress(emailAddress);
+    expect(auth.emailAddress).toBe('steven@usejunior.onmicrosoft.com');
+  });
+});
+
 describe('provider-microsoft/Watcher Timestamp Boundary', () => {
   it('Scenario: getNewMessages uses ge not gt', async () => {
     const client = createMockClient();

@@ -2,6 +2,7 @@
 import { z } from 'zod';
 import type { EmailAction } from './registry.js';
 import { checkSendAllowlist } from '../security/send-allowlist.js';
+import { isPlausibleMessageId } from '../security/reply-validation.js';
 import { ProviderError, withRetry } from '../providers/provider.js';
 
 const ReplyToEmailInput = z.object({
@@ -9,11 +10,13 @@ const ReplyToEmailInput = z.object({
   body: z.string(),
   mailbox: z.string().optional(),
   cc: z.array(z.string()).optional(),
+  draft: z.boolean().optional(),
 });
 
 const ReplyToEmailOutput = z.object({
   success: z.boolean(),
   messageId: z.string().optional(),
+  draftId: z.string().optional(),
   error: z.object({
     code: z.string(),
     message: z.string(),
@@ -26,7 +29,7 @@ export const replyToEmailAction: EmailAction<
   z.infer<typeof ReplyToEmailOutput>
 > = {
   name: 'reply_to_email',
-  description: 'Reply to an email within an existing thread. Gated by send allowlist.',
+  description: 'Reply to an email within an existing thread. Gated by send allowlist. Supports draft mode.',
   input: ReplyToEmailInput,
   output: ReplyToEmailOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -38,6 +41,18 @@ export const replyToEmailAction: EmailAction<
         error: {
           code: 'MAILBOX_REQUIRED',
           message: 'mailbox parameter required when multiple mailboxes are configured',
+          recoverable: false,
+        },
+      };
+    }
+
+    // Validate message ID plausibility
+    if (!isPlausibleMessageId(input.message_id)) {
+      return {
+        success: false,
+        error: {
+          code: 'INVALID_MESSAGE_ID',
+          message: 'message_id does not appear to be a valid provider message ID',
           recoverable: false,
         },
       };
@@ -60,6 +75,49 @@ export const replyToEmailAction: EmailAction<
           recoverable: false,
         },
       };
+    }
+
+    // Draft branch — create reply draft instead of sending
+    if (input.draft) {
+      if (!ctx.provider.createReplyDraft) {
+        return {
+          success: false,
+          error: {
+            code: 'NOT_SUPPORTED',
+            message: 'Reply drafts are not supported by this email provider',
+            recoverable: false,
+          },
+        };
+      }
+      try {
+        const draftResult = await ctx.provider.createReplyDraft(input.message_id, input.body, {
+          cc: input.cc?.map(email => ({ email })),
+        });
+        return {
+          success: draftResult.success,
+          draftId: draftResult.draftId,
+          error: draftResult.error ? {
+            code: draftResult.error.code,
+            message: draftResult.error.message,
+            recoverable: draftResult.error.recoverable,
+          } : undefined,
+        };
+      } catch (err) {
+        if (err instanceof ProviderError) {
+          return {
+            success: false,
+            error: { code: err.code, message: err.message, recoverable: err.recoverable },
+          };
+        }
+        return {
+          success: false,
+          error: {
+            code: 'DRAFT_FAILED',
+            message: err instanceof Error ? err.message : String(err),
+            recoverable: false,
+          },
+        };
+      }
     }
 
     // Check rate limit

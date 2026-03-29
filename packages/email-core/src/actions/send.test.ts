@@ -142,6 +142,107 @@ describe('email-write/Body File Composition', () => {
   });
 });
 
+describe('email-write/Frontmatter Support', () => {
+  it('Scenario: Frontmatter values used for to/subject/body', async () => {
+    await writeFile(join(testDir, 'fm-draft.md'), `---
+to: alice@allowed.com
+subject: From Frontmatter
+---
+Body from frontmatter file.`);
+
+    const result = await sendEmailAction.run(ctx, {
+      body_file: 'fm-draft.md',
+    });
+
+    expect(result.success).toBe(true);
+    const sent = provider.getSentMessages();
+    expect(sent[0]!.to[0]!.email).toBe('alice@allowed.com');
+    expect(sent[0]!.subject).toBe('From Frontmatter');
+    expect(sent[0]!.body).toBe('Body from frontmatter file.');
+  });
+
+  it('Scenario: Frontmatter is authoritative — overrides action params', async () => {
+    await writeFile(join(testDir, 'override.md'), `---
+to: frontmatter@allowed.com
+subject: Frontmatter Subject
+---
+Body.`);
+
+    const result = await sendEmailAction.run(ctx, {
+      to: 'param@allowed.com',
+      subject: 'Param Subject',
+      body_file: 'override.md',
+    });
+
+    expect(result.success).toBe(true);
+    const sent = provider.getSentMessages();
+    expect(sent[0]!.to[0]!.email).toBe('frontmatter@allowed.com');
+    expect(sent[0]!.subject).toBe('Frontmatter Subject');
+  });
+
+  it('Scenario: Action params fill gaps when frontmatter is partial', async () => {
+    await writeFile(join(testDir, 'partial.md'), `---
+subject: From Frontmatter Only
+---
+Body.`);
+
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      body_file: 'partial.md',
+    });
+
+    expect(result.success).toBe(true);
+    const sent = provider.getSentMessages();
+    expect(sent[0]!.to[0]!.email).toBe('alice@allowed.com');
+    expect(sent[0]!.subject).toBe('From Frontmatter Only');
+  });
+
+  it('Scenario: Missing to/subject after merge returns MISSING_FIELD', async () => {
+    await writeFile(join(testDir, 'nofields.md'), `---
+draft: true
+---
+Body only.`);
+
+    const result = await sendEmailAction.run(ctx, {
+      body_file: 'nofields.md',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('MISSING_FIELD');
+  });
+
+  it('Scenario: draft: true in frontmatter creates draft', async () => {
+    await writeFile(join(testDir, 'draft-mode.md'), `---
+to: alice@allowed.com
+subject: Draft Mode
+draft: true
+---
+Body.`);
+
+    const result = await sendEmailAction.run(ctx, {
+      body_file: 'draft-mode.md',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.draftId).toBeDefined();
+    expect(provider.getSentMessages()).toHaveLength(0);
+  });
+});
+
+describe('email-write/Reply Threading Guardrail', () => {
+  it('Scenario: Re: subject without reply_to returns REPLY_THREADING_HINT', async () => {
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Re: Orphaned Reply',
+      body: 'Body',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('REPLY_THREADING_HINT');
+    expect(result.error!.recoverable).toBe(true);
+  });
+});
+
 describe('email-write/Draft Workflow', () => {
   it('Scenario: Create and send draft', async () => {
     // Create draft

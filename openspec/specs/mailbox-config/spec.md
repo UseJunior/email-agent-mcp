@@ -77,6 +77,38 @@ The system SHALL provide a `get_mailbox_status` action returning connection stat
 - **WHEN** `get_mailbox_status` is called and no send allowlist is configured
 - **THEN** the result includes `emailAddress` and `warnings: ["Outbound email disabled — configure send allowlist to enable replies and sends"]`
 
+### Requirement: Convention-Over-Configuration Paths
+
+The system SHALL use `~/.agent-email/` as the default home directory (overridable via `AGENT_EMAIL_HOME` env var) with well-known subdirectories and files loaded by convention.
+
+#### Scenario: Default home directory
+- **WHEN** `AGENT_EMAIL_HOME` is not set
+- **THEN** the system uses `~/.agent-email/` as the home directory
+
+#### Scenario: Custom home directory via env var
+- **WHEN** `AGENT_EMAIL_HOME` is set to `/tmp/ae-test`
+- **THEN** the system uses `/tmp/ae-test/` as the home directory instead of `~/.agent-email/`
+
+#### Scenario: Tokens directory for auth metadata
+- **WHEN** the system stores authentication metadata (OAuth tokens, refresh tokens)
+- **THEN** it writes to `~/.agent-email/tokens/`
+
+#### Scenario: State directory for watcher state and locks
+- **WHEN** the system stores watcher checkpoints or lock files
+- **THEN** it writes to `~/.agent-email/state/`
+
+#### Scenario: Config file for persistent settings
+- **WHEN** the system reads or writes persistent configuration
+- **THEN** it uses `~/.agent-email/config.json` containing wakeUrl, hooksToken, and pollIntervalSeconds
+
+#### Scenario: Allowlist files loaded by convention
+- **WHEN** the system checks send or receive allowlists
+- **THEN** it loads `~/.agent-email/send-allowlist.json` and `~/.agent-email/receive-allowlist.json` by convention
+
+#### Scenario: Auto-add email to send allowlist during configure
+- **WHEN** a mailbox is successfully configured
+- **THEN** the configured email address is automatically added to `send-allowlist.json`
+
 ### Requirement: Provider Discovery
 
 The system SHALL detect installed provider packages (`@usejunior/provider-microsoft`, `@usejunior/provider-gmail`) via dynamic import and suggest installation if a requested provider is missing.

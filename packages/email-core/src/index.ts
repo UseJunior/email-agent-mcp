@@ -34,3 +34,8 @@ export {
 export { htmlToMarkdown, transformEmailContent } from './content/sanitize.js';
 export { sendEmailAction } from './actions/send.js';
 export { replyToEmailAction } from './actions/reply.js';
+export { createDraftAction, sendDraftAction, updateDraftAction } from './actions/draft.js';
+export { parseFrontmatter } from './content/frontmatter.js';
+export type { FrontmatterFields } from './content/frontmatter.js';
+export { resolveBodyFile, truncateBody, BODY_SIZE_LIMIT } from './content/body-loader.js';
+export { isPlausibleMessageId, checkReplyThreading } from './security/reply-validation.js';

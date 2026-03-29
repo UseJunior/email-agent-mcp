@@ -227,6 +227,42 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
     return { success: true, messageId: `sent-${this.nextId++}` };
   }
 
+  async createReplyDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {
+    this.maybeThrow();
+    const original = this.messages.find(m => m.id === messageId);
+    if (!original) {
+      throw new Error(`Message not found: ${messageId}`);
+    }
+    const draftId = `draft-${this.nextId++}`;
+    this.drafts.set(draftId, {
+      to: [original.from],
+      cc: opts?.cc,
+      subject: `Re: ${original.subject}`,
+      body,
+    });
+    return { success: true, draftId };
+  }
+
+  async updateDraft(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult> {
+    this.maybeThrow();
+    const existing = this.drafts.get(draftId);
+    if (!existing) {
+      throw new Error(`Draft not found: ${draftId}`);
+    }
+    this.drafts.set(draftId, {
+      ...existing,
+      ...(msg.to !== undefined && { to: msg.to }),
+      ...(msg.cc !== undefined && { cc: msg.cc }),
+      ...(msg.subject !== undefined && { subject: msg.subject }),
+      ...(msg.body !== undefined && { body: msg.body }),
+    });
+    return { success: true, draftId };
+  }
+
+  getDrafts(): Map<string, ComposeMessage> {
+    return new Map(this.drafts);
+  }
+
   // --- EmailSubscriber ---
 
   async subscribe(callback: (msg: EmailMessage) => void): Promise<Subscription> {

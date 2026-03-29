@@ -23,6 +23,8 @@ export interface EmailSender {
   replyToMessage(messageId: string, body: string, opts?: ReplyOptions): Promise<SendResult>;
   createDraft(msg: ComposeMessage): Promise<DraftResult>;
   sendDraft(draftId: string): Promise<SendResult>;
+  createReplyDraft?(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult>;
+  updateDraft?(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult>;
 }
 
 export interface EmailSubscriber {

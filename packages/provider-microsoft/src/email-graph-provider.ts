@@ -255,6 +255,39 @@ export class GraphEmailProvider {
     return { success: true, messageId: draftId };
   }
 
+  async createReplyDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {
+    // Use createReplyAll to preserve embedded images and CID references
+    const draft = await this.client.post(
+      `${this.basePath}/messages/${messageId}/createReplyAll`,
+      {},
+    );
+
+    if (draft.id) {
+      // Update draft body
+      const patch: Record<string, unknown> = {
+        body: { contentType: 'HTML', content: truncateBody(body) },
+      };
+      if (opts?.cc?.length) {
+        patch.ccRecipients = opts.cc.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
+      }
+      await this.client.patch(`${this.basePath}/messages/${draft.id}`, patch);
+      return { success: true, draftId: draft.id };
+    }
+
+    return { success: false, error: { code: 'DRAFT_FAILED', message: 'Failed to create reply draft', recoverable: false } };
+  }
+
+  async updateDraft(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult> {
+    const patch: Record<string, unknown> = {};
+    if (msg.body !== undefined) patch.body = { contentType: 'HTML', content: truncateBody(msg.body) };
+    if (msg.subject !== undefined) patch.subject = msg.subject.slice(0, SUBJECT_MAX_LENGTH);
+    if (msg.to) patch.toRecipients = msg.to.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
+    if (msg.cc) patch.ccRecipients = msg.cc.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
+
+    await this.client.patch(`${this.basePath}/messages/${draftId}`, patch);
+    return { success: true, draftId };
+  }
+
   /**
    * Get new inbox messages received after a given timestamp.
    * Uses simple $filter=receivedDateTime gt {since} — instant, no full-inbox sync.

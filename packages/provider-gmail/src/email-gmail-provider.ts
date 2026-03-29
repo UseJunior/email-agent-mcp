@@ -121,6 +121,20 @@ export class GmailEmailProvider {
     return { success: true, messageId: result.message.id };
   }
 
+  async createReplyDraft(_messageId: string, _body: string, _opts?: ReplyOptions): Promise<DraftResult> {
+    return {
+      success: false,
+      error: { code: 'NOT_SUPPORTED', message: 'Reply drafts are not yet supported for Gmail', recoverable: false },
+    };
+  }
+
+  async updateDraft(_draftId: string, _msg: Partial<ComposeMessage>): Promise<DraftResult> {
+    return {
+      success: false,
+      error: { code: 'NOT_SUPPORTED', message: 'Draft updates are not yet supported for Gmail', recoverable: false },
+    };
+  }
+
   // NemoClaw egress domains
   static get egressDomains(): string[] {
     return ['gmail.googleapis.com', 'oauth2.googleapis.com', 'pubsub.googleapis.com'];
