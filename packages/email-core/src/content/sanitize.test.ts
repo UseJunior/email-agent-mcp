@@ -67,7 +67,7 @@ describe('content-engine/HTML to Token-Efficient Markdown', () => {
     expect(result).not.toContain('track.co');
   });
 
-  it('Scenario: Tracking pixel via inline CSS', () => {
+  it('Scenario: Tracking pixel via inline CSS stripped', () => {
     const html = '<img src="https://track.co/px" style="width:1px;height:1px">';
     const result = htmlToMarkdown(html);
 
