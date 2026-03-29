@@ -16,6 +16,7 @@ export type {
   EmailReader,
   EmailSender,
   EmailSubscriber,
+  EmailCategorizer,
   EmailProvider,
   AuthManager,
 } from './providers/provider.js';
@@ -35,6 +36,9 @@ export { htmlToMarkdown, transformEmailContent } from './content/sanitize.js';
 export { sendEmailAction } from './actions/send.js';
 export { replyToEmailAction } from './actions/reply.js';
 export { createDraftAction, sendDraftAction, updateDraftAction } from './actions/draft.js';
+export { getThreadAction } from './actions/conversation.js';
+export { labelEmailAction, flagEmailAction, markReadAction, deleteEmailAction } from './actions/label.js';
+export { moveToFolderAction } from './actions/move.js';
 export { parseFrontmatter } from './content/frontmatter.js';
 export type { FrontmatterFields } from './content/frontmatter.js';
 export { resolveBodyFile, truncateBody, BODY_SIZE_LIMIT } from './content/body-loader.js';

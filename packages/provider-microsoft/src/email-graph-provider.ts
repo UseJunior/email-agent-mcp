@@ -7,6 +7,9 @@ import type {
   DraftResult,
   ListOptions,
   ReplyOptions,
+  EmailReader,
+  EmailSender,
+  EmailCategorizer,
 } from '@usejunior/email-core';
 
 const BODY_SIZE_LIMIT = 3.5 * 1024 * 1024; // 3.5MB
@@ -15,9 +18,25 @@ const SUBJECT_MAX_LENGTH = 255;
 // Sent message tracking via custom extended property
 const TRACKING_PROPERTY = 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailTrackingId';
 
+const WELL_KNOWN_FOLDER_ALIASES: Record<string, string> = {
+  archive: 'archive',
+  archived: 'archive',
+  deleted: 'deleteditems',
+  deleteditems: 'deleteditems',
+  drafts: 'drafts',
+  inbox: 'inbox',
+  junk: 'junkemail',
+  junkemail: 'junkemail',
+  outbox: 'outbox',
+  sent: 'sentitems',
+  sentitems: 'sentitems',
+  spam: 'junkemail',
+  trash: 'deleteditems',
+};
+
 export interface GraphApiClient {
   get(url: string): Promise<{ value?: unknown[]; [key: string]: unknown }>;
-  post(url: string, body: unknown): Promise<{ id?: string; [key: string]: unknown }>;
+  post(url: string, body?: unknown): Promise<{ id?: string; [key: string]: unknown }>;
   patch(url: string, body: unknown): Promise<void>;
   delete(url: string): Promise<void>;
 }
@@ -54,17 +73,16 @@ export class RealGraphApiClient implements GraphApiClient {
     return resp.json() as Promise<{ value?: unknown[]; [key: string]: unknown }>;
   }
 
-  async post(url: string, body: unknown): Promise<{ id?: string; [key: string]: unknown }> {
+  async post(url: string, body?: unknown): Promise<{ id?: string; [key: string]: unknown }> {
     const token = await this.getToken();
     const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
-    const resp = await fetch(fullUrl, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
+    const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+    const init: RequestInit = { method: 'POST', headers };
+    if (body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(body);
+    }
+    const resp = await fetch(fullUrl, init);
     // sendMail returns 202 with no body
     if (resp.status === 202) return {};
     if (!resp.ok) {
@@ -110,7 +128,7 @@ export class GraphApiError extends Error {
   }
 }
 
-export class GraphEmailProvider {
+export class GraphEmailProvider implements EmailReader, EmailSender, EmailCategorizer {
   private client: GraphApiClient;
   private basePath: string;
 
@@ -190,6 +208,44 @@ export class GraphEmailProvider {
     }
 
     return { id: messageId, subject: message.subject, messages: [message], messageCount: 1 };
+  }
+
+  async applyLabels(messageId: string, labels: string[]): Promise<void> {
+    const existingCategories = await this.getMessageCategories(messageId);
+    const categories = [...new Set([...existingCategories, ...labels])];
+    await this.client.patch(`${this.basePath}/messages/${messageId}`, { categories });
+  }
+
+  async removeLabels(messageId: string, labels: string[]): Promise<void> {
+    const labelsToRemove = new Set(labels);
+    const existingCategories = await this.getMessageCategories(messageId);
+    const categories = existingCategories.filter(label => !labelsToRemove.has(label));
+    await this.client.patch(`${this.basePath}/messages/${messageId}`, { categories });
+  }
+
+  async setFlag(messageId: string, flagged: boolean): Promise<void> {
+    await this.client.patch(`${this.basePath}/messages/${messageId}`, {
+      flag: { flagStatus: flagged ? 'flagged' : 'notFlagged' },
+    });
+  }
+
+  async setReadState(messageId: string, isRead: boolean): Promise<void> {
+    await this.client.patch(`${this.basePath}/messages/${messageId}`, { isRead });
+  }
+
+  async moveToFolder(messageId: string, folder: string): Promise<void> {
+    await this.client.post(`${this.basePath}/messages/${messageId}/move`, {
+      destinationId: normalizeFolderId(folder),
+    });
+  }
+
+  async deleteMessage(messageId: string, hard = false): Promise<void> {
+    if (hard) {
+      await this.client.post(`${this.basePath}/messages/${messageId}/permanentDelete`);
+      return;
+    }
+
+    await this.moveToFolder(messageId, 'deleteditems');
   }
 
   async sendMessage(msg: ComposeMessage): Promise<SendResult> {
@@ -347,6 +403,16 @@ export class GraphEmailProvider {
   static get egressDomains(): string[] {
     return ['graph.microsoft.com', 'login.microsoftonline.com'];
   }
+
+  private async getMessageCategories(messageId: string): Promise<string[]> {
+    const response = await this.client.get(
+      `${this.basePath}/messages/${messageId}?$select=categories`,
+    ) as { categories?: unknown };
+
+    return Array.isArray(response.categories)
+      ? response.categories.filter((value): value is string => typeof value === 'string')
+      : [];
+  }
 }
 
 interface GraphMessage {
@@ -359,7 +425,9 @@ interface GraphMessage {
   isRead?: boolean;
   hasAttachments?: boolean;
   body?: { contentType: string; content: string };
+  categories?: string[];
   conversationId?: string;
+  flag?: { flagStatus?: string };
   internetMessageId?: string;
   internetMessageHeaders?: Array<{ name: string; value: string }>;
 }
@@ -394,12 +462,18 @@ function mapGraphMessage(msg: GraphMessage): EmailMessage {
     })),
     receivedAt: msg.receivedDateTime ?? new Date().toISOString(),
     isRead: msg.isRead ?? false,
+    isFlagged: msg.flag?.flagStatus === 'flagged',
     hasAttachments: msg.hasAttachments ?? false,
     body: msg.body?.contentType?.toLowerCase() === 'text' ? msg.body.content : undefined,
     bodyHtml: msg.body?.contentType?.toLowerCase() === 'html' ? msg.body.content : undefined,
+    labels: msg.categories,
     conversationId: msg.conversationId,
     messageId: msg.internetMessageId,
   };
+}
+
+function normalizeFolderId(folder: string): string {
+  return WELL_KNOWN_FOLDER_ALIASES[folder.trim().toLowerCase()] ?? folder;
 }
 
 /**

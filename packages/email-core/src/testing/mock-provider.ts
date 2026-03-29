@@ -10,12 +10,13 @@ import type {
   Subscription,
   EmailAttachment,
 } from '../types.js';
-import type {
-  EmailReader,
-  EmailSender,
-  EmailSubscriber,
-  EmailCategorizer,
-  EmailAttachmentHandler,
+import {
+  ProviderError,
+  type EmailReader,
+  type EmailSender,
+  type EmailSubscriber,
+  type EmailCategorizer,
+  type EmailAttachmentHandler,
 } from '../providers/provider.js';
 
 export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscriber, EmailCategorizer, EmailAttachmentHandler {
@@ -220,7 +221,7 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
     this.maybeThrow();
     const draft = this.drafts.get(draftId);
     if (!draft) {
-      throw new Error(`Draft not found: ${draftId}`);
+      throw new ProviderError('DRAFT_NOT_FOUND', `Draft not found: ${draftId}`, 'mock', false);
     }
     this.drafts.delete(draftId);
     this.sentMessages.push(draft);

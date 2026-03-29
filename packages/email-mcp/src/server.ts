@@ -1,4 +1,5 @@
 // MCP server — thin transport adapter mapping action registry to MCP tools
+import type { EmailAction, EmailProvider } from '@usejunior/email-core';
 import { z } from 'zod';
 
 // Re-export types for the action registry
@@ -230,12 +231,32 @@ export async function runServer(): Promise<void> {
 }
 
 // Import z lazily for action definitions
-async function buildRealActions(provider: { listMessages: Function; getMessage: Function; searchMessages: Function }, auth: { getTokenHealthWarning: () => string | undefined }, sendAllowlist?: { entries: string[] }): Promise<EmailActionDef[]> {
+async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthWarning: () => string | undefined }, sendAllowlist?: { entries: string[] }): Promise<EmailActionDef[]> {
   const { z } = await import('zod');
-  const { sendEmailAction, replyToEmailAction, createDraftAction, sendDraftAction, updateDraftAction } = await import('@usejunior/email-core');
+  const {
+    sendEmailAction,
+    replyToEmailAction,
+    createDraftAction,
+    sendDraftAction,
+    updateDraftAction,
+    getThreadAction,
+    labelEmailAction,
+    flagEmailAction,
+    markReadAction,
+    moveToFolderAction,
+    deleteEmailAction,
+  } = await import('@usejunior/email-core');
 
   // Build ActionContext for send/reply actions
   const actionCtx = { provider: provider as never, sendAllowlist };
+  const wrapAction = (action: EmailAction<any, any>): EmailActionDef => ({
+    name: action.name,
+    description: action.description,
+    input: action.input,
+    output: action.output,
+    annotations: action.annotations,
+    run: async (_ctx, input) => action.run(actionCtx as never, input as never),
+  });
 
   return [
     {
@@ -369,11 +390,47 @@ async function buildRealActions(provider: { listMessages: Function; getMessage: 
       annotations: updateDraftAction.annotations,
       run: async (_ctx, input) => updateDraftAction.run(actionCtx as never, input as never),
     },
+    wrapAction(getThreadAction),
+    wrapAction(labelEmailAction),
+    wrapAction(flagEmailAction),
+    wrapAction(markReadAction),
+    wrapAction(moveToFolderAction),
+    wrapAction(deleteEmailAction),
   ];
 }
 
 async function buildDemoActions(): Promise<EmailActionDef[]> {
   const { z } = await import('zod');
+  const {
+    sendEmailAction,
+    replyToEmailAction,
+    createDraftAction,
+    sendDraftAction,
+    updateDraftAction,
+    getThreadAction,
+    labelEmailAction,
+    flagEmailAction,
+    markReadAction,
+    moveToFolderAction,
+    deleteEmailAction,
+  } = await import('@usejunior/email-core');
+  const demoError = {
+    success: false,
+    error: {
+      code: 'DEMO_MODE',
+      message: 'Demo mode — run agent-email configure to connect a mailbox',
+      recoverable: false,
+    },
+  };
+  const demoFailureAction = (action: EmailAction<any, any>): EmailActionDef => ({
+    name: action.name,
+    description: action.description,
+    input: action.input,
+    output: action.output,
+    annotations: action.annotations,
+    run: async () => demoError,
+  });
+
   return [
     {
       name: 'list_emails', description: 'List recent emails', input: z.object({ unread: z.boolean().optional(), limit: z.number().optional(), folder: z.string().optional() }), output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean() })) }),
@@ -396,20 +453,36 @@ async function buildDemoActions(): Promise<EmailActionDef[]> {
       run: async () => ({ name: 'none', provider: 'none', status: 'not configured', isDefault: false, warnings: ['No mailbox configured. Run: agent-email configure --mailbox <name> --provider microsoft'] }),
     },
     {
-      name: 'create_draft', description: 'Create email draft', input: z.object({ to: z.string().optional(), subject: z.string().optional(), body: z.string().optional() }), output: z.object({ success: z.boolean(), error: z.object({ code: z.string(), message: z.string(), recoverable: z.boolean() }).optional() }),
-      annotations: { readOnlyHint: false, destructiveHint: false },
-      run: async () => ({ success: false, error: { code: 'DEMO_MODE', message: 'Demo mode — run agent-email configure to connect a mailbox', recoverable: false } }),
+      name: getThreadAction.name,
+      description: getThreadAction.description,
+      input: getThreadAction.input,
+      output: getThreadAction.output,
+      annotations: getThreadAction.annotations,
+      run: async () => ({
+        id: 'demo-thread-1',
+        subject: 'Demo mode',
+        messages: [{
+          id: 'demo-1',
+          subject: 'Demo mode',
+          from: 'system@agent-email.dev',
+          receivedAt: new Date().toISOString(),
+          body: 'No mailbox configured. Run: agent-email configure --mailbox <name> --provider microsoft',
+          isRead: false,
+        }],
+        messageCount: 1,
+        isTruncated: false,
+      }),
     },
-    {
-      name: 'send_draft', description: 'Send a draft', input: z.object({ draft_id: z.string() }), output: z.object({ success: z.boolean(), error: z.object({ code: z.string(), message: z.string(), recoverable: z.boolean() }).optional() }),
-      annotations: { readOnlyHint: false, destructiveHint: false },
-      run: async () => ({ success: false, error: { code: 'DEMO_MODE', message: 'Demo mode — run agent-email configure to connect a mailbox', recoverable: false } }),
-    },
-    {
-      name: 'update_draft', description: 'Update a draft', input: z.object({ draft_id: z.string(), body: z.string().optional() }), output: z.object({ success: z.boolean(), error: z.object({ code: z.string(), message: z.string(), recoverable: z.boolean() }).optional() }),
-      annotations: { readOnlyHint: false, destructiveHint: false },
-      run: async () => ({ success: false, error: { code: 'DEMO_MODE', message: 'Demo mode — run agent-email configure to connect a mailbox', recoverable: false } }),
-    },
+    demoFailureAction(sendEmailAction),
+    demoFailureAction(replyToEmailAction),
+    demoFailureAction(createDraftAction),
+    demoFailureAction(sendDraftAction),
+    demoFailureAction(updateDraftAction),
+    demoFailureAction(labelEmailAction),
+    demoFailureAction(flagEmailAction),
+    demoFailureAction(markReadAction),
+    demoFailureAction(moveToFolderAction),
+    demoFailureAction(deleteEmailAction),
   ];
 }
 

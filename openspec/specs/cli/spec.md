@@ -31,7 +31,7 @@ The system SHALL provide a `serve` subcommand that starts the MCP server on stdi
 
 #### Scenario: Start MCP server
 - **WHEN** `npx @usejunior/agent-email serve` is run
-- **THEN** the MCP server starts on stdio and lists all 6 email tools
+- **THEN** the MCP server starts on stdio and lists all 15 email tools
 
 ### Requirement: Watch Subcommand
 

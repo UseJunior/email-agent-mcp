@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { GraphEmailProvider, GraphApiError, simplifySearchQuery, type GraphApiClient } from './email-graph-provider.js';
+import { GraphEmailProvider, GraphApiError, RealGraphApiClient, simplifySearchQuery, type GraphApiClient } from './email-graph-provider.js';
 
 function createMockClient(overrides: Partial<GraphApiClient> = {}): GraphApiClient {
   return {
@@ -151,6 +151,154 @@ describe('provider-microsoft/Dual Watch Mode', () => {
     });
 
     expect(response.id).toBe('sub-123');
+  });
+});
+
+describe('provider-microsoft/Thread Lookup', () => {
+  it('Scenario: getThread filters by conversationId', async () => {
+    const client = createMockClient({
+      get: vi.fn()
+        .mockResolvedValueOnce({
+          id: 'msg-1',
+          subject: 'Thread root',
+          conversationId: 'conv-123',
+          from: { emailAddress: { address: 'alice@corp.com' } },
+          receivedDateTime: '2024-03-15T10:00:00Z',
+        })
+        .mockResolvedValueOnce({
+          value: [
+            {
+              id: 'msg-1',
+              subject: 'Thread root',
+              conversationId: 'conv-123',
+              from: { emailAddress: { address: 'alice@corp.com' } },
+              receivedDateTime: '2024-03-15T10:00:00Z',
+            },
+            {
+              id: 'msg-2',
+              subject: 'Re: Thread root',
+              conversationId: 'conv-123',
+              from: { emailAddress: { address: 'bob@corp.com' } },
+              receivedDateTime: '2024-03-15T11:00:00Z',
+            },
+          ],
+        }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const thread = await provider.getThread('msg-1');
+
+    expect(thread.id).toBe('conv-123');
+    expect(thread.messageCount).toBe(2);
+    expect(client.get).toHaveBeenNthCalledWith(1, '/me/messages/msg-1');
+    const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[1]![0] as string;
+    const decodedUrl = decodeURIComponent(url).replaceAll('+', ' ');
+    expect(decodedUrl).toContain("conversationId eq 'conv-123'");
+    expect(url).toContain('%24orderby=receivedDateTime+asc');
+  });
+});
+
+describe('provider-microsoft/Email Categorizer', () => {
+  it('Scenario: applyLabels merges categories with the existing master values', async () => {
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({ categories: ['Existing'] }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.applyLabels('msg-1', ['Urgent', 'Existing']);
+
+    expect(client.get).toHaveBeenCalledWith('/me/messages/msg-1?$select=categories');
+    expect(client.patch).toHaveBeenCalledWith('/me/messages/msg-1', {
+      categories: ['Existing', 'Urgent'],
+    });
+  });
+
+  it('Scenario: removeLabels patches the remaining categories', async () => {
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({ categories: ['Existing', 'Urgent'] }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.removeLabels('msg-1', ['Urgent']);
+
+    expect(client.patch).toHaveBeenCalledWith('/me/messages/msg-1', {
+      categories: ['Existing'],
+    });
+  });
+
+  it('Scenario: setFlag uses follow-up flag status, not message importance', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.setFlag('msg-1', true);
+
+    expect(client.patch).toHaveBeenCalledWith('/me/messages/msg-1', {
+      flag: { flagStatus: 'flagged' },
+    });
+  });
+
+  it('Scenario: setReadState patches isRead', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.setReadState('msg-1', true);
+
+    expect(client.patch).toHaveBeenCalledWith('/me/messages/msg-1', { isRead: true });
+  });
+
+  it('Scenario: moveToFolder normalizes well-known folder aliases', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.moveToFolder('msg-1', 'trash');
+
+    expect(client.post).toHaveBeenCalledWith('/me/messages/msg-1/move', {
+      destinationId: 'deleteditems',
+    });
+  });
+
+  it('Scenario: soft delete moves the message to Deleted Items', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.deleteMessage('msg-1', false);
+
+    expect(client.post).toHaveBeenCalledWith('/me/messages/msg-1/move', {
+      destinationId: 'deleteditems',
+    });
+  });
+
+  it('Scenario: hard delete uses permanentDelete', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.deleteMessage('msg-1', true);
+
+    expect(client.post).toHaveBeenCalledWith('/me/messages/msg-1/permanentDelete');
+  });
+});
+
+describe('provider-microsoft/Graph API Client', () => {
+  it('Scenario: POST without a body omits JSON encoding', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 204,
+      text: vi.fn().mockResolvedValue(''),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new RealGraphApiClient(async () => 'token-123');
+    await client.post('/me/messages/msg-1/permanentDelete');
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://graph.microsoft.com/v1.0/me/messages/msg-1/permanentDelete',
+      {
+        method: 'POST',
+        headers: { Authorization: 'Bearer token-123' },
+      },
+    );
+
+    vi.unstubAllGlobals();
   });
 });
 

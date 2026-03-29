@@ -14,6 +14,17 @@ import type { EmailMessage } from '@usejunior/email-core';
 // missing an export, these tests fail immediately.
 
 describe('provider-interface/Dynamic discovery — dist exports', () => {
+  it('Scenario: email-core exports the MCP action definitions used by the server', async () => {
+    const emailCore = await import('@usejunior/email-core');
+
+    expect(emailCore.getThreadAction).toBeDefined();
+    expect(emailCore.labelEmailAction).toBeDefined();
+    expect(emailCore.flagEmailAction).toBeDefined();
+    expect(emailCore.markReadAction).toBeDefined();
+    expect(emailCore.moveToFolderAction).toBeDefined();
+    expect(emailCore.deleteEmailAction).toBeDefined();
+  });
+
   it('Scenario: Microsoft provider exports all public symbols', async () => {
     // Dynamic import to match how the CLI and server load the provider
     const msProvider = await import('@usejunior/provider-microsoft');
