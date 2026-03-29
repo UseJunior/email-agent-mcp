@@ -22,6 +22,7 @@
     "clean": "rm -rf dist/"
   },
   "dependencies": {
+    "@clack/prompts": "^1.1.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@usejunior/email-core": "^0.1.0",
     "@usejunior/provider-microsoft": "^0.1.0"

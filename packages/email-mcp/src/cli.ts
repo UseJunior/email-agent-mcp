@@ -2,7 +2,6 @@
 
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { createInterface } from 'node:readline';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 
 export interface CliOptions {
@@ -181,12 +180,14 @@ export async function runCli(args: string[]): Promise<number> {
         const mailboxes = await listConfiguredMailboxesWithMetadata();
 
         if (mailboxes.length === 0) {
-          // No config -> run guided setup
-          return await runSetup(opts);
+          // No config -> run guided setup wizard
+          const { runWizardSetup } = await import('./wizard.js');
+          return await runWizardSetup(opts);
         }
 
-        // Has config -> show status menu
-        return await runInteractiveMenu(opts, mailboxes);
+        // Has config -> show status menu wizard
+        const { runWizardMenu } = await import('./wizard.js');
+        return await runWizardMenu(opts, mailboxes);
       }
       console.error(`Error: Unknown command "${opts.command}". Use --help for usage.`);
       return 2;
@@ -204,7 +205,7 @@ async function runServe(_opts: CliOptions): Promise<number> {
   }
 }
 
-async function runWatch(opts: CliOptions): Promise<number> {
+export async function runWatch(opts: CliOptions): Promise<number> {
   // Load persisted config for defaults
   const config = await loadConfig();
 
@@ -451,7 +452,7 @@ async function runWatch(opts: CliOptions): Promise<number> {
   });
 }
 
-async function runConfigure(opts: CliOptions): Promise<number> {
+export async function runConfigure(opts: CliOptions): Promise<number> {
   if (opts.nemoclaw) {
     console.error('[agent-email] NemoClaw bootstrap — adding egress domains:');
     for (const domain of NEMOCLAW_EGRESS_DOMAINS) {
@@ -719,7 +720,7 @@ async function runInteractiveMenu(opts: CliOptions, mailboxes: Array<{ emailAddr
 /**
  * Show detailed status of all configured mailboxes.
  */
-async function runStatus(): Promise<number> {
+export async function runStatus(): Promise<number> {
   const { listConfiguredMailboxesWithMetadata } = await import('@usejunior/provider-microsoft');
   const mailboxes = await listConfiguredMailboxesWithMetadata();
 
