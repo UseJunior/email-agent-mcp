@@ -19,6 +19,7 @@
     "clean": "rm -rf dist/"
   },
   "dependencies": {
+    "node-html-markdown": "^2.0.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {

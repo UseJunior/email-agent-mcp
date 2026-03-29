@@ -9,7 +9,7 @@ Transforms raw email content (HTML or plaintext) into a token-efficient represen
 
 ### Requirement: HTML to Token-Efficient Markdown
 
-The system SHALL convert HTML email bodies to token-efficient markdown, preserving tables, lists, and links while stripping tracking pixels, CSS, scripts, and hidden elements.
+The system SHALL convert HTML email bodies to token-efficient markdown, preserving tables, lists, links, and non-tracking images while stripping tracking pixels, data URI images, CSS, scripts, and hidden elements.
 
 #### Scenario: HTML with tracking pixel
 - **WHEN** an HTML email contains `<img src="https://tracker.example.com/pixel.gif" width="1" height="1">`
@@ -18,6 +18,22 @@ The system SHALL convert HTML email bodies to token-efficient markdown, preservi
 #### Scenario: Table preservation
 - **WHEN** an HTML email contains a data table
 - **THEN** the system converts it to markdown table format
+
+#### Scenario: Non-tracking image preserved as markdown link
+- **WHEN** an HTML email contains `<img src="https://example.com/chart.png" alt="Q1 Revenue">`
+- **THEN** the system converts it to `![Q1 Revenue](https://example.com/chart.png)`
+
+#### Scenario: CID inline image preserved as markdown link
+- **WHEN** an HTML email contains `<img src="cid:image001">`
+- **THEN** the system converts it to `![](cid:image001)` so agents can correlate with attachment metadata
+
+#### Scenario: Tracking pixel via inline CSS stripped
+- **WHEN** an HTML email contains `<img src="https://tracker.co/px" style="width:1px;height:1px">`
+- **THEN** the system strips the tracking pixel from the output
+
+#### Scenario: Data URI image stripped
+- **WHEN** an HTML email contains `<img src="data:image/png;base64,...">`
+- **THEN** the system strips the data URI image to preserve token efficiency
 
 ### Requirement: Signature Stripping
 

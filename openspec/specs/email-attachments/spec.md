@@ -17,11 +17,12 @@ The system SHALL download attachments from inbound emails using provider-specifi
 
 ### Requirement: Inline Image Handling
 
-The system SHALL resolve CID references (`<img src="cid:...">`) in HTML email bodies for inbound display by matching `contentId` to attachment metadata.
+The system SHALL preserve CID references (`<img src="cid:...">`) in HTML email bodies as markdown image links during content transformation. The agent can correlate CID values with attachment metadata from `list_attachments`. Full resolution to attachment content is planned for a future phase.
 
 #### Scenario: Embedded image in HTML body
 - **WHEN** an email body contains `<img src="cid:image001">`
-- **THEN** the system separates embedded images from regular attachments and resolves the reference
+- **THEN** the content engine converts it to `![](cid:image001)` in the markdown output
+- **AND** the agent can look up `contentId: "image001"` via `list_attachments`
 
 ### Requirement: Attach Files to Outbound
 

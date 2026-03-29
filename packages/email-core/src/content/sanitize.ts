@@ -1,119 +1,168 @@
 // Content engine — HTML to token-efficient markdown transformation
+import { NodeHtmlMarkdown, PostProcessResult } from 'node-html-markdown';
 import type { EmailAttachment } from '../types.js';
+
+// --- Helpers for image filtering and markdown escaping ---
+
+function isTrackingPixel(width: string | null, height: string | null, style: string): boolean {
+  const w = width?.trim();
+  const h = height?.trim();
+
+  // Attribute-based: 0x0 or 1x1
+  if ((w === '0' || w === '1') && (h === '0' || h === '1')) return true;
+
+  // CSS-based: width:0/1px AND height:0/1px (word boundaries to avoid 11px, max-width, etc.)
+  const hasSmallWidth = /\bwidth:\s*[01]px\b/i.test(style) && !/\b(?:max|min)-width/i.test(style);
+  const hasSmallHeight = /\bheight:\s*[01]px\b/i.test(style) && !/\b(?:max|min)-height/i.test(style);
+  if (hasSmallWidth && hasSmallHeight) return true;
+
+  // Mixed: attribute width + CSS height or vice versa
+  if ((w === '0' || w === '1') && hasSmallHeight) return true;
+  if ((h === '0' || h === '1') && hasSmallWidth) return true;
+
+  return false;
+}
+
+function isHidden(node: any): boolean {
+  const style = String(node.getAttribute?.('style') ?? '');
+  return (
+    /\bdisplay:\s*none\b/i.test(style) ||
+    /\bvisibility:\s*hidden\b/i.test(style) ||
+    /\bmso-hide:\s*all\b/i.test(style) ||
+    node.hasAttribute?.('hidden') === true ||
+    String(node.getAttribute?.('aria-hidden') ?? '') === 'true'
+  );
+}
+
+function escapeAlt(alt: string): string {
+  return alt.replace(/[\[\]\\]/g, '\\$&');
+}
+
+function escapeUrl(url: string): string {
+  if (/[\s()]/.test(url)) return `<${url}>`;
+  return url;
+}
+
+// --- Configure NodeHtmlMarkdown instance ---
+
+const nhm = new NodeHtmlMarkdown(
+  {
+    keepDataImages: false,
+    maxConsecutiveNewlines: 2,
+    bulletMarker: '-',
+    useInlineLinks: false,
+  },
+  // Custom translators passed via constructor (applied to main translators collection)
+  {
+    // Custom img: strip trackers/hidden, preserve legitimate images with escaping
+    'img': ({ node, options }: any) => {
+      const src = String(node.getAttribute('src') ?? '');
+      const style = String(node.getAttribute('style') ?? '');
+      const width = node.getAttribute('width') ?? null;
+      const height = node.getAttribute('height') ?? null;
+
+      // Strip tracking pixels
+      if (isTrackingPixel(width, height, style)) return { ignore: true };
+
+      // Strip hidden images
+      if (isHidden(node)) return { ignore: true };
+
+      // Strip data: URIs (also handled by keepDataImages, but be explicit)
+      if (!src || (!options.keepDataImages && /^data:/i.test(src))) return { ignore: true };
+
+      // Surviving image → generate markdown with escaping
+      const alt = escapeAlt(String(node.getAttribute('alt') ?? ''));
+      const title = String(node.getAttribute('title') ?? '');
+      const escapedSrc = escapeUrl(src);
+      return {
+        content: `![${alt}](${escapedSrc}${title ? ` "${title}"` : ''})`,
+        recurse: false,
+      };
+    },
+
+    // Custom link: clean up empty anchors after child image stripping
+    'a': {
+      postprocess: ({ content }) => {
+        if (!content.trim()) return PostProcessResult.RemoveNode;
+        return content;
+      },
+    },
+  },
+);
+
+// Hidden element translator (factory-style: returns { ignore: true } to skip recursion)
+const hiddenElementTranslator = (ctx: { node: { getAttribute?: (name: string) => string | null; hasAttribute?: (name: string) => boolean } }) => {
+  if (isHidden(ctx.node)) return { ignore: true };
+  return {};
+};
+
+// Apply hidden element detection to non-table tags in the main translator collection.
+// Table-related tags (table, tr, td, th, etc.) are NOT patched in table sub-collections
+// because returning {} for non-hidden elements would override the library's table formatting.
+const HIDDEN_TAGS = [
+  'div', 'span', 'p', 'section', 'article',
+  'header', 'footer', 'li', 'ul', 'ol',
+];
+
+for (const tag of HIDDEN_TAGS) {
+  nhm.translators.set(tag, hiddenElementTranslator as any);
+}
+
+// Also handle hidden tables/rows at the top level (main translators only)
+const TABLE_HIDDEN_TAGS = ['table', 'tbody', 'thead', 'tfoot', 'tr', 'th', 'td'];
+for (const tag of TABLE_HIDDEN_TAGS) {
+  const existing = nhm.translators.get(tag);
+  if (existing) {
+    // Wrap the existing translator to add hidden detection
+    const wrapped = (ctx: any) => {
+      if (isHidden(ctx.node)) return { ignore: true };
+      return typeof existing === 'function' ? existing(ctx) : existing;
+    };
+    nhm.translators.set(tag, wrapped as any);
+  } else {
+    nhm.translators.set(tag, hiddenElementTranslator as any);
+  }
+}
+
+// Wrap table sub-collection translators to handle hidden rows/cells
+function wrapWithHiddenCheck(collection: any, tag: string) {
+  const existing = collection.get(tag);
+  if (existing) {
+    const wrapped = (ctx: any) => {
+      if (isHidden(ctx.node)) return { ignore: true };
+      return typeof existing === 'function' ? existing(ctx) : existing;
+    };
+    collection.set(tag, wrapped as any);
+  }
+}
+
+for (const collection of [nhm.tableTranslators, nhm.tableRowTranslators, nhm.tableCellTranslators]) {
+  for (const tag of TABLE_HIDDEN_TAGS) {
+    wrapWithHiddenCheck(collection, tag);
+  }
+}
+
+// Patch img and link translators into sub-collections (constructor only sets main translators)
+const imgTranslator = nhm.translators.get('img');
+const linkTranslator = nhm.translators.get('a');
+if (imgTranslator) {
+  for (const collection of [nhm.aTagTranslators, nhm.tableTranslators, nhm.tableRowTranslators, nhm.tableCellTranslators]) {
+    collection.set('img', imgTranslator);
+  }
+}
+if (linkTranslator) {
+  for (const collection of [nhm.tableTranslators, nhm.tableRowTranslators, nhm.tableCellTranslators]) {
+    collection.set('a', linkTranslator);
+  }
+}
 
 /**
  * Convert HTML email body to token-efficient markdown.
- * Strips tracking pixels, CSS, scripts, hidden elements.
- * Preserves tables, lists, and links.
+ * Strips tracking pixels, data URI images, CSS, scripts, and hidden elements.
+ * Preserves tables, lists, links, and non-tracking images.
  */
 export function htmlToMarkdown(html: string): string {
-  let result = html;
-
-  // Remove scripts and style blocks
-  result = result.replace(/<script[\s\S]*?<\/script>/gi, '');
-  result = result.replace(/<style[\s\S]*?<\/style>/gi, '');
-
-  // Remove tracking pixels (1x1 images)
-  result = result.replace(/<img[^>]*(?:width\s*=\s*["']?1["']?\s+height\s*=\s*["']?1["']?|height\s*=\s*["']?1["']?\s+width\s*=\s*["']?1["']?)[^>]*\/?>/gi, '');
-
-  // Remove hidden elements
-  result = result.replace(/<[^>]*display\s*:\s*none[^>]*>[\s\S]*?<\/[^>]+>/gi, '');
-  result = result.replace(/<[^>]*visibility\s*:\s*hidden[^>]*>[\s\S]*?<\/[^>]+>/gi, '');
-
-  // Convert tables to markdown
-  result = convertTablesToMarkdown(result);
-
-  // Convert headers
-  result = result.replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '\n# $1\n');
-  result = result.replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n## $1\n');
-  result = result.replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, '\n### $1\n');
-
-  // Convert links
-  result = result.replace(/<a[^>]*href\s*=\s*["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)');
-
-  // Convert lists
-  result = result.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, '- $1\n');
-  result = result.replace(/<\/?[uo]l[^>]*>/gi, '\n');
-
-  // Convert bold/strong
-  result = result.replace(/<(?:b|strong)[^>]*>([\s\S]*?)<\/(?:b|strong)>/gi, '**$1**');
-
-  // Convert italic/em
-  result = result.replace(/<(?:i|em)[^>]*>([\s\S]*?)<\/(?:i|em)>/gi, '*$1*');
-
-  // Convert line breaks and paragraphs
-  result = result.replace(/<br\s*\/?>/gi, '\n');
-  result = result.replace(/<\/p>/gi, '\n\n');
-  result = result.replace(/<p[^>]*>/gi, '');
-
-  // Convert blockquote
-  result = result.replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi, (_, content: string) => {
-    return content.split('\n').map((line: string) => `> ${line}`).join('\n');
-  });
-
-  // Strip remaining HTML tags
-  result = result.replace(/<[^>]+>/g, '');
-
-  // Decode common HTML entities
-  result = decodeHtmlEntities(result);
-
-  // Normalize whitespace
-  result = result.replace(/\n{3,}/g, '\n\n');
-  result = result.trim();
-
-  return result;
-}
-
-function convertTablesToMarkdown(html: string): string {
-  return html.replace(/<table[^>]*>([\s\S]*?)<\/table>/gi, (_, tableContent: string) => {
-    const rows: string[][] = [];
-
-    // Extract rows
-    const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-    let rowMatch;
-    while ((rowMatch = rowRegex.exec(tableContent)) !== null) {
-      const cells: string[] = [];
-      const cellRegex = /<(?:td|th)[^>]*>([\s\S]*?)<\/(?:td|th)>/gi;
-      let cellMatch;
-      while ((cellMatch = cellRegex.exec(rowMatch[1]!)) !== null) {
-        cells.push(cellMatch[1]!.replace(/<[^>]+>/g, '').trim());
-      }
-      if (cells.length > 0) {
-        rows.push(cells);
-      }
-    }
-
-    if (rows.length === 0) return '';
-
-    // Build markdown table
-    const maxCols = Math.max(...rows.map(r => r.length));
-    const lines: string[] = [];
-
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i]!;
-      // Pad to max columns
-      while (row.length < maxCols) row.push('');
-      lines.push('| ' + row.join(' | ') + ' |');
-
-      // Add separator after first row (header)
-      if (i === 0) {
-        lines.push('| ' + row.map(() => '---').join(' | ') + ' |');
-      }
-    }
-
-    return '\n' + lines.join('\n') + '\n';
-  });
-}
-
-function decodeHtmlEntities(text: string): string {
-  return text
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&#(\d+);/g, (_, code: string) => String.fromCharCode(parseInt(code, 10)));
+  return nhm.translate(html);
 }
 
 /**
