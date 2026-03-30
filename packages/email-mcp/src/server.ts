@@ -1,6 +1,10 @@
 // MCP server — thin transport adapter mapping action registry to MCP tools
+import { createRequire } from 'node:module';
 import type { EmailAction, EmailProvider } from '@usejunior/email-core';
 import { z } from 'zod';
+
+const require = createRequire(import.meta.url);
+const { version: PACKAGE_VERSION } = require('../package.json') as { version: string };
 
 // Re-export types for the action registry
 export interface McpTool {
@@ -205,7 +209,7 @@ export async function runServer(): Promise<void> {
   }
 
   const server = new Server(
-    { name: 'agent-email', version: '0.1.0' },
+    { name: 'agent-email', version: PACKAGE_VERSION },
     { capabilities: { tools: {} } },
   );
 
@@ -499,7 +503,7 @@ export function createSandboxServer(): { tools: McpTool[] } {
 export function getServerManifest(): Record<string, unknown> {
   return {
     name: 'agent-email',
-    version: '0.1.0',
+    version: PACKAGE_VERSION,
     description: 'Email connectivity for AI agents via MCP',
     transport: {
       type: 'stdio',

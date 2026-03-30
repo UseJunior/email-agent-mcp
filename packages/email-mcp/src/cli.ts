@@ -1,8 +1,12 @@
 // CLI entry point — serve, watch, configure, setup subcommands + TTY-aware default
 
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
+
+const require = createRequire(import.meta.url);
+const { version: PACKAGE_VERSION } = require('../package.json') as { version: string };
 
 export interface CliOptions {
   command: string;

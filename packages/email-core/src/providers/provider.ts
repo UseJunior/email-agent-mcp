@@ -37,7 +37,7 @@ export interface EmailCategorizer {
   removeLabels(messageId: string, labels: string[]): Promise<void>;
   setFlag(messageId: string, flagged: boolean): Promise<void>;
   setReadState(messageId: string, isRead: boolean): Promise<void>;
-  moveToFolder(messageId: string, folder: string): Promise<void>;
+  moveToFolder(messageId: string, folder: string): Promise<string | void>;
   deleteMessage(messageId: string, hard?: boolean): Promise<void>;
 }
 

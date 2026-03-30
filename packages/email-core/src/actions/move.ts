@@ -10,6 +10,7 @@ const MoveToFolderInput = z.object({
 
 const MoveToFolderOutput = z.object({
   success: z.boolean(),
+  newId: z.string().optional(),
   error: z.object({ code: z.string(), message: z.string(), recoverable: z.boolean() }).optional(),
 });
 
@@ -18,7 +19,7 @@ export const moveToFolderAction: EmailAction<
   z.infer<typeof MoveToFolderOutput>
 > = {
   name: 'move_to_folder',
-  description: 'Move an email to a specific folder (inbox, archive, trash, etc.)',
+  description: 'Move an email to a specific folder (inbox, archive, trash, etc.). Returns the new message ID since Graph assigns a new ID after moving.',
   input: MoveToFolderInput,
   output: MoveToFolderOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -29,7 +30,7 @@ export const moveToFolderAction: EmailAction<
         error: { code: 'NOT_SUPPORTED', message: 'Provider does not support folder operations', recoverable: false },
       };
     }
-    await ctx.provider.moveToFolder(input.id, input.folder);
-    return { success: true };
+    const newId = await ctx.provider.moveToFolder(input.id, input.folder);
+    return { success: true, newId: typeof newId === 'string' ? newId : undefined };
   },
 };

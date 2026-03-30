@@ -318,11 +318,12 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
     msg.isRead = isRead;
   }
 
-  async moveToFolder(messageId: string, folder: string): Promise<void> {
+  async moveToFolder(messageId: string, folder: string): Promise<string> {
     this.maybeThrow();
     const msg = this.messages.find(m => m.id === messageId);
     if (!msg) throw new Error(`Message not found: ${messageId}`);
     msg.folder = folder;
+    return messageId;
   }
 
   async deleteMessage(messageId: string, hard?: boolean): Promise<void> {

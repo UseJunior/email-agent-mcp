@@ -233,10 +233,12 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     await this.client.patch(`${this.basePath}/messages/${messageId}`, { isRead });
   }
 
-  async moveToFolder(messageId: string, folder: string): Promise<void> {
-    await this.client.post(`${this.basePath}/messages/${messageId}/move`, {
+  async moveToFolder(messageId: string, folder: string): Promise<string> {
+    // Graph POST /move returns the moved message with a NEW id
+    const result = await this.client.post(`${this.basePath}/messages/${messageId}/move`, {
       destinationId: normalizeFolderId(folder),
     });
+    return result.id ?? messageId;
   }
 
   async deleteMessage(messageId: string, hard = false): Promise<void> {
