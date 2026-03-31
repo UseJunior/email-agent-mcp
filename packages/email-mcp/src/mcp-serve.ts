@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Real MCP server using @modelcontextprotocol/sdk — stdio transport
-// This is the entry point for `npx @usejunior/email-agent-mcp serve`
+// This is the entry point for `npx email-agent-mcp serve`
 
 import { createRequire } from 'node:module';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';

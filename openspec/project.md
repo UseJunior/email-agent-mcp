@@ -22,7 +22,7 @@ Open-source TypeScript monorepo providing portable email connectivity for AI age
 - `provider-microsoft`: Microsoft Graph API implementation. Heavy deps isolated here.
 - `provider-gmail`: Gmail API implementation. Heavy deps isolated here.
 - `email-mcp`: MCP server — thin transport adapter (~100 lines) mapping action registry to MCP tools.
-- `email-agent-mcp`: Distribution wrapper. `npx @usejunior/email-agent-mcp serve`.
+- `email-agent-mcp`: Distribution wrapper. `npx email-agent-mcp serve`.
 
 Adding a new email operation = add one file in `email-core/src/actions/`. It auto-exposes via MCP.
 

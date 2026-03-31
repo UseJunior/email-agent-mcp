@@ -20,7 +20,7 @@ npm run check:spec-coverage
 - `packages/email-mcp`: MCP server adapter, CLI, and watcher.
 - `packages/provider-microsoft`: Microsoft Graph API email provider.
 - `packages/provider-gmail`: Gmail API email provider.
-- `packages/email-agent-mcp`: Distribution wrapper (`npx @usejunior/email-agent-mcp`).
+- `packages/email-agent-mcp`: Distribution wrapper (`npx email-agent-mcp`).
 - `openspec/`: Specs and change deltas.
 - `scripts/`: CI and development scripts.
 

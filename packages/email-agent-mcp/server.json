@@ -15,7 +15,7 @@
   "packages": [
     {
       "registryType": "npm",
-      "identifier": "@usejunior/email-agent-mcp",
+      "identifier": "email-agent-mcp",
       "version": "0.1.0",
       "transport": { "type": "stdio" },
       "runtimeHint": "npx",

@@ -508,7 +508,7 @@ export function getServerManifest(): Record<string, unknown> {
     transport: {
       type: 'stdio',
       command: 'npx',
-      args: ['-y', '@usejunior/email-agent-mcp', 'serve'],
+      args: ['-y', 'email-agent-mcp', 'serve'],
     },
   };
 }

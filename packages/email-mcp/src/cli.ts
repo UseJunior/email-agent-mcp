@@ -564,7 +564,7 @@ export async function runConfigure(opts: CliOptions): Promise<number> {
       console.error('');
       console.error('To start the MCP server, run:');
       console.error('   npx tsx packages/email-mcp/src/cli.ts serve   # from source');
-      console.error('   npx @usejunior/email-agent-mcp serve             # after npm publish');
+      console.error('   npx email-agent-mcp serve             # after npm publish');
     } else {
       console.error('');
       console.error(`⚠️  Authentication succeeded but profile fetch failed (${resp.status})`);

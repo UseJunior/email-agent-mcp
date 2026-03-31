@@ -3,7 +3,7 @@
     "email-agent-mcp": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@usejunior/email-agent-mcp"]
+      "args": ["-y", "email-agent-mcp"]
     }
   }
 }

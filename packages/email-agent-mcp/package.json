@@ -1,5 +1,5 @@
 {
-  "name": "@usejunior/email-agent-mcp",
+  "name": "email-agent-mcp",
   "version": "0.1.0",
   "description": "Email connectivity for AI agents — MCP server for OpenClaw, Claude Code, Gemini CLI, and more",
   "type": "module",

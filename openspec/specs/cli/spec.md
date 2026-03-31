@@ -30,7 +30,7 @@ The system SHALL detect whether it is running in a TTY and adjust default behavi
 The system SHALL provide a `serve` subcommand that starts the MCP server on stdio transport.
 
 #### Scenario: Start MCP server
-- **WHEN** `npx @usejunior/email-agent-mcp serve` is run
+- **WHEN** `npx email-agent-mcp serve` is run
 - **THEN** the MCP server starts on stdio and lists all 15 email tools
 
 ### Requirement: Watch Subcommand

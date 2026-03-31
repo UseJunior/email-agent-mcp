@@ -6,7 +6,7 @@ This extension provides email connectivity for AI agents via one local MCP serve
 
 | Server         | Package                     |
 | -------------- | --------------------------- |
-| `email-agent-mcp`  | `@usejunior/email-agent-mcp`    |
+| `email-agent-mcp`  | `email-agent-mcp`    |
 
 ## Tool Inventory
 
@@ -69,7 +69,7 @@ This extension provides email connectivity for AI agents via one local MCP serve
 Run the following command to start interactive OAuth configuration:
 
 ```
-npx @usejunior/email-agent-mcp
+npx email-agent-mcp
 ```
 
 This will walk you through connecting a Microsoft 365 or Gmail account and storing credentials securely.

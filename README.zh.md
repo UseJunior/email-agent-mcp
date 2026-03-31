@@ -1,15 +1,15 @@
 # Agent Email
 
-[![npm version](https://img.shields.io/npm/v/@usejunior/email-agent-mcp)](https://www.npmjs.com/package/@usejunior/email-agent-mcp)
-[![npm downloads](https://img.shields.io/npm/dm/@usejunior/email-agent-mcp.svg)](https://npmjs.org/package/@usejunior/email-agent-mcp)
+[![npm version](https://img.shields.io/npm/v/email-agent-mcp)](https://www.npmjs.com/package/email-agent-mcp)
+[![npm downloads](https://img.shields.io/npm/dm/email-agent-mcp.svg)](https://npmjs.org/package/email-agent-mcp)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![CI](https://github.com/UseJunior/email-agent-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/UseJunior/email-agent-mcp/actions/workflows/ci.yml)
 [![codecov](https://img.shields.io/codecov/c/github/UseJunior/email-agent-mcp/main)](https://app.codecov.io/gh/UseJunior/email-agent-mcp)
 [![GitHub stargazers](https://img.shields.io/github/stars/UseJunior/email-agent-mcp?style=social)](https://github.com/UseJunior/email-agent-mcp/stargazers)
 [![Tests: Vitest](https://img.shields.io/badge/tests-vitest-6E9F18)](https://vitest.dev/)
 [![OpenSpec Traceability](https://img.shields.io/badge/openspec-traceability%20gate-brightgreen)](./scripts/check-spec-coverage.mjs)
-[![Socket Badge](https://socket.dev/api/badge/npm/package/@usejunior/email-agent-mcp)](https://socket.dev/npm/package/@usejunior/email-agent-mcp)
-[![install size](https://packagephobia.com/badge?p=@usejunior/email-agent-mcp)](https://packagephobia.com/result?p=@usejunior/email-agent-mcp)
+[![Socket Badge](https://socket.dev/api/badge/npm/package/email-agent-mcp)](https://socket.dev/npm/package/email-agent-mcp)
+[![install size](https://packagephobia.com/badge?p=email-agent-mcp)](https://packagephobia.com/result?p=email-agent-mcp)
 
 [English](./README.md) | [Español](./README.es.md) | [简体中文](./README.zh.md) | [Português (Brasil)](./README.pt-br.md) | [Deutsch](./README.de.md)
 
@@ -40,7 +40,7 @@ Agent Email 将这些复杂性封装为带有安全防护的确定性 MCP 工具
     "email-agent-mcp": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@usejunior/email-agent-mcp"]
+      "args": ["-y", "email-agent-mcp"]
     }
   }
 }
@@ -60,7 +60,7 @@ gemini extensions install https://github.com/UseJunior/email-agent-mcp
   "mcpServers": {
     "email-agent-mcp": {
       "command": "npx",
-      "args": ["-y", "@usejunior/email-agent-mcp"]
+      "args": ["-y", "email-agent-mcp"]
     }
   }
 }
@@ -69,7 +69,7 @@ gemini extensions install https://github.com/UseJunior/email-agent-mcp
 ## 通过命令行使用
 
 ```bash
-npx -y @usejunior/email-agent-mcp
+npx -y email-agent-mcp
 ```
 
 交互式配置向导将引导您完成 OAuth 配置和邮箱选择。
@@ -123,7 +123,7 @@ Agent Email 默认采用严格的安全配置，您可以根据需要逐步放�
 | `@usejunior/email-mcp` | MCP 服务器适配器、CLI 和监听器 |
 | `@usejunior/provider-microsoft` | Microsoft Graph API 邮件提供商 |
 | `@usejunior/provider-gmail` | Gmail API 邮件提供商 |
-| `@usejunior/email-agent-mcp` | 分发包装器（`npx @usejunior/email-agent-mcp`） |
+| `email-agent-mcp` | 分发包装器（`npx email-agent-mcp`） |
 
 ## 质量与信任指标
 
@@ -156,7 +156,7 @@ email-agent-mcp/
 
 ### 这个项目能和 Claude Code 一起使用吗？
 
-可以。运行 `npx @usejunior/email-agent-mcp` 启动 MCP 服务器，然后在 Claude Code 设置中进行配置。
+可以。运行 `npx email-agent-mcp` 启动 MCP 服务器，然后在 Claude Code 设置中进行配置。
 
 ### 代理能在未经我许可的情况下发送邮件吗？
 

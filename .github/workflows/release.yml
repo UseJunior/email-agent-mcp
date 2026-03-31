@@ -119,7 +119,7 @@ jobs:
           VERSION="${TAG_REF#v}"
           ALREADY=0
           TOTAL=0
-          for pkg in @usejunior/email-core @usejunior/provider-microsoft @usejunior/provider-gmail @usejunior/email-mcp @usejunior/email-agent-mcp; do
+          for pkg in @usejunior/email-core @usejunior/provider-microsoft @usejunior/provider-gmail @usejunior/email-mcp email-agent-mcp; do
             TOTAL=$((TOTAL + 1))
             if npm view "$pkg@$VERSION" version >/dev/null 2>&1; then
               echo "$pkg@$VERSION already published."
@@ -215,7 +215,7 @@ jobs:
           sleep 10
 
           # Tier 4: depends on email-mcp
-          publish_pkg "@usejunior/email-agent-mcp" "packages/email-agent-mcp"
+          publish_pkg "email-agent-mcp" "packages/email-agent-mcp"
 
   publish-github-release:
     name: Publish GitHub release notes
