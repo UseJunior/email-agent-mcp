@@ -13,10 +13,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
 
 const serverJson = JSON.parse(
-  readFileSync(resolve(root, 'packages/agent-email/server.json'), 'utf-8'),
+  readFileSync(resolve(root, 'packages/email-agent-mcp/server.json'), 'utf-8'),
 );
 const packageJson = JSON.parse(
-  readFileSync(resolve(root, 'packages/agent-email/package.json'), 'utf-8'),
+  readFileSync(resolve(root, 'packages/email-agent-mcp/package.json'), 'utf-8'),
 );
 
 let ok = true;

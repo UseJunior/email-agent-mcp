@@ -11,7 +11,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build -w @usejunior/email-core && npm run build -w @usejunior/provider-microsoft && npm run build -w @usejunior/provider-gmail && npm run build -w @usejunior/email-mcp",
     "test": "npm run test --workspaces --if-present",
     "test:run": "npm run test:run --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",

@@ -4,7 +4,7 @@
 import { readFileSync } from 'node:fs';
 
 const manifest = JSON.parse(readFileSync('gemini-extension.json', 'utf-8'));
-const wrapperPkg = JSON.parse(readFileSync('packages/agent-email/package.json', 'utf-8'));
+const wrapperPkg = JSON.parse(readFileSync('packages/email-agent-mcp/package.json', 'utf-8'));
 
 const errors = [];
 
@@ -17,22 +17,22 @@ for (const field of ['name', 'version', 'description', 'contextFileName', 'entry
 
 // Version must match wrapper package
 if (manifest.version !== wrapperPkg.version) {
-  errors.push(`Version mismatch: gemini-extension.json has ${manifest.version}, packages/agent-email/package.json has ${wrapperPkg.version}`);
+  errors.push(`Version mismatch: gemini-extension.json has ${manifest.version}, packages/email-agent-mcp/package.json has ${wrapperPkg.version}`);
 }
 
-// mcpServers must include agent-email
-if (!manifest.mcpServers?.['agent-email']) {
-  errors.push('mcpServers must include "agent-email" server');
+// mcpServers must include email-agent-mcp
+if (!manifest.mcpServers?.['email-agent-mcp']) {
+  errors.push('mcpServers must include "email-agent-mcp" server');
 }
 
 // Validate MCP server command
-const server = manifest.mcpServers?.['agent-email'];
+const server = manifest.mcpServers?.['email-agent-mcp'];
 if (server) {
   if (server.command !== 'npx') {
-    errors.push(`agent-email server command must be "npx", got "${server.command}"`);
+    errors.push(`email-agent-mcp server command must be "npx", got "${server.command}"`);
   }
-  if (!server.args?.includes('@usejunior/agent-email')) {
-    errors.push('agent-email server args must include "@usejunior/agent-email"');
+  if (!server.args?.includes('email-agent-mcp')) {
+    errors.push('email-agent-mcp server args must include "email-agent-mcp"');
   }
 }
 
