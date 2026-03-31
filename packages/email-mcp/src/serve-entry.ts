@@ -3,6 +3,6 @@
 import { runServer } from './server.js';
 
 runServer().catch(err => {
-  console.error('[agent-email] Fatal error:', err);
+  console.error('[email-agent-mcp] Fatal error:', err);
   process.exit(1);
 });

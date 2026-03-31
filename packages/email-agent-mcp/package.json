@@ -1,12 +1,12 @@
 {
-  "name": "@usejunior/agent-email",
+  "name": "@usejunior/email-agent-mcp",
   "version": "0.1.0",
   "description": "Email connectivity for AI agents — MCP server for OpenClaw, Claude Code, Gemini CLI, and more",
   "type": "module",
   "main": "./index.js",
   "types": "./index.d.ts",
   "bin": {
-    "agent-email": "./bin/agent-email.js"
+    "email-agent-mcp": "./bin/email-agent-mcp.js"
   },
   "exports": {
     ".": {
@@ -22,12 +22,12 @@
   "publishConfig": {"access": "public"},
   "repository": {
     "type": "git",
-    "url": "https://github.com/UseJunior/agent-email.git",
-    "directory": "packages/agent-email"
+    "url": "https://github.com/UseJunior/email-agent-mcp.git",
+    "directory": "packages/email-agent-mcp"
   },
-  "homepage": "https://github.com/UseJunior/agent-email#readme",
+  "homepage": "https://github.com/UseJunior/email-agent-mcp#readme",
   "bugs": {
-    "url": "https://github.com/UseJunior/agent-email/issues"
+    "url": "https://github.com/UseJunior/email-agent-mcp/issues"
   },
   "keywords": ["email", "mcp", "ai-agent", "microsoft-graph", "gmail", "model-context-protocol", "claude", "gemini"],
   "license": "Apache-2.0"

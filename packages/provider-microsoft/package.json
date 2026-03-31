@@ -1,7 +1,7 @@
 {
   "name": "@usejunior/provider-microsoft",
   "version": "0.1.0",
-  "description": "Microsoft Graph API email provider for agent-email",
+  "description": "Microsoft Graph API email provider for email-agent-mcp",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -34,19 +34,20 @@
     "node": ">=20"
   },
   "files": [
-    "dist/"
+    "dist/",
+    "!dist/.tsbuildinfo"
   ],
   "publishConfig": {
     "access": "public"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/UseJunior/agent-email.git",
+    "url": "https://github.com/UseJunior/email-agent-mcp.git",
     "directory": "packages/provider-microsoft"
   },
-  "homepage": "https://github.com/UseJunior/agent-email#readme",
+  "homepage": "https://github.com/UseJunior/email-agent-mcp#readme",
   "bugs": {
-    "url": "https://github.com/UseJunior/agent-email/issues"
+    "url": "https://github.com/UseJunior/email-agent-mcp/issues"
   },
   "keywords": ["email", "microsoft-graph", "outlook", "office365", "oauth", "ai-agent"],
   "license": "Apache-2.0"

@@ -21,10 +21,10 @@ export const GRAPH_SCOPES_FULL = [
 ];
 /**
  * Resolve the config directory for token storage.
- * Supports AGENT_EMAIL_HOME env var override for test isolation.
+ * Supports EMAIL_AGENT_MCP_HOME env var override for test isolation.
  */
 export function getConfigDir(): string {
-  const base = process.env['AGENT_EMAIL_HOME'] ?? join(homedir(), '.agent-email');
+  const base = process.env['EMAIL_AGENT_MCP_HOME'] ?? join(homedir(), '.email-agent-mcp');
   return join(base, 'tokens');
 }
 
@@ -94,7 +94,7 @@ export class DelegatedAuthManager implements AuthManager {
 
   /**
    * Interactive device code flow — prints URL + code to stderr.
-   * Call this from `agent-email configure`, NOT from MCP serve.
+   * Call this from `email-agent-mcp configure`, NOT from MCP serve.
    */
   async connect(_credentials: Record<string, string>): Promise<void> {
     this.cacheName = this.createCacheName();
@@ -127,7 +127,7 @@ export class DelegatedAuthManager implements AuthManager {
   async reconnect(): Promise<void> {
     const metadata = await this.loadMetadata();
     if (!metadata) {
-      throw new Error(`No saved credentials for mailbox "${this.mailboxName}". Run: agent-email configure --mailbox ${this.mailboxName}`);
+      throw new Error(`No saved credentials for mailbox "${this.mailboxName}". Run: email-agent-mcp configure --mailbox ${this.mailboxName}`);
     }
 
     this.authRecord = metadata.authenticationRecord;
@@ -149,7 +149,7 @@ export class DelegatedAuthManager implements AuthManager {
       const message = err instanceof Error ? err.message : String(err);
       if (message.includes('interaction_required') || message.includes('invalid_grant')) {
         this._needsReauth = true;
-        throw new Error(`Token expired. Run: agent-email configure --mailbox ${this.mailboxName}`);
+        throw new Error(`Token expired. Run: email-agent-mcp configure --mailbox ${this.mailboxName}`);
       }
       throw err;
     }
@@ -197,12 +197,12 @@ export class DelegatedAuthManager implements AuthManager {
    */
   getTokenHealthWarning(): string | undefined {
     if (this._needsReauth) {
-      return `Authentication expired. Run: agent-email configure --mailbox ${this.mailboxName}`;
+      return `Authentication expired. Run: email-agent-mcp configure --mailbox ${this.mailboxName}`;
     }
     if (this._lastInteractiveAuthAt) {
       const daysSinceAuth = (Date.now() - new Date(this._lastInteractiveAuthAt).getTime()) / (1000 * 60 * 60 * 24);
       if (daysSinceAuth > 80) {
-        return `Token may expire soon (last authenticated ${Math.round(daysSinceAuth)} days ago). Run: agent-email configure --mailbox ${this.mailboxName}`;
+        return `Token may expire soon (last authenticated ${Math.round(daysSinceAuth)} days ago). Run: email-agent-mcp configure --mailbox ${this.mailboxName}`;
       }
     }
     return undefined;
@@ -216,7 +216,7 @@ export class DelegatedAuthManager implements AuthManager {
   }
 
   private getLegacyCacheName(): string {
-    return `agent-email-${this.mailboxName}`;
+    return `email-agent-mcp-${this.mailboxName}`;
   }
 
   private createCacheName(): string {
@@ -329,7 +329,7 @@ export class ClientCredentialsAuthManager implements AuthManager {
 }
 
 /**
- * List all configured mailboxes from ~/.agent-email/tokens/
+ * List all configured mailboxes from ~/.email-agent-mcp/tokens/
  * Returns mailbox names (filename stems) for backward compatibility.
  */
 export async function listConfiguredMailboxes(): Promise<string[]> {
@@ -405,7 +405,7 @@ export async function listConfiguredMailboxesWithMetadata(): Promise<MailboxMeta
 
     for (let i = 1; i < group.length; i++) {
       const staleFile = group[i]!.filename;
-      console.error(`[agent-email] Removing stale token file ${staleFile} (superseded by ${group[0]!.filename} for ${email})`);
+      console.error(`[email-agent-mcp] Removing stale token file ${staleFile} (superseded by ${group[0]!.filename} for ${email})`);
       try {
         await unlink(join(getConfigDir(), staleFile));
       } catch {
@@ -421,7 +421,7 @@ export async function listConfiguredMailboxesWithMetadata(): Promise<MailboxMeta
       r.mailboxName === entry.metadata.mailboxName && r.emailAddress,
     );
     if (superseded) {
-      console.error(`[agent-email] Removing legacy token file ${entry.filename} (superseded by email-based file for mailbox "${entry.metadata.mailboxName}")`);
+      console.error(`[email-agent-mcp] Removing legacy token file ${entry.filename} (superseded by email-based file for mailbox "${entry.metadata.mailboxName}")`);
       try {
         await unlink(join(getConfigDir(), entry.filename));
       } catch {

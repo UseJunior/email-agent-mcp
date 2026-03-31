@@ -31,11 +31,11 @@ const NEMOCLAW_EGRESS_DOMAINS = [
 ];
 
 /**
- * Resolve the agent-email home directory.
- * Respects AGENT_EMAIL_HOME env var for test isolation.
+ * Resolve the email-agent-mcp home directory.
+ * Respects EMAIL_AGENT_MCP_HOME env var for test isolation.
  */
 export function getAgentEmailHome(): string {
-  return process.env['AGENT_EMAIL_HOME'] ?? join(homedir(), '.agent-email');
+  return process.env['EMAIL_AGENT_MCP_HOME'] ?? join(homedir(), '.email-agent-mcp');
 }
 
 export interface AgentEmailConfig {
@@ -45,14 +45,14 @@ export interface AgentEmailConfig {
 }
 
 /**
- * Get the config file path: ~/.agent-email/config.json
+ * Get the config file path: ~/.email-agent-mcp/config.json
  */
 function getConfigPath(): string {
   return join(getAgentEmailHome(), 'config.json');
 }
 
 /**
- * Load persisted config from ~/.agent-email/config.json.
+ * Load persisted config from ~/.email-agent-mcp/config.json.
  * Returns empty config if file doesn't exist or is invalid.
  */
 export async function loadConfig(): Promise<AgentEmailConfig> {
@@ -65,7 +65,7 @@ export async function loadConfig(): Promise<AgentEmailConfig> {
 }
 
 /**
- * Save config to ~/.agent-email/config.json.
+ * Save config to ~/.email-agent-mcp/config.json.
  * Merges with existing config so callers only need to pass changed fields.
  */
 export async function saveConfig(updates: Partial<AgentEmailConfig>): Promise<void> {
@@ -137,7 +137,7 @@ export async function runCli(args: string[]): Promise<number> {
   const opts = parseCliArgs(args);
 
   if (opts.version) {
-    console.error('agent-email 0.1.0');
+    console.error(`email-agent-mcp ${PACKAGE_VERSION}`);
     return 0;
   }
 
@@ -206,16 +206,16 @@ export async function runWatch(opts: CliOptions): Promise<number> {
 
   // Poll interval validation
   if (pollIntervalSec < 2) {
-    console.error(`[agent-email] WARNING: --poll-interval ${pollIntervalSec}s is too low, clamping to 2s`);
+    console.error(`[email-agent-mcp] WARNING: --poll-interval ${pollIntervalSec}s is too low, clamping to 2s`);
     pollIntervalSec = 2;
   } else if (pollIntervalSec < 5) {
-    console.error(`[agent-email] WARNING: --poll-interval ${pollIntervalSec}s is aggressive — may cause rate limiting`);
+    console.error(`[email-agent-mcp] WARNING: --poll-interval ${pollIntervalSec}s is aggressive — may cause rate limiting`);
   }
 
   const pollIntervalMs = pollIntervalSec * 1000;
 
-  console.error(`[agent-email] Watching mailboxes, wake URL: ${wakeUrl}`);
-  console.error(`[agent-email] Poll interval: ${pollIntervalSec}s`);
+  console.error(`[email-agent-mcp] Watching mailboxes, wake URL: ${wakeUrl}`);
+  console.error(`[email-agent-mcp] Poll interval: ${pollIntervalSec}s`);
 
   // Dynamic imports to avoid loading heavy dependencies at parse time
   const {
@@ -246,7 +246,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
   const allowlistPath = getReceiveAllowlistPath();
   const allowlist = await loadReceiveAllowlist(allowlistPath);
   if (!allowlist) {
-    console.error('[agent-email] WARNING: No receive allowlist configured — accepting all senders');
+    console.error('[email-agent-mcp] WARNING: No receive allowlist configured — accepting all senders');
   }
 
   // Get wake token: env var > config > undefined
@@ -255,11 +255,11 @@ export async function runWatch(opts: CliOptions): Promise<number> {
   // Load all configured mailboxes
   const allMailboxes = await listConfiguredMailboxesWithMetadata();
   if (allMailboxes.length === 0) {
-    console.error('[agent-email] No configured mailboxes found. Run: agent-email configure');
+    console.error('[email-agent-mcp] No configured mailboxes found. Run: email-agent-mcp configure');
     return 1;
   }
 
-  console.error(`[agent-email] Found ${allMailboxes.length} configured mailbox(es)`);
+  console.error(`[email-agent-mcp] Found ${allMailboxes.length} configured mailbox(es)`);
 
   // Track which mailboxes we successfully set up for cleanup
   interface MailboxWatchState {
@@ -276,9 +276,9 @@ export async function runWatch(opts: CliOptions): Promise<number> {
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.error('\n[agent-email] Shutting down watcher...');
+    console.error('\n[email-agent-mcp] Shutting down watcher...');
     await releaseAllLocks();
-    console.error('[agent-email] Lock files cleaned up. Goodbye.');
+    console.error('[email-agent-mcp] Lock files cleaned up. Goodbye.');
     process.exit(0);
   };
 
@@ -292,12 +292,12 @@ export async function runWatch(opts: CliOptions): Promise<number> {
       ? toFilesystemSafeKey(metadata.emailAddress)
       : metadata.mailboxName;
 
-    console.error(`[agent-email] Setting up mailbox: ${emailAddress} (key: ${safeKey})`);
+    console.error(`[email-agent-mcp] Setting up mailbox: ${emailAddress} (key: ${safeKey})`);
 
     // Acquire lock
     const gotLock = await acquireLock(safeKey);
     if (!gotLock) {
-      console.error(`[agent-email] ERROR: Mailbox ${emailAddress} is already being watched by another process. Skipping.`);
+      console.error(`[email-agent-mcp] ERROR: Mailbox ${emailAddress} is already being watched by another process. Skipping.`);
       continue;
     }
 
@@ -319,29 +319,29 @@ export async function runWatch(opts: CliOptions): Promise<number> {
 
       if (savedState) {
         lastCheckedAt = savedState.lastUpdated;
-        console.error(`[agent-email] Resuming watch for ${emailAddress} (last checked: ${lastCheckedAt})`);
+        console.error(`[email-agent-mcp] Resuming watch for ${emailAddress} (last checked: ${lastCheckedAt})`);
       } else {
         // First run: start from NOW — no historical sync needed
         lastCheckedAt = new Date().toISOString();
         await saveDeltaState(safeKey, { deltaLink: '', lastUpdated: lastCheckedAt });
-        console.error(`[agent-email] Watching ${emailAddress} for new emails starting now`);
+        console.error(`[email-agent-mcp] Watching ${emailAddress} for new emails starting now`);
       }
 
       watchStates.push({ safeKey, emailAddress, provider, lastCheckedAt });
     } catch (err) {
-      console.error(`[agent-email] WARNING: Failed to set up ${emailAddress}: ${err instanceof Error ? err.message : err}`);
+      console.error(`[email-agent-mcp] WARNING: Failed to set up ${emailAddress}: ${err instanceof Error ? err.message : err}`);
       await releaseLock(safeKey);
       continue;
     }
   }
 
   if (watchStates.length === 0) {
-    console.error('[agent-email] No mailboxes could be set up for watching.');
+    console.error('[email-agent-mcp] No mailboxes could be set up for watching.');
     await releaseAllLocks();
     return 1;
   }
 
-  console.error(`[agent-email] Watching ${watchStates.length} mailbox(es). Starting poll loop...`);
+  console.error(`[email-agent-mcp] Watching ${watchStates.length} mailbox(es). Starting poll loop...`);
 
   // Poll loop — uses simple timestamp filtering instead of Delta Query.
   // Delta Query requires paging through the ENTIRE inbox on first use (even with $deltatoken=latest).
@@ -351,7 +351,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
       if (shuttingDown) break;
 
       const now = new Date().toISOString();
-      console.error(`[agent-email] [${now}] Polling ${state.emailAddress} (since ${state.lastCheckedAt})...`);
+      console.error(`[email-agent-mcp] [${now}] Polling ${state.emailAddress} (since ${state.lastCheckedAt})...`);
 
       try {
         const newMessages = await state.provider.getNewMessages(state.lastCheckedAt);
@@ -373,20 +373,20 @@ export async function runWatch(opts: CliOptions): Promise<number> {
           if (!isAllowedSender(senderEmail, allowlist)) {
             skippedAllowlist++;
             markProcessed(msg.id);
-            console.error(`[agent-email] Skipping email from ${senderEmail} (not on receive allowlist)`);
+            console.error(`[email-agent-mcp] Skipping email from ${senderEmail} (not on receive allowlist)`);
             continue;
           }
 
           // Build and send wake
           const payload = buildWakePayload(state.emailAddress, msg);
-          console.error(`[agent-email] WAKE: ${payload.text.split('\n')[0]}`);
+          console.error(`[email-agent-mcp] WAKE: ${payload.text.split('\n')[0]}`);
 
           const result = await sendWake(wakeUrl, payload, token);
           if (result.success) {
             markProcessed(msg.id);
             wakeCount++;
           } else {
-            console.error(`[agent-email] WARNING: Wake POST failed for ${msg.id}: ${result.error} — will retry next poll`);
+            console.error(`[email-agent-mcp] WARNING: Wake POST failed for ${msg.id}: ${result.error} — will retry next poll`);
             wakeFailed = true;
           }
         }
@@ -402,7 +402,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
 
         if (newMessages.length > 0) {
           console.error(
-            `[agent-email] Poll: ${newMessages.length} new, ${wakeCount} wakes, ` +
+            `[email-agent-mcp] Poll: ${newMessages.length} new, ${wakeCount} wakes, ` +
             `${skippedDedup} dedup, ${skippedAllowlist} allowlist-blocked`,
           );
         }
@@ -410,11 +410,11 @@ export async function runWatch(opts: CliOptions): Promise<number> {
         // Handle token errors gracefully
         const errMsg = err instanceof Error ? err.message : String(err);
         if (errMsg.includes('interaction_required') || errMsg.includes('invalid_grant')) {
-          console.error(`[agent-email] WARNING: Token error for ${state.emailAddress}: ${errMsg}. Run: agent-email configure`);
+          console.error(`[email-agent-mcp] WARNING: Token error for ${state.emailAddress}: ${errMsg}. Run: email-agent-mcp configure`);
           continue;
         }
 
-        console.error(`[agent-email] WARNING: Poll error for ${state.emailAddress}: ${errMsg}`);
+        console.error(`[email-agent-mcp] WARNING: Poll error for ${state.emailAddress}: ${errMsg}`);
       }
     }
   };
@@ -446,7 +446,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
 
 export async function runConfigure(opts: CliOptions): Promise<number> {
   if (opts.nemoclaw) {
-    console.error('[agent-email] NemoClaw bootstrap — adding egress domains:');
+    console.error('[email-agent-mcp] NemoClaw bootstrap — adding egress domains:');
     for (const domain of NEMOCLAW_EGRESS_DOMAINS) {
       console.error(`  ✓ ${domain}`);
     }
@@ -457,7 +457,7 @@ export async function runConfigure(opts: CliOptions): Promise<number> {
   const provider = opts.provider ?? 'microsoft';
 
   if (provider !== 'microsoft') {
-    console.error(`[agent-email] Provider "${provider}" not yet supported for configure. Use --provider microsoft`);
+    console.error(`[email-agent-mcp] Provider "${provider}" not yet supported for configure. Use --provider microsoft`);
     return 1;
   }
 
@@ -466,8 +466,8 @@ export async function runConfigure(opts: CliOptions): Promise<number> {
     ?? process.env['AGENT_EMAIL_CLIENT_ID']
     ?? 'c4f91d3e-d2d9-4f8b-826f-6a3c19280241'; // Junior local app
 
-  console.error(`[agent-email] Configuring mailbox "${mailboxName}" with Microsoft Graph`);
-  console.error(`[agent-email] Client ID: ${clientId}`);
+  console.error(`[email-agent-mcp] Configuring mailbox "${mailboxName}" with Microsoft Graph`);
+  console.error(`[email-agent-mcp] Client ID: ${clientId}`);
   console.error('');
 
   try {
@@ -512,7 +512,7 @@ export async function runConfigure(opts: CliOptions): Promise<number> {
                 const content = await readFileAsync(join(tokensDir, file), 'utf-8');
                 const meta = JSON.parse(content) as { emailAddress?: string };
                 if (meta.emailAddress && meta.emailAddress.toLowerCase() === emailAddress.toLowerCase()) {
-                  console.error(`[agent-email] Removing superseded token file: ${file}`);
+                  console.error(`[email-agent-mcp] Removing superseded token file: ${file}`);
                   await unlink(join(tokensDir, file));
                 }
               } catch {
@@ -547,24 +547,24 @@ export async function runConfigure(opts: CliOptions): Promise<number> {
 
             // Write back pretty-printed
             await writeFileAsync(allowlistPath, JSON.stringify({ entries }, null, 2) + '\n', 'utf-8');
-            console.error(`[agent-email] Send allowlist: ${emailAddress} (outbound email enabled to this address)`);
+            console.error(`[email-agent-mcp] Send allowlist: ${emailAddress} (outbound email enabled to this address)`);
           } catch (allowlistErr) {
-            console.error(`[agent-email] WARNING: Could not update send allowlist: ${allowlistErr instanceof Error ? allowlistErr.message : allowlistErr}`);
+            console.error(`[email-agent-mcp] WARNING: Could not update send allowlist: ${allowlistErr instanceof Error ? allowlistErr.message : allowlistErr}`);
           }
         }
 
         console.error('');
         console.error(`✅ Connected as: ${profile.displayName ?? 'Unknown'} (${emailAddress})`);
-        console.error(`   Mailbox saved to ~/.agent-email/tokens/${safeKey}.json`);
+        console.error(`   Mailbox saved to ~/.email-agent-mcp/tokens/${safeKey}.json`);
       } else {
         console.error('');
         console.error(`✅ Connected as: ${profile.displayName ?? 'Unknown'} (no email found)`);
-        console.error(`   Mailbox "${mailboxName}" saved to ~/.agent-email/tokens/${mailboxName}.json`);
+        console.error(`   Mailbox "${mailboxName}" saved to ~/.email-agent-mcp/tokens/${mailboxName}.json`);
       }
       console.error('');
       console.error('To start the MCP server, run:');
       console.error('   npx tsx packages/email-mcp/src/cli.ts serve   # from source');
-      console.error('   npx @usejunior/agent-email serve             # after npm publish');
+      console.error('   npx @usejunior/email-agent-mcp serve             # after npm publish');
     } else {
       console.error('');
       console.error(`⚠️  Authentication succeeded but profile fetch failed (${resp.status})`);
@@ -586,11 +586,11 @@ export async function runStatus(): Promise<number> {
   const mailboxes = await listConfiguredMailboxesWithMetadata();
 
   console.error('');
-  console.error('  \uD83E\uDD9E agent-email status');
+  console.error('  \uD83E\uDD9E email-agent-mcp status');
   console.error('');
 
   if (mailboxes.length === 0) {
-    console.error('  No mailboxes configured. Run: agent-email setup');
+    console.error('  No mailboxes configured. Run: email-agent-mcp setup');
     return 0;
   }
 
@@ -639,20 +639,20 @@ export async function runStatus(): Promise<number> {
 
 function printHelp(): void {
   console.error(`
-agent-email — Email connectivity for AI agents
+email-agent-mcp — Email connectivity for AI agents
 
 USAGE:
-  agent-email [command] [options]
+  email-agent-mcp [command] [options]
 
 COMMANDS:
-  agent-email              Set up (first run) or show status (TTY)
+  email-agent-mcp              Set up (first run) or show status (TTY)
                            Start MCP server (non-TTY / when spawned by host)
-  agent-email watch        Start email watcher (long-running)
-  agent-email setup        Configure a mailbox (interactive)
-  agent-email configure    Configure a mailbox (interactive, alias for setup)
-  agent-email status       Show account + connection health
-  agent-email serve        Force MCP server mode
-  agent-email help         Show this help
+  email-agent-mcp watch        Start email watcher (long-running)
+  email-agent-mcp setup        Configure a mailbox (interactive)
+  email-agent-mcp configure    Configure a mailbox (interactive, alias for setup)
+  email-agent-mcp status       Show account + connection health
+  email-agent-mcp serve        Force MCP server mode
+  email-agent-mcp help         Show this help
 
 OPTIONS:
   --version              Print version

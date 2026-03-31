@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Real MCP server using @modelcontextprotocol/sdk — stdio transport
-// This is the entry point for `npx @usejunior/agent-email serve`
+// This is the entry point for `npx @usejunior/email-agent-mcp serve`
 
+import { createRequire } from 'node:module';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -10,6 +11,9 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { actionsToMcpTools, handleToolCall, type EmailActionDef } from './server.js';
+
+const require = createRequire(import.meta.url);
+const { version: PACKAGE_VERSION } = require('../package.json') as { version: string };
 
 // Demo actions for E2E testing — no real email provider needed
 const demoActions: EmailActionDef[] = [
@@ -28,7 +32,7 @@ const demoActions: EmailActionDef[] = [
       const inp = input as { unread?: boolean; limit?: number; folder?: string };
       return {
         emails: [
-          { id: 'demo-1', subject: 'Welcome to agent-email', from: 'system@agent-email.dev', receivedAt: new Date().toISOString(), isRead: false, hasAttachments: false },
+          { id: 'demo-1', subject: 'Welcome to email-agent-mcp', from: 'system@email-agent-mcp.dev', receivedAt: new Date().toISOString(), isRead: false, hasAttachments: false },
           { id: 'demo-2', subject: 'MCP Integration Test', from: 'test@example.com', receivedAt: new Date().toISOString(), isRead: true, hasAttachments: true },
           { id: 'demo-3', subject: 'Contract Review — Q1 2024', from: 'alice@corp.com', receivedAt: new Date().toISOString(), isRead: false, hasAttachments: true },
         ].filter(e => inp.unread ? !e.isRead : true).slice(0, inp.limit ?? 25),
@@ -44,7 +48,7 @@ const demoActions: EmailActionDef[] = [
     run: async (_ctx, input) => {
       const inp = input as { id: string };
       const emails: Record<string, { subject: string; from: string; body: string }> = {
-        'demo-1': { subject: 'Welcome to agent-email', from: 'system@agent-email.dev', body: '# Welcome to agent-email!\n\nThis is a demo email from the MCP E2E test.\n\nThe agent-email MCP server is working correctly with stdio transport.\n\n## Features\n- Multi-mailbox support\n- Send allowlist security\n- Content engine (HTML → markdown)' },
+        'demo-1': { subject: 'Welcome to email-agent-mcp', from: 'system@email-agent-mcp.dev', body: '# Welcome to email-agent-mcp!\n\nThis is a demo email from the MCP E2E test.\n\nThe email-agent-mcp MCP server is working correctly with stdio transport.\n\n## Features\n- Multi-mailbox support\n- Send allowlist security\n- Content engine (HTML → markdown)' },
         'demo-2': { subject: 'MCP Integration Test', from: 'test@example.com', body: 'This is a test email to verify MCP tool call dispatch works correctly.\n\nAttachments: report.pdf (245KB)' },
         'demo-3': { subject: 'Contract Review — Q1 2024', from: 'alice@corp.com', body: 'Hi,\n\nPlease review the attached contract for the Q1 partnership.\n\nAttachments: contract.docx (1.2MB), appendix.pdf (340KB)' },
       };
@@ -92,7 +96,7 @@ const demoActions: EmailActionDef[] = [
 
 async function main(): Promise<void> {
   const server = new Server(
-    { name: 'agent-email', version: '0.1.0' },
+    { name: 'email-agent-mcp', version: PACKAGE_VERSION },
     { capabilities: { tools: {} } },
   );
 
@@ -117,10 +121,10 @@ async function main(): Promise<void> {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('[agent-email] MCP server started on stdio (4 demo tools)');
+  console.error('[email-agent-mcp] MCP server started on stdio (4 demo tools)');
 }
 
 main().catch(err => {
-  console.error('[agent-email] Fatal error:', err);
+  console.error('[email-agent-mcp] Fatal error:', err);
   process.exit(1);
 });

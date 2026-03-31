@@ -1,4 +1,4 @@
-// Core types for agent-email
+// Core types for email-agent-mcp
 
 export interface EmailAddress {
   email: string;

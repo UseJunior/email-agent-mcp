@@ -24,7 +24,7 @@ import {
 import type { EmailMessage } from '@usejunior/email-core';
 import { isAllowedSender } from '@usejunior/email-core';
 
-const STATE_DIR = join(homedir(), '.agent-email', 'state');
+const STATE_DIR = join(homedir(), '.email-agent-mcp', 'state');
 const TEST_SAFE_KEY = '__test-watcher-unit__';
 
 function createTestMessage(overrides: Partial<EmailMessage> = {}): EmailMessage {

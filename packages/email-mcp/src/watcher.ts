@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { EmailMessage, EmailAddress } from '@usejunior/email-core';
 
-const STATE_DIR = join(homedir(), '.agent-email', 'state');
+const EMAIL_AGENT_MCP_HOME = process.env['EMAIL_AGENT_MCP_HOME'] ?? join(homedir(), '.email-agent-mcp');
+const STATE_DIR = join(EMAIL_AGENT_MCP_HOME, 'state');
 
 export interface WatcherConfig {
   wakeUrl: string;
@@ -255,7 +256,7 @@ export async function acquireLock(mailboxSafeKey: string): Promise<boolean> {
       return false;
     } catch {
       // Process is dead — stale lock, we can take over
-      console.error(`[agent-email] Removing stale lock for PID ${lockData.pid}`);
+      console.error(`[email-agent-mcp] Removing stale lock for PID ${lockData.pid}`);
     }
   } catch {
     // No lock file — good, we can acquire

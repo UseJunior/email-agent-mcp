@@ -1,5 +1,5 @@
 {
-  "name": "agent-email-suite",
+  "name": "email-agent-mcp-suite",
   "version": "0.1.0",
   "private": true,
   "description": "Open-source email connectivity for AI agents — MCP server for OpenClaw, Claude Code, Gemini CLI, and more",
@@ -18,17 +18,19 @@
     "clean": "npm run clean --workspaces --if-present",
     "check:spec-coverage": "node scripts/check-spec-coverage.mjs",
     "check:server-json": "node scripts/check-server-json.mjs",
+    "check:gemini-extension-manifest": "node scripts/check-gemini-extension-manifest.mjs",
+    "check:isolated-runtime": "node scripts/check-isolated-runtime.mjs",
     "dev:serve": "npx tsx packages/email-mcp/src/serve-entry.ts",
     "dev:watch": "npx tsx packages/email-mcp/src/cli.ts watch",
     "dev:configure": "npx tsx packages/email-mcp/src/cli.ts configure"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/UseJunior/agent-email.git"
+    "url": "https://github.com/UseJunior/email-agent-mcp.git"
   },
-  "homepage": "https://github.com/UseJunior/agent-email#readme",
+  "homepage": "https://github.com/UseJunior/email-agent-mcp#readme",
   "bugs": {
-    "url": "https://github.com/UseJunior/agent-email/issues"
+    "url": "https://github.com/UseJunior/email-agent-mcp/issues"
   },
   "keywords": [
     "email",

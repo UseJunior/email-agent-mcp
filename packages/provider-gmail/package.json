@@ -1,7 +1,7 @@
 {
   "name": "@usejunior/provider-gmail",
   "version": "0.1.0",
-  "description": "Gmail API email provider for agent-email",
+  "description": "Gmail API email provider for email-agent-mcp",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -32,19 +32,20 @@
     "node": ">=20"
   },
   "files": [
-    "dist/"
+    "dist/",
+    "!dist/.tsbuildinfo"
   ],
   "publishConfig": {
     "access": "public"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/UseJunior/agent-email.git",
+    "url": "https://github.com/UseJunior/email-agent-mcp.git",
     "directory": "packages/provider-gmail"
   },
-  "homepage": "https://github.com/UseJunior/agent-email#readme",
+  "homepage": "https://github.com/UseJunior/email-agent-mcp#readme",
   "bugs": {
-    "url": "https://github.com/UseJunior/agent-email/issues"
+    "url": "https://github.com/UseJunior/email-agent-mcp/issues"
   },
   "keywords": ["email", "gmail", "google", "oauth", "ai-agent"],
   "license": "Apache-2.0"

@@ -71,12 +71,12 @@ describe('email-security/Allowlist Protection', () => {
 
   it('Scenario: Convention-over-configuration default path', () => {
     // WHEN no env var is set
-    // THEN defaults to ~/.agent-email/send-allowlist.json
+    // THEN defaults to ~/.email-agent-mcp/send-allowlist.json
     const originalEnv = process.env['AGENT_EMAIL_SEND_ALLOWLIST'];
     try {
       delete process.env['AGENT_EMAIL_SEND_ALLOWLIST'];
       const path = getSendAllowlistPath();
-      expect(path).toContain('.agent-email');
+      expect(path).toContain('.email-agent-mcp');
       expect(path).toContain('send-allowlist.json');
       // Should always return a string, never undefined
       expect(typeof path).toBe('string');

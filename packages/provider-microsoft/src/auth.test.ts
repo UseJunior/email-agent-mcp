@@ -4,8 +4,8 @@ import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { mkdir, writeFile, rm, readdir, readFile } from 'node:fs/promises';
 
-// Use a unique temp dir so tests never write to the real ~/.agent-email/
-const testHome = join(tmpdir(), `agent-email-auth-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+// Use a unique temp dir so tests never write to the real ~/.email-agent-mcp/
+const testHome = join(tmpdir(), `email-agent-mcp-auth-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
 const mockDeviceCodeState = vi.hoisted(() => ({
   authenticateCalls: 0,
@@ -62,8 +62,8 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
   let savedAgentEmailHome: string | undefined;
 
   beforeEach(() => {
-    savedAgentEmailHome = process.env['AGENT_EMAIL_HOME'];
-    process.env['AGENT_EMAIL_HOME'] = testHome;
+    savedAgentEmailHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    process.env['EMAIL_AGENT_MCP_HOME'] = testHome;
     mockDeviceCodeState.authenticateCalls = 0;
     mockDeviceCodeState.getTokenCalls = 0;
     mockDeviceCodeState.constructorOptions.length = 0;
@@ -71,9 +71,9 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
 
   afterEach(async () => {
     if (savedAgentEmailHome === undefined) {
-      delete process.env['AGENT_EMAIL_HOME'];
+      delete process.env['EMAIL_AGENT_MCP_HOME'];
     } else {
-      process.env['AGENT_EMAIL_HOME'] = savedAgentEmailHome;
+      process.env['EMAIL_AGENT_MCP_HOME'] = savedAgentEmailHome;
     }
     await rm(testHome, { recursive: true, force: true });
   });
@@ -94,7 +94,7 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
     const persistenceOptions = credentialOptions?.tokenCachePersistenceOptions as { enabled?: boolean; name?: string } | undefined;
     expect(credentialOptions?.disableAutomaticAuthentication).toBe(true);
     expect(persistenceOptions?.enabled).toBe(true);
-    expect(persistenceOptions?.name).toMatch(/^agent-email-test-mailbox-/);
+    expect(persistenceOptions?.name).toMatch(/^email-agent-mcp-test-mailbox-/);
 
     // Should be able to get an access token after connecting
     const token = await auth.getAccessToken();
@@ -117,7 +117,7 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
         clientId: 'test-client-id',
         tenantId: 'test-tenant',
       },
-      cacheName: 'agent-email-work-cache-id',
+      cacheName: 'email-agent-mcp-work-cache-id',
       lastInteractiveAuthAt: new Date().toISOString(),
       clientId: 'test-client-id',
       tenantId: 'test-tenant',
@@ -134,13 +134,13 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
     const persistenceOptions = credentialOptions?.tokenCachePersistenceOptions as { enabled?: boolean; name?: string } | undefined;
     // reconnect uses disableAutomaticAuthentication: false to allow silent token refresh via MSAL cache
     expect(credentialOptions?.disableAutomaticAuthentication).toBe(false);
-    expect(persistenceOptions?.name).toBe('agent-email-work-cache-id');
+    expect(persistenceOptions?.name).toBe('email-agent-mcp-work-cache-id');
     expect(auth.needsReauth).toBe(false);
   });
 
   it('Scenario: Refresh token persistence', async () => {
     // Create a metadata file simulating a previous auth session
-    const testDir = join(tmpdir(), `agent-email-test-${Date.now()}`);
+    const testDir = join(tmpdir(), `email-agent-mcp-test-${Date.now()}`);
     const tokensDir = join(testDir, 'tokens');
     await mkdir(tokensDir, { recursive: true });
 
@@ -204,19 +204,19 @@ describe('mailbox-config/Mailbox Canonical Identity', () => {
   let configDir: string;
 
   beforeEach(async () => {
-    savedAgentEmailHome = process.env['AGENT_EMAIL_HOME'];
-    const tempDir = join(tmpdir(), `agent-email-mailbox-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    process.env['AGENT_EMAIL_HOME'] = tempDir;
+    savedAgentEmailHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    const tempDir = join(tmpdir(), `email-agent-mcp-mailbox-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    process.env['EMAIL_AGENT_MCP_HOME'] = tempDir;
     configDir = join(tempDir, 'tokens');
     await mkdir(configDir, { recursive: true });
   });
 
   afterEach(async () => {
-    const tempDir = process.env['AGENT_EMAIL_HOME']!;
+    const tempDir = process.env['EMAIL_AGENT_MCP_HOME']!;
     if (savedAgentEmailHome === undefined) {
-      delete process.env['AGENT_EMAIL_HOME'];
+      delete process.env['EMAIL_AGENT_MCP_HOME'];
     } else {
-      process.env['AGENT_EMAIL_HOME'] = savedAgentEmailHome;
+      process.env['EMAIL_AGENT_MCP_HOME'] = savedAgentEmailHome;
     }
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -336,31 +336,31 @@ describe('mailbox-config/Convention-Over-Configuration Paths', () => {
   let savedAgentEmailHome: string | undefined;
 
   beforeEach(() => {
-    savedAgentEmailHome = process.env['AGENT_EMAIL_HOME'];
+    savedAgentEmailHome = process.env['EMAIL_AGENT_MCP_HOME'];
   });
 
   afterEach(() => {
     if (savedAgentEmailHome === undefined) {
-      delete process.env['AGENT_EMAIL_HOME'];
+      delete process.env['EMAIL_AGENT_MCP_HOME'];
     } else {
-      process.env['AGENT_EMAIL_HOME'] = savedAgentEmailHome;
+      process.env['EMAIL_AGENT_MCP_HOME'] = savedAgentEmailHome;
     }
   });
 
   it('Scenario: Default home directory', () => {
-    // WHEN AGENT_EMAIL_HOME is not set
-    delete process.env['AGENT_EMAIL_HOME'];
+    // WHEN EMAIL_AGENT_MCP_HOME is not set
+    delete process.env['EMAIL_AGENT_MCP_HOME'];
 
-    // THEN the system uses ~/.agent-email/ as the home directory
-    // getConfigDir returns ~/.agent-email/tokens/
+    // THEN the system uses ~/.email-agent-mcp/ as the home directory
+    // getConfigDir returns ~/.email-agent-mcp/tokens/
     const configDir = getConfigDir();
     const home = homedir();
-    expect(configDir).toBe(join(home, '.agent-email', 'tokens'));
+    expect(configDir).toBe(join(home, '.email-agent-mcp', 'tokens'));
   });
 
   it('Scenario: Custom home directory via env var', () => {
-    // WHEN AGENT_EMAIL_HOME is set to /tmp/ae-test
-    process.env['AGENT_EMAIL_HOME'] = '/tmp/ae-test';
+    // WHEN EMAIL_AGENT_MCP_HOME is set to /tmp/ae-test
+    process.env['EMAIL_AGENT_MCP_HOME'] = '/tmp/ae-test';
 
     // THEN the system uses /tmp/ae-test/ as the home directory
     const configDir = getConfigDir();
@@ -369,8 +369,8 @@ describe('mailbox-config/Convention-Over-Configuration Paths', () => {
 
   it('Scenario: Tokens directory for auth metadata', () => {
     // WHEN the system stores authentication metadata
-    // THEN it writes to ~/.agent-email/tokens/
-    process.env['AGENT_EMAIL_HOME'] = '/tmp/ae-tokens-test';
+    // THEN it writes to ~/.email-agent-mcp/tokens/
+    process.env['EMAIL_AGENT_MCP_HOME'] = '/tmp/ae-tokens-test';
     const configDir = getConfigDir();
     expect(configDir).toContain('tokens');
     expect(configDir).toBe('/tmp/ae-tokens-test/tokens');
@@ -378,18 +378,18 @@ describe('mailbox-config/Convention-Over-Configuration Paths', () => {
 
   it('Scenario: State directory for watcher state and locks', () => {
     // WHEN the system stores watcher checkpoints or lock files
-    // THEN it writes to ~/.agent-email/state/
-    // The watcher hardcodes STATE_DIR as join(homedir(), '.agent-email', 'state')
+    // THEN it writes to ~/.email-agent-mcp/state/
+    // The watcher hardcodes STATE_DIR as join(homedir(), '.email-agent-mcp', 'state')
     const home = homedir();
-    const expectedStateDir = join(home, '.agent-email', 'state');
-    expect(expectedStateDir).toContain(join('.agent-email', 'state'));
+    const expectedStateDir = join(home, '.email-agent-mcp', 'state');
+    expect(expectedStateDir).toContain(join('.email-agent-mcp', 'state'));
   });
 
   it('Scenario: Config file for persistent settings', async () => {
     // WHEN the system reads or writes persistent configuration
-    // THEN it uses ~/.agent-email/config.json
+    // THEN it uses ~/.email-agent-mcp/config.json
     const tmpHome = join(tmpdir(), `ae-config-test-${Date.now()}`);
-    process.env['AGENT_EMAIL_HOME'] = tmpHome;
+    process.env['EMAIL_AGENT_MCP_HOME'] = tmpHome;
 
     await mkdir(tmpHome, { recursive: true });
     const configPath = join(tmpHome, 'config.json');
@@ -404,19 +404,19 @@ describe('mailbox-config/Convention-Over-Configuration Paths', () => {
 
   it('Scenario: Allowlist files loaded by convention', () => {
     // WHEN the system checks send or receive allowlists
-    // THEN it loads ~/.agent-email/send-allowlist.json and receive-allowlist.json by convention
+    // THEN it loads ~/.email-agent-mcp/send-allowlist.json and receive-allowlist.json by convention
     delete process.env['AGENT_EMAIL_RECEIVE_ALLOWLIST'];
     const home = homedir();
-    const expectedPath = join(home, '.agent-email', 'receive-allowlist.json');
+    const expectedPath = join(home, '.email-agent-mcp', 'receive-allowlist.json');
     expect(expectedPath).toContain('receive-allowlist.json');
-    expect(expectedPath).toContain('.agent-email');
+    expect(expectedPath).toContain('.email-agent-mcp');
   });
 
   it('Scenario: Auto-add email to send allowlist during configure', async () => {
     // WHEN a mailbox is successfully configured
     // THEN the configured email address is automatically added to send-allowlist.json
     const tmpHome = join(tmpdir(), `ae-allowlist-test-${Date.now()}`);
-    process.env['AGENT_EMAIL_HOME'] = tmpHome;
+    process.env['EMAIL_AGENT_MCP_HOME'] = tmpHome;
 
     await mkdir(tmpHome, { recursive: true });
 

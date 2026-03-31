@@ -58,7 +58,7 @@ export async function loadReceiveAllowlist(filePath?: string): Promise<Allowlist
  */
 export function getReceiveAllowlistPath(): string {
   return process.env['AGENT_EMAIL_RECEIVE_ALLOWLIST']
-    ?? join(homedir(), '.agent-email', 'receive-allowlist.json');
+    ?? join(homedir(), '.email-agent-mcp', 'receive-allowlist.json');
 }
 
 // Delete policy enforcement

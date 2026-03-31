@@ -1,0 +1,269 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing release tag to publish (for example: v0.2.0)"
+        required: true
+        type: string
+
+jobs:
+  preflight:
+    name: Release preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+    concurrency:
+      group: npm-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Use npm 11.5.1+ for OIDC trusted publishing compatibility
+        run: npm install --global npm@11.5.1
+
+      - name: Verify tag matches release versions
+        run: |
+          TAG_REF="${RELEASE_TAG:-$GITHUB_REF_NAME}"
+          TAG_VERSION="${TAG_REF#v}"
+
+          for pkg in packages/email-core/package.json packages/email-mcp/package.json packages/provider-microsoft/package.json packages/provider-gmail/package.json packages/email-agent-mcp/package.json; do
+            PKG_VERSION="$(node -p "require('./${pkg}').version")"
+            if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+              echo "Tag version ($TAG_VERSION) must match ${pkg} version ($PKG_VERSION)."
+              exit 1
+            fi
+          done
+
+          GEMINI_VERSION="$(node -p "require('./gemini-extension.json').version")"
+          if [ "$TAG_VERSION" != "$GEMINI_VERSION" ]; then
+            echo "Tag version ($TAG_VERSION) must match gemini-extension.json version ($GEMINI_VERSION)."
+            exit 1
+          fi
+
+          SERVER_VERSION="$(node -p "require('./packages/email-agent-mcp/server.json').version")"
+          if [ "$TAG_VERSION" != "$SERVER_VERSION" ]; then
+            echo "Tag version ($TAG_VERSION) must match server.json version ($SERVER_VERSION)."
+            exit 1
+          fi
+
+      - name: Verify release commit is on main
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"; then
+            echo "Release tag commit is not contained in origin/main."
+            exit 1
+          fi
+
+      - name: Verify GEMINI.md exists
+        run: test -s GEMINI.md
+
+      - name: Install dependencies (npm ci with retry)
+        run: |
+          for attempt in 1 2 3; do
+            echo "npm ci attempt ${attempt}/3"
+            if npm ci; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 20))
+            fi
+          done
+          echo "npm ci failed after 3 attempts"
+          exit 1
+
+      - name: Build workspaces
+        run: npm run build
+
+      - name: Lint workspaces
+        run: npm run lint
+
+      - name: Run tests
+        run: npm run test:run
+
+      - name: Validate OpenSpec traceability
+        run: npm run check:spec-coverage
+
+      - name: Validate server.json contract
+        run: npm run check:server-json
+
+      - name: Validate Gemini extension manifest
+        run: npm run check:gemini-extension-manifest
+
+      - name: Verify package contents (dry-run)
+        run: |
+          for pkg in email-core provider-microsoft provider-gmail email-mcp email-agent-mcp; do
+            echo "=== packages/$pkg ==="
+            (cd "packages/$pkg" && npm pack --dry-run)
+          done
+
+      - name: Guard against duplicate publish
+        run: |
+          TAG_REF="${RELEASE_TAG:-$GITHUB_REF_NAME}"
+          VERSION="${TAG_REF#v}"
+          ALREADY=0
+          TOTAL=0
+          for pkg in @usejunior/email-core @usejunior/provider-microsoft @usejunior/provider-gmail @usejunior/email-mcp @usejunior/email-agent-mcp; do
+            TOTAL=$((TOTAL + 1))
+            if npm view "$pkg@$VERSION" version >/dev/null 2>&1; then
+              echo "$pkg@$VERSION already published."
+              ALREADY=$((ALREADY + 1))
+            else
+              echo "$pkg@$VERSION not yet published."
+            fi
+          done
+          if [ "$ALREADY" -eq "$TOTAL" ]; then
+            echo "All $TOTAL packages already published for $VERSION — nothing to do."
+            exit 1
+          fi
+          echo "$ALREADY of $TOTAL packages already published — publish step will skip those."
+
+  publish-suite:
+    name: Publish package suite
+    needs: [preflight]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+    concurrency:
+      group: npm-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Use npm 11.5.1+ for OIDC trusted publishing compatibility
+        run: npm install --global npm@11.5.1
+
+      - name: Install dependencies (npm ci with retry)
+        run: |
+          for attempt in 1 2 3; do
+            echo "npm ci attempt ${attempt}/3"
+            if npm ci; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 20))
+            fi
+          done
+          echo "npm ci failed after 3 attempts"
+          exit 1
+
+      - name: Build workspaces
+        run: npm run build
+
+      - name: Publish to npm (trusted publishing + provenance)
+        run: |
+          TAG_REF="${RELEASE_TAG:-$GITHUB_REF_NAME}"
+          VERSION="${TAG_REF#v}"
+          unset NODE_AUTH_TOKEN
+          npm config delete //registry.npmjs.org/:_authToken || true
+
+          # Publish in dependency order with retry for CDN propagation
+          publish_pkg() {
+            local PKG_NAME="$1"
+            local PKG_DIR="$2"
+            if npm view "$PKG_NAME@$VERSION" version >/dev/null 2>&1; then
+              echo "$PKG_NAME@$VERSION already published — skipping."
+              return 0
+            fi
+            echo "Publishing $PKG_NAME from $PKG_DIR"
+            (cd "$PKG_DIR" && npm publish --provenance --access public)
+          }
+
+          # Tier 1: no internal deps
+          publish_pkg "@usejunior/email-core" "packages/email-core"
+
+          # Brief pause for registry propagation
+          sleep 10
+
+          # Tier 2: depends on email-core
+          publish_pkg "@usejunior/provider-microsoft" "packages/provider-microsoft"
+          publish_pkg "@usejunior/provider-gmail" "packages/provider-gmail"
+
+          sleep 10
+
+          # Tier 3: depends on email-core + provider-microsoft
+          publish_pkg "@usejunior/email-mcp" "packages/email-mcp"
+
+          sleep 10
+
+          # Tier 4: depends on email-mcp
+          publish_pkg "@usejunior/email-agent-mcp" "packages/email-agent-mcp"
+
+  publish-github-release:
+    name: Publish GitHub release notes
+    needs: [preflight, publish-suite]
+    if: always() && needs.preflight.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+
+      - name: Create GitHub release (only if publish succeeded)
+        if: needs.publish-suite.result == 'success'
+        id: release
+        run: |
+          TAG_REF="${RELEASE_TAG:-$GITHUB_REF_NAME}"
+          if gh release view "$TAG_REF" >/dev/null 2>&1; then
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            echo "GitHub release already exists for ${TAG_REF}."
+          else
+            gh release create "$TAG_REF" --title "$TAG_REF" --generate-notes --verify-tag
+            echo "created=true" >> "$GITHUB_OUTPUT"
+            echo "Created GitHub release for ${TAG_REF}."
+          fi
+
+      - name: Publish release summary
+        if: always()
+        run: |
+          TAG_REF="${RELEASE_TAG:-$GITHUB_REF_NAME}"
+          PUBLISH_RESULT="${{ needs.publish-suite.result }}"
+          {
+            echo "### GitHub Release: ${TAG_REF}"
+            if [ "$PUBLISH_RESULT" = "success" ]; then
+              RELEASE_URL="$(gh release view "$TAG_REF" --json url --jq '.url' 2>/dev/null || echo 'n/a')"
+              echo "- npm publish: SUCCESS"
+              echo "- Release created: ${{ steps.release.outputs.created || 'already existed' }}"
+              echo "- Release URL: ${RELEASE_URL}"
+            else
+              echo "- npm publish: FAILED — GitHub Release was NOT created"
+              echo "- To recover once the issue is fixed, run:"
+              echo '  ```'
+              echo "  gh workflow run release.yml -f release_tag=${TAG_REF}"
+              echo '  ```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

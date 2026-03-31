@@ -74,7 +74,7 @@ describe('mcp-transport/Server Discovery', () => {
   it('Scenario: server.json content', () => {
     const manifest = getServerManifest();
 
-    expect(manifest.name).toBe('agent-email');
+    expect(manifest.name).toBe('email-agent-mcp');
     expect(manifest.version).toBeDefined();
     expect(manifest.description).toBeDefined();
     expect(manifest.transport).toBeDefined();

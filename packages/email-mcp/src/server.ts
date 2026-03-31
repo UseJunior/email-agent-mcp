@@ -149,14 +149,14 @@ export async function runServer(): Promise<void> {
   const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
   const { ListToolsRequestSchema, CallToolRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
 
-  // Load send allowlist at startup (convention: ~/.agent-email/send-allowlist.json)
+  // Load send allowlist at startup (convention: ~/.email-agent-mcp/send-allowlist.json)
   const { loadSendAllowlist, getSendAllowlistPath } = await import('@usejunior/email-core');
   const sendAllowlistPath = getSendAllowlistPath();
   const sendAllowlist = await loadSendAllowlist(sendAllowlistPath);
   if (sendAllowlist && sendAllowlist.entries.length > 0) {
-    console.error(`[agent-email] Send allowlist loaded: ${sendAllowlist.entries.length} entries from ${sendAllowlistPath}`);
+    console.error(`[email-agent-mcp] Send allowlist loaded: ${sendAllowlist.entries.length} entries from ${sendAllowlistPath}`);
   } else {
-    console.error(`[agent-email] WARNING: Send allowlist empty or not found at ${sendAllowlistPath} — all outbound email is disabled`);
+    console.error(`[email-agent-mcp] WARNING: Send allowlist empty or not found at ${sendAllowlistPath} — all outbound email is disabled`);
   }
 
   // Try to load real provider from saved tokens — try each mailbox, skip failures
@@ -184,32 +184,32 @@ export async function runServer(): Promise<void> {
 
           // Build real actions from the provider
           actions = await buildRealActions(provider, auth, sendAllowlist);
-          console.error(`[agent-email] Connected to mailbox "${displayName}" (${metadata.clientId})`);
+          console.error(`[email-agent-mcp] Connected to mailbox "${displayName}" (${metadata.clientId})`);
           connected = true;
           break;
         } catch (err) {
-          console.error(`[agent-email] Skipping mailbox "${displayName}": ${err instanceof Error ? err.message : err}`);
+          console.error(`[email-agent-mcp] Skipping mailbox "${displayName}": ${err instanceof Error ? err.message : err}`);
           continue;
         }
       }
 
       if (!connected) {
         actions = await buildDemoActions();
-        console.error('[agent-email] All mailboxes failed to connect — running in demo mode');
+        console.error('[email-agent-mcp] All mailboxes failed to connect — running in demo mode');
       }
     } else {
       actions = await buildDemoActions();
-      console.error('[agent-email] No configured mailboxes — running in demo mode');
-      console.error('[agent-email] Run: agent-email configure --mailbox <name> --provider microsoft');
+      console.error('[email-agent-mcp] No configured mailboxes — running in demo mode');
+      console.error('[email-agent-mcp] Run: email-agent-mcp configure --mailbox <name> --provider microsoft');
     }
   } catch (err) {
     actions = await buildDemoActions();
-    console.error(`[agent-email] Could not connect to real provider: ${err instanceof Error ? err.message : err}`);
-    console.error('[agent-email] Running in demo mode');
+    console.error(`[email-agent-mcp] Could not connect to real provider: ${err instanceof Error ? err.message : err}`);
+    console.error('[email-agent-mcp] Running in demo mode');
   }
 
   const server = new Server(
-    { name: 'agent-email', version: PACKAGE_VERSION },
+    { name: 'email-agent-mcp', version: PACKAGE_VERSION },
     { capabilities: { tools: {} } },
   );
 
@@ -231,7 +231,7 @@ export async function runServer(): Promise<void> {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`[agent-email] MCP server started on stdio (${tools.length} tools)`);
+  console.error(`[email-agent-mcp] MCP server started on stdio (${tools.length} tools)`);
 }
 
 // Import z lazily for action definitions
@@ -349,7 +349,7 @@ async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthW
         const healthWarning = auth.getTokenHealthWarning();
         if (healthWarning) warnings.push(healthWarning);
         if (!sendAllowlist || sendAllowlist.entries.length === 0) {
-          warnings.push('Send allowlist not configured — all outbound email is disabled. Run: agent-email configure');
+          warnings.push('Send allowlist not configured — all outbound email is disabled. Run: email-agent-mcp configure');
         }
         return { name: 'default', provider: 'microsoft', status: 'connected', isDefault: true, warnings };
       },
@@ -422,7 +422,7 @@ async function buildDemoActions(): Promise<EmailActionDef[]> {
     success: false,
     error: {
       code: 'DEMO_MODE',
-      message: 'Demo mode — run agent-email configure to connect a mailbox',
+      message: 'Demo mode — run email-agent-mcp configure to connect a mailbox',
       recoverable: false,
     },
   };
@@ -439,12 +439,12 @@ async function buildDemoActions(): Promise<EmailActionDef[]> {
     {
       name: 'list_emails', description: 'List recent emails', input: z.object({ unread: z.boolean().optional(), limit: z.number().optional(), folder: z.string().optional() }), output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean() })) }),
       annotations: { readOnlyHint: true, destructiveHint: false },
-      run: async () => ({ emails: [{ id: 'demo-1', subject: 'Demo mode — run agent-email configure to connect', from: 'system@agent-email.dev', receivedAt: new Date().toISOString(), isRead: false, hasAttachments: false }] }),
+      run: async () => ({ emails: [{ id: 'demo-1', subject: 'Demo mode — run email-agent-mcp configure to connect', from: 'system@email-agent-mcp.dev', receivedAt: new Date().toISOString(), isRead: false, hasAttachments: false }] }),
     },
     {
       name: 'read_email', description: 'Read email by ID', input: z.object({ id: z.string() }), output: z.object({ id: z.string(), subject: z.string(), from: z.string(), to: z.array(z.string()), body: z.string(), receivedAt: z.string() }),
       annotations: { readOnlyHint: true, destructiveHint: false },
-      run: async (_ctx, input) => ({ id: (input as {id:string}).id, subject: 'Demo mode', from: 'system@agent-email.dev', to: ['user@example.com'], body: 'No mailbox configured. Run: agent-email configure --mailbox <name> --provider microsoft', receivedAt: new Date().toISOString() }),
+      run: async (_ctx, input) => ({ id: (input as {id:string}).id, subject: 'Demo mode', from: 'system@email-agent-mcp.dev', to: ['user@example.com'], body: 'No mailbox configured. Run: email-agent-mcp configure --mailbox <name> --provider microsoft', receivedAt: new Date().toISOString() }),
     },
     {
       name: 'search_emails', description: 'Search emails', input: z.object({ query: z.string() }), output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean() })) }),
@@ -454,7 +454,7 @@ async function buildDemoActions(): Promise<EmailActionDef[]> {
     {
       name: 'get_mailbox_status', description: 'Get mailbox status', input: z.object({ mailbox: z.string().optional() }), output: z.object({ name: z.string(), provider: z.string(), status: z.string(), isDefault: z.boolean(), warnings: z.array(z.string()) }),
       annotations: { readOnlyHint: true, destructiveHint: false },
-      run: async () => ({ name: 'none', provider: 'none', status: 'not configured', isDefault: false, warnings: ['No mailbox configured. Run: agent-email configure --mailbox <name> --provider microsoft'] }),
+      run: async () => ({ name: 'none', provider: 'none', status: 'not configured', isDefault: false, warnings: ['No mailbox configured. Run: email-agent-mcp configure --mailbox <name> --provider microsoft'] }),
     },
     {
       name: getThreadAction.name,
@@ -468,9 +468,9 @@ async function buildDemoActions(): Promise<EmailActionDef[]> {
         messages: [{
           id: 'demo-1',
           subject: 'Demo mode',
-          from: 'system@agent-email.dev',
+          from: 'system@email-agent-mcp.dev',
           receivedAt: new Date().toISOString(),
-          body: 'No mailbox configured. Run: agent-email configure --mailbox <name> --provider microsoft',
+          body: 'No mailbox configured. Run: email-agent-mcp configure --mailbox <name> --provider microsoft',
           isRead: false,
         }],
         messageCount: 1,
@@ -502,13 +502,13 @@ export function createSandboxServer(): { tools: McpTool[] } {
  */
 export function getServerManifest(): Record<string, unknown> {
   return {
-    name: 'agent-email',
+    name: 'email-agent-mcp',
     version: PACKAGE_VERSION,
     description: 'Email connectivity for AI agents via MCP',
     transport: {
       type: 'stdio',
       command: 'npx',
-      args: ['-y', '@usejunior/agent-email', 'serve'],
+      args: ['-y', '@usejunior/email-agent-mcp', 'serve'],
     },
   };
 }

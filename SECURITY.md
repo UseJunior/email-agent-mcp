@@ -25,8 +25,8 @@ Do not open a public issue for an unpatched vulnerability.
 
 ## Scope Notes
 
-- `agent-email` handles OAuth tokens (Microsoft MSAL, Gmail OAuth) and email content locally.
-- Credentials are stored in the OS keychain (MSAL) and local config files under `~/.agent-email/`.
+- `email-agent-mcp` handles OAuth tokens (Microsoft MSAL, Gmail OAuth) and email content locally.
+- Credentials are stored in the OS keychain (MSAL) and local config files under `~/.email-agent-mcp/`.
 - The MCP server runs locally over stdio transport; no network listener is exposed.
 - Send/receive allowlists and the delete-disabled-by-default policy are security-critical features — bypasses are in scope.
 - External dependencies (Graph API, Gmail API, MCP SDK) are monitored through normal dependency updates and CI.

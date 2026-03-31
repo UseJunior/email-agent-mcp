@@ -1,0 +1,13 @@
+{
+  "name": "email-agent-mcp",
+  "version": "0.1.0",
+  "description": "Email connectivity for AI agents — read, reply, send, categorize emails from Microsoft 365 and Gmail via MCP.",
+  "contextFileName": "GEMINI.md",
+  "entrypoint": "GEMINI.md",
+  "mcpServers": {
+    "email-agent-mcp": {
+      "command": "npx",
+      "args": ["-y", "@usejunior/email-agent-mcp"]
+    }
+  }
+}

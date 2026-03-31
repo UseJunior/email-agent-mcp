@@ -3,12 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdir, writeFile, rm, readdir } from 'node:fs/promises';
 
-// Use a unique temp dir per test run — set AGENT_EMAIL_HOME so CONFIG_DIR resolves here
-const testHome = join(tmpdir(), `agent-email-dedup-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+// Use a unique temp dir per test run — set EMAIL_AGENT_MCP_HOME so CONFIG_DIR resolves here
+const testHome = join(tmpdir(), `email-agent-mcp-dedup-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const tokensDir = join(testHome, 'tokens');
 
-// Set AGENT_EMAIL_HOME BEFORE any import of auth.ts so getConfigDir() resolves to our temp dir
-process.env['AGENT_EMAIL_HOME'] = testHome;
+// Set EMAIL_AGENT_MCP_HOME BEFORE any import of auth.ts so getConfigDir() resolves to our temp dir
+process.env['EMAIL_AGENT_MCP_HOME'] = testHome;
 
 // Mock Azure identity to avoid real Azure calls
 vi.mock('@azure/identity', () => ({
@@ -21,7 +21,7 @@ vi.mock('@azure/identity-cache-persistence', () => ({
   cachePersistencePlugin: {},
 }));
 
-// Now import the functions under test — getConfigDir() will use AGENT_EMAIL_HOME
+// Now import the functions under test — getConfigDir() will use EMAIL_AGENT_MCP_HOME
 const { listConfiguredMailboxesWithMetadata, toFilesystemSafeKey } = await import('./auth.js');
 
 function makeMetadata(overrides: Record<string, unknown>) {
@@ -43,7 +43,7 @@ function makeMetadata(overrides: Record<string, unknown>) {
 
 describe('provider-microsoft/Mailbox Deduplication', () => {
   beforeEach(async () => {
-    process.env['AGENT_EMAIL_HOME'] = testHome;
+    process.env['EMAIL_AGENT_MCP_HOME'] = testHome;
     await mkdir(tokensDir, { recursive: true });
     vi.spyOn(console, 'error').mockImplementation(() => {});
   });

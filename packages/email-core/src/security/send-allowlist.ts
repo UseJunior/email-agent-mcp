@@ -59,7 +59,7 @@ export async function loadSendAllowlist(filePath?: string): Promise<AllowlistCon
  */
 export function getSendAllowlistPath(): string {
   return process.env['AGENT_EMAIL_SEND_ALLOWLIST']
-    ?? join(homedir(), '.agent-email', 'send-allowlist.json');
+    ?? join(homedir(), '.email-agent-mcp', 'send-allowlist.json');
 }
 
 /**

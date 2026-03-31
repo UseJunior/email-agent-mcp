@@ -12,7 +12,7 @@ import type { MailboxMetadata } from '@usejunior/provider-microsoft';
 export async function runWizardSetup(opts: CliOptions): Promise<number> {
   const { runConfigure, runWatch, loadConfig, saveConfig, getAgentEmailHome } = await import('./cli.js');
 
-  p.intro('🦞 agent-email — Email connectivity for AI agents');
+  p.intro('🦞 email-agent-mcp — Email connectivity for AI agents');
 
   p.note(
     'Outlook: not configured\nGmail:   coming soon',
@@ -34,7 +34,7 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
 
   if (provider === 'gmail') {
     p.note(
-      'Gmail support is coming soon.\nFor now, use Outlook (Microsoft 365 / Office 365).\nFollow: github.com/UseJunior/agent-email for updates.',
+      'Gmail support is coming soon.\nFor now, use Outlook (Microsoft 365 / Office 365).\nFollow: github.com/UseJunior/email-agent-mcp for updates.',
       'Coming Soon',
     );
     p.outro('Setup cancelled — Gmail not yet available.');
@@ -43,7 +43,7 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
 
   p.note(
     "You'll see a code to enter at https://login.microsoft.com/device\n" +
-    'This links your Outlook mailbox to agent-email.\n' +
+    'This links your Outlook mailbox to email-agent-mcp.\n' +
     `Credentials stored at ${getAgentEmailHome()}/tokens/\n` +
     'Token refreshes automatically for ~90 days.',
     'How email auth works',
@@ -59,7 +59,7 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
   const configOpts: CliOptions = { ...opts, command: 'configure', provider: 'microsoft' };
   const exitCode = await runConfigure(configOpts);
   if (exitCode !== 0) {
-    p.outro('Setup failed. Try again with: agent-email setup');
+    p.outro('Setup failed. Try again with: email-agent-mcp setup');
     return exitCode;
   }
 
@@ -70,16 +70,16 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
     const data = JSON.parse(raw) as { entries?: string[] };
     const entries = data.entries ?? [];
     p.note(
-      'agent-email blocks all outbound email by default.\n' +
+      'email-agent-mcp blocks all outbound email by default.\n' +
       `Added to send allowlist: ${entries.join(', ')}\n` +
       `Edit: ${allowlistPath}`,
       'Send allowlist (outbound)',
     );
   } catch {
     p.note(
-      'agent-email blocks all outbound email by default.\n' +
+      'email-agent-mcp blocks all outbound email by default.\n' +
       'No send allowlist configured — all outbound blocked.\n' +
-      'Run setup again or edit ~/.agent-email/send-allowlist.json',
+      'Run setup again or edit ~/.email-agent-mcp/send-allowlist.json',
       'Send allowlist (outbound)',
     );
   }
@@ -88,7 +88,7 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
   p.note(
     'The watcher accepts ALL inbound email by default.\n' +
     'To restrict which senders can wake the agent,\n' +
-    'create ~/.agent-email/receive-allowlist.json\n' +
+    'create ~/.email-agent-mcp/receive-allowlist.json\n' +
     'Format: {"entries": ["*@yourdomain.com"]}',
     'Inbound security',
   );
@@ -110,7 +110,7 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
 
     if (!p.isCancel(tokenInput) && tokenInput && tokenInput.trim()) {
       await saveConfig({ hooksToken: tokenInput.trim() });
-      p.log.success('Hooks token saved to ~/.agent-email/config.json');
+      p.log.success('Hooks token saved to ~/.email-agent-mcp/config.json');
     }
   }
 
@@ -126,7 +126,7 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
   // Offer to start watching
   const startWatch = await p.confirm({ message: 'Start watching for new emails now?' });
   if (p.isCancel(startWatch) || !startWatch) {
-    p.outro('Setup complete! Run: agent-email watch');
+    p.outro('Setup complete! Run: email-agent-mcp watch');
     return 0;
   }
 
@@ -141,7 +141,7 @@ export async function runWizardMenu(opts: CliOptions, mailboxes: MailboxMetadata
   const { runWatch, runStatus, runConfigure, loadConfig, saveConfig } = await import('./cli.js');
   const { getAgentEmailHome } = await import('./cli.js');
 
-  p.intro('🦞 agent-email — Email connectivity for AI agents');
+  p.intro('🦞 email-agent-mcp — Email connectivity for AI agents');
 
   // Build status lines
   const statusLines = mailboxes.map(mb => {
@@ -197,7 +197,7 @@ export async function runWizardMenu(opts: CliOptions, mailboxes: MailboxMetadata
           p.note(
             'No hooks token configured.\n' +
             'Wake POSTs will not be authenticated.\n' +
-            'Set OPENCLAW_HOOKS_TOKEN or run: agent-email setup',
+            'Set OPENCLAW_HOOKS_TOKEN or run: email-agent-mcp setup',
             '⚠️  Warning',
           );
         }

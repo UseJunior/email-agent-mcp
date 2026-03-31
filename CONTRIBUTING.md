@@ -1,6 +1,6 @@
 # Contributing to Agent Email
 
-Thanks for contributing to `agent-email`.
+Thanks for contributing to `email-agent-mcp`.
 
 Please follow the [Code of Conduct](CODE_OF_CONDUCT.md) in issues, pull requests, and discussions.
 
@@ -20,7 +20,7 @@ npm run check:spec-coverage
 - `packages/email-mcp`: MCP server adapter, CLI, and watcher.
 - `packages/provider-microsoft`: Microsoft Graph API email provider.
 - `packages/provider-gmail`: Gmail API email provider.
-- `packages/agent-email`: Distribution wrapper (`npx @usejunior/agent-email`).
+- `packages/email-agent-mcp`: Distribution wrapper (`npx @usejunior/email-agent-mcp`).
 - `openspec/`: Specs and change deltas.
 - `scripts/`: CI and development scripts.
 

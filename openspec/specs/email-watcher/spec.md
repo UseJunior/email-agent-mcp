@@ -74,11 +74,11 @@ The wake payload SHALL be text-only `{text, mode}` for OpenClaw `/hooks/wake` co
 
 ### Requirement: Per-Mailbox Checkpoint Persistence
 
-The watcher SHALL persist the polling checkpoint per mailbox in `~/.agent-email/state/{mailbox-id}.watcher.json`. This ensures the watcher survives restarts without reprocessing old messages or missing new ones.
+The watcher SHALL persist the polling checkpoint per mailbox in `~/.email-agent-mcp/state/{mailbox-id}.watcher.json`. This ensures the watcher survives restarts without reprocessing old messages or missing new ones.
 
 #### Scenario: Checkpoint persisted across restart
 - **WHEN** the watcher is stopped and restarted
-- **THEN** it loads the saved checkpoint from `~/.agent-email/state/` and resumes polling from where it left off
+- **THEN** it loads the saved checkpoint from `~/.email-agent-mcp/state/` and resumes polling from where it left off
 
 #### Scenario: Checkpoint file per mailbox
 - **WHEN** two mailboxes are configured (`test-user@example.com` and `alice@corp.com`)
@@ -86,7 +86,7 @@ The watcher SHALL persist the polling checkpoint per mailbox in `~/.agent-email/
 
 ### Requirement: Per-Mailbox Lock File
 
-The watcher SHALL create a lock file per mailbox at `~/.agent-email/state/{mailbox-id}.watcher.lock` to prevent duplicate watcher instances for the same mailbox.
+The watcher SHALL create a lock file per mailbox at `~/.email-agent-mcp/state/{mailbox-id}.watcher.lock` to prevent duplicate watcher instances for the same mailbox.
 
 #### Scenario: Lock prevents duplicate watcher
 - **WHEN** a watcher is already running for `test-user@example.com`

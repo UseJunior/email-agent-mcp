@@ -79,31 +79,31 @@ The system SHALL provide a `get_mailbox_status` action returning connection stat
 
 ### Requirement: Convention-Over-Configuration Paths
 
-The system SHALL use `~/.agent-email/` as the default home directory (overridable via `AGENT_EMAIL_HOME` env var) with well-known subdirectories and files loaded by convention.
+The system SHALL use `~/.email-agent-mcp/` as the default home directory (overridable via `EMAIL_AGENT_MCP_HOME` env var) with well-known subdirectories and files loaded by convention.
 
 #### Scenario: Default home directory
-- **WHEN** `AGENT_EMAIL_HOME` is not set
-- **THEN** the system uses `~/.agent-email/` as the home directory
+- **WHEN** `EMAIL_AGENT_MCP_HOME` is not set
+- **THEN** the system uses `~/.email-agent-mcp/` as the home directory
 
 #### Scenario: Custom home directory via env var
-- **WHEN** `AGENT_EMAIL_HOME` is set to `/tmp/ae-test`
-- **THEN** the system uses `/tmp/ae-test/` as the home directory instead of `~/.agent-email/`
+- **WHEN** `EMAIL_AGENT_MCP_HOME` is set to `/tmp/ae-test`
+- **THEN** the system uses `/tmp/ae-test/` as the home directory instead of `~/.email-agent-mcp/`
 
 #### Scenario: Tokens directory for auth metadata
 - **WHEN** the system stores authentication metadata (OAuth tokens, refresh tokens)
-- **THEN** it writes to `~/.agent-email/tokens/`
+- **THEN** it writes to `~/.email-agent-mcp/tokens/`
 
 #### Scenario: State directory for watcher state and locks
 - **WHEN** the system stores watcher checkpoints or lock files
-- **THEN** it writes to `~/.agent-email/state/`
+- **THEN** it writes to `~/.email-agent-mcp/state/`
 
 #### Scenario: Config file for persistent settings
 - **WHEN** the system reads or writes persistent configuration
-- **THEN** it uses `~/.agent-email/config.json` containing wakeUrl, hooksToken, and pollIntervalSeconds
+- **THEN** it uses `~/.email-agent-mcp/config.json` containing wakeUrl, hooksToken, and pollIntervalSeconds
 
 #### Scenario: Allowlist files loaded by convention
 - **WHEN** the system checks send or receive allowlists
-- **THEN** it loads `~/.agent-email/send-allowlist.json` and `~/.agent-email/receive-allowlist.json` by convention
+- **THEN** it loads `~/.email-agent-mcp/send-allowlist.json` and `~/.email-agent-mcp/receive-allowlist.json` by convention
 
 #### Scenario: Auto-add email to send allowlist during configure
 - **WHEN** a mailbox is successfully configured

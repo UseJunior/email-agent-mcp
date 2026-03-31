@@ -3,12 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdir, writeFile, rm, readdir, readFile } from 'node:fs/promises';
 
-// Use a unique temp dir per test run — set AGENT_EMAIL_HOME so all path derivations use our temp dir
-const testHome = join(tmpdir(), `agent-email-cli-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+// Use a unique temp dir per test run — set EMAIL_AGENT_MCP_HOME so all path derivations use our temp dir
+const testHome = join(tmpdir(), `email-agent-mcp-cli-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 const tokensDir = join(testHome, 'tokens');
 
-// Set AGENT_EMAIL_HOME BEFORE any import
-process.env['AGENT_EMAIL_HOME'] = testHome;
+// Set EMAIL_AGENT_MCP_HOME BEFORE any import
+process.env['EMAIL_AGENT_MCP_HOME'] = testHome;
 
 // Track what DelegatedAuthManager does
 const mockAuthState = vi.hoisted(() => ({
@@ -78,7 +78,7 @@ const { runCli } = await import('./cli.js');
 
 describe('cli/Configure Cleanup of Superseded Files', () => {
   beforeEach(async () => {
-    process.env['AGENT_EMAIL_HOME'] = testHome;
+    process.env['EMAIL_AGENT_MCP_HOME'] = testHome;
     await mkdir(tokensDir, { recursive: true });
     vi.spyOn(console, 'error').mockImplementation(() => {});
     mockAuthState.emailAddress = null;

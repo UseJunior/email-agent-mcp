@@ -1,12 +1,12 @@
 {
   "name": "@usejunior/email-mcp",
   "version": "0.1.0",
-  "description": "MCP server adapter + CLI + watcher for agent-email",
+  "description": "MCP server adapter + CLI + watcher for email-agent-mcp",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "agent-email": "./dist/cli.js"
+    "email-agent-mcp": "./dist/cli.js"
   },
   "exports": {
     ".": {
@@ -37,19 +37,20 @@
     "node": ">=20"
   },
   "files": [
-    "dist/"
+    "dist/",
+    "!dist/.tsbuildinfo"
   ],
   "publishConfig": {
     "access": "public"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/UseJunior/agent-email.git",
+    "url": "https://github.com/UseJunior/email-agent-mcp.git",
     "directory": "packages/email-mcp"
   },
-  "homepage": "https://github.com/UseJunior/agent-email#readme",
+  "homepage": "https://github.com/UseJunior/email-agent-mcp#readme",
   "bugs": {
-    "url": "https://github.com/UseJunior/agent-email/issues"
+    "url": "https://github.com/UseJunior/email-agent-mcp/issues"
   },
   "keywords": ["email", "mcp", "model-context-protocol", "mcp-server", "ai-agent", "typescript"],
   "license": "Apache-2.0"

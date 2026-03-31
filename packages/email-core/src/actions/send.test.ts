@@ -13,7 +13,7 @@ let testDir: string;
 
 beforeEach(async () => {
   provider = new MockEmailProvider();
-  testDir = join(tmpdir(), `agent-email-test-${Date.now()}`);
+  testDir = join(tmpdir(), `email-agent-mcp-test-${Date.now()}`);
   await mkdir(testDir, { recursive: true });
   ctx = {
     provider,
