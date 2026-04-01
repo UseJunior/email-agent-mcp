@@ -7,7 +7,7 @@
 [![codecov](https://img.shields.io/codecov/c/github/UseJunior/email-agent-mcp/main)](https://app.codecov.io/gh/UseJunior/email-agent-mcp)
 [![GitHub stargazers](https://img.shields.io/github/stars/UseJunior/email-agent-mcp?style=social)](https://github.com/UseJunior/email-agent-mcp/stargazers)
 [![Socket Badge](https://socket.dev/api/badge/npm/package/email-agent-mcp)](https://socket.dev/npm/package/email-agent-mcp)
-[![install size](https://packagephobia.com/badge?p=email-agent-mcp)](https://packagephobia.com/result?p=email-agent-mcp)
+[![install size](https://img.shields.io/npm/unpacked-size/email-agent-mcp)](https://www.npmjs.com/package/email-agent-mcp)
 
 [Repo README](https://github.com/UseJunior/email-agent-mcp/blob/main/README.md) | [Español](https://github.com/UseJunior/email-agent-mcp/blob/main/README.es.md) | [简体中文](https://github.com/UseJunior/email-agent-mcp/blob/main/README.zh.md) | [Português (Brasil)](https://github.com/UseJunior/email-agent-mcp/blob/main/README.pt-br.md) | [Deutsch](https://github.com/UseJunior/email-agent-mcp/blob/main/README.de.md)
 
