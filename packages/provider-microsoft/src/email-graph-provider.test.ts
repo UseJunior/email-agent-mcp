@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { GraphEmailProvider, GraphApiError, RealGraphApiClient, simplifySearchQuery, type GraphApiClient } from './email-graph-provider.js';
 
+// Linux CI runners do not provide libsecret, so auth imports must not load the real cache plugin.
+vi.mock('@azure/identity-cache-persistence', () => ({
+  cachePersistencePlugin: vi.fn(),
+}));
+
 function createMockClient(overrides: Partial<GraphApiClient> = {}): GraphApiClient {
   return {
     get: vi.fn().mockResolvedValue({ value: [] }),
