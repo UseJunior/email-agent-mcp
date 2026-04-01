@@ -6,6 +6,11 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { AllowlistConfig } from '../actions/registry.js';
 
+function getAgentEmailHome(): string {
+  return process.env['EMAIL_AGENT_MCP_HOME']
+    ?? join(homedir(), '.email-agent-mcp');
+}
+
 /**
  * Check if an inbound sender is allowed by the receive allowlist.
  * Default (no config): accept all.
@@ -58,7 +63,7 @@ export async function loadReceiveAllowlist(filePath?: string): Promise<Allowlist
  */
 export function getReceiveAllowlistPath(): string {
   return process.env['AGENT_EMAIL_RECEIVE_ALLOWLIST']
-    ?? join(homedir(), '.email-agent-mcp', 'receive-allowlist.json');
+    ?? join(getAgentEmailHome(), 'receive-allowlist.json');
 }
 
 // Delete policy enforcement

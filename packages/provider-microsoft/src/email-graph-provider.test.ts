@@ -194,7 +194,9 @@ describe('provider-microsoft/Thread Lookup', () => {
     const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[1]![0] as string;
     const decodedUrl = decodeURIComponent(url).replaceAll('+', ' ');
     expect(decodedUrl).toContain("conversationId eq 'conv-123'");
-    expect(url).toContain('%24orderby=receivedDateTime+asc');
+    expect(decodedUrl).not.toContain('$orderby=');
+    expect(thread.messages[0]!.id).toBe('msg-1');
+    expect(thread.messages[1]!.id).toBe('msg-2');
   });
 });
 
@@ -509,6 +511,26 @@ describe('provider-microsoft/Inbox-Scoped Message Access', () => {
     const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
     expect(url).toContain('mailFolders/inbox/messages');
     expect(url).not.toMatch(/\/me\/messages\?/);
+  });
+
+  it('Scenario: Sent alias listing normalizes to sentitems', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.listMessages({ folder: 'sent', limit: 10 });
+
+    const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(url).toContain('mailFolders/sentitems/messages');
+  });
+
+  it('Scenario: Folder-scoped search normalizes well-known aliases', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.searchMessages('launch prep', 'trash');
+
+    const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(url).toContain('mailFolders/deleteditems/messages');
   });
 
   it('Scenario: Inbox-scoped delta query', async () => {

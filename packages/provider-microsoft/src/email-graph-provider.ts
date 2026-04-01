@@ -148,7 +148,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     if (opts.from) filters.push(`from/emailAddress/address eq '${opts.from}'`);
     if (filters.length > 0) params.set('$filter', filters.join(' and '));
 
-    const folder = opts.folder ?? 'inbox';
+    const folder = normalizeFolderId(opts.folder ?? 'inbox');
     const url = `${this.basePath}/mailFolders/${folder}/messages?${params}`;
     const response = await this.client.get(url);
     return ((response.value ?? []) as GraphMessage[]).map(mapGraphMessage);
@@ -165,8 +165,9 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     const params = new URLSearchParams();
     params.set('$search', `"${query}"`);
     params.set('$top', '50');
-    const base = folder
-      ? `${this.basePath}/mailFolders/${folder}/messages`
+    const normalizedFolder = folder ? normalizeFolderId(folder) : undefined;
+    const base = normalizedFolder
+      ? `${this.basePath}/mailFolders/${normalizedFolder}/messages`
       : `${this.basePath}/messages`;
 
     try {
@@ -195,9 +196,10 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     if (conversationId) {
       const params = new URLSearchParams();
       params.set('$filter', `conversationId eq '${conversationId}'`);
-      params.set('$orderby', 'receivedDateTime asc');
       const response = await this.client.get(`${this.basePath}/messages?${params}`);
-      const messages = ((response.value ?? []) as GraphMessage[]).map(mapGraphMessage);
+      const messages = ((response.value ?? []) as GraphMessage[])
+        .map(mapGraphMessage)
+        .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
 
       return {
         id: conversationId,

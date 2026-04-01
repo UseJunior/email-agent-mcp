@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isAllowedSender, checkDeletePolicy, checkAntiSpoofing } from './receive-allowlist.js';
+import { isAllowedSender, checkDeletePolicy, checkAntiSpoofing, getReceiveAllowlistPath } from './receive-allowlist.js';
 import { MockEmailProvider } from '../testing/mock-provider.js';
 
 describe('email-security/Receive Allowlist', () => {
@@ -11,6 +11,27 @@ describe('email-security/Receive Allowlist', () => {
 
     // Empty entries also accepts all
     expect(isAllowedSender('anyone@anywhere.com', { entries: [] })).toBe(true);
+  });
+
+  it('Scenario: EMAIL_AGENT_MCP_HOME controls default receive allowlist path', () => {
+    const originalEnv = process.env['AGENT_EMAIL_RECEIVE_ALLOWLIST'];
+    const originalHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    try {
+      delete process.env['AGENT_EMAIL_RECEIVE_ALLOWLIST'];
+      process.env['EMAIL_AGENT_MCP_HOME'] = '/tmp/email-agent-mcp-live';
+      expect(getReceiveAllowlistPath()).toBe('/tmp/email-agent-mcp-live/receive-allowlist.json');
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env['AGENT_EMAIL_RECEIVE_ALLOWLIST'];
+      } else {
+        process.env['AGENT_EMAIL_RECEIVE_ALLOWLIST'] = originalEnv;
+      }
+      if (originalHome === undefined) {
+        delete process.env['EMAIL_AGENT_MCP_HOME'];
+      } else {
+        process.env['EMAIL_AGENT_MCP_HOME'] = originalHome;
+      }
+    }
   });
 });
 
