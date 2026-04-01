@@ -6,6 +6,11 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { AllowlistConfig } from '../actions/registry.js';
 
+function getAgentEmailHome(): string {
+  return process.env['EMAIL_AGENT_MCP_HOME']
+    ?? join(homedir(), '.email-agent-mcp');
+}
+
 /**
  * Check if a recipient email address is allowed by the send allowlist.
  */
@@ -59,7 +64,7 @@ export async function loadSendAllowlist(filePath?: string): Promise<AllowlistCon
  */
 export function getSendAllowlistPath(): string {
   return process.env['AGENT_EMAIL_SEND_ALLOWLIST']
-    ?? join(homedir(), '.email-agent-mcp', 'send-allowlist.json');
+    ?? join(getAgentEmailHome(), 'send-allowlist.json');
 }
 
 /**

@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.UseJunior/email-agent-mcp",
+  "name": "io.github.usejunior/email-agent-mcp",
   "title": "Agent Email",
-  "description": "Email connectivity for AI agents — read, reply, send, categorize emails from Microsoft 365 and Gmail",
-  "version": "0.1.0",
+  "description": "Local email connectivity for AI agents — read, draft, send, and organize Microsoft 365 / Outlook mail via MCP",
+  "version": "0.1.1",
   "websiteUrl": "https://github.com/UseJunior/email-agent-mcp",
   "repository": {
     "url": "https://github.com/UseJunior/email-agent-mcp",
@@ -11,12 +11,12 @@
     "id": "UseJunior/email-agent-mcp"
   },
   "license": "Apache-2.0",
-  "tags": ["email", "mcp", "ai-agent", "microsoft-graph", "gmail", "outlook", "model-context-protocol"],
+  "tags": ["email", "mcp", "ai-agent", "microsoft-graph", "microsoft-365", "gmail", "outlook", "model-context-protocol", "openclaw"],
   "packages": [
     {
       "registryType": "npm",
       "identifier": "email-agent-mcp",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "transport": { "type": "stdio" },
       "runtimeHint": "npx",
       "environmentVariables": []

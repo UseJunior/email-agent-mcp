@@ -86,7 +86,7 @@ describe('cli/Version and Help', () => {
     const exitCode = await runCli(['--version']);
     expect(exitCode).toBe(0);
     expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('0.1.0'),
+      expect.stringMatching(/^email-agent-mcp \d+\.\d+\.\d+(?:[-+][\w.-]+)?$/),
     );
   });
 });
@@ -355,4 +355,3 @@ describe('cli/Poll Interval Validation', () => {
     // Clamping happens at runtime in runWatch, not in parseCliArgs
   });
 });
-

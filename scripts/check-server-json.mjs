@@ -28,6 +28,13 @@ if (serverJson.version !== packageJson.version) {
   ok = false;
 }
 
+if (serverJson.name !== packageJson.mcpName) {
+  console.error(
+    `FAIL: server.json name "${serverJson.name}" !== package.json mcpName "${packageJson.mcpName}"`,
+  );
+  ok = false;
+}
+
 const pkgEntry = serverJson.packages?.[0];
 if (pkgEntry && pkgEntry.version !== packageJson.version) {
   console.error(
@@ -36,9 +43,16 @@ if (pkgEntry && pkgEntry.version !== packageJson.version) {
   ok = false;
 }
 
+if (pkgEntry && pkgEntry.identifier !== packageJson.name) {
+  console.error(
+    `FAIL: server.json packages[0].identifier "${pkgEntry.identifier}" !== package.json name "${packageJson.name}"`,
+  );
+  ok = false;
+}
+
 if (ok) {
   console.log(
-    `PASS: server.json version matches package.json (${packageJson.version})`,
+    `PASS: server.json matches package.json (${packageJson.version})`,
   );
 } else {
   process.exit(1);

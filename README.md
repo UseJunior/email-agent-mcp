@@ -13,9 +13,27 @@
 
 [English](./README.md) | [Español](./README.es.md) | [简体中文](./README.zh.md) | [Português (Brasil)](./README.pt-br.md) | [Deutsch](./README.de.md)
 
-**email-agent-mcp** by [UseJunior](https://usejunior.com) -- email connectivity for AI agents.
+**email-agent-mcp** by [UseJunior](https://usejunior.com) -- local email connectivity for AI agents.
 
-Agent Email is an open-source TypeScript MCP server that gives AI agents secure access to email. It exposes email operations via [Model Context Protocol](https://modelcontextprotocol.io/) for any MCP-compatible agent runtime -- Claude Code, Gemini CLI, Cursor, Goose, and more. Security-first defaults mean agents cannot send email until you explicitly configure an allowlist.
+Agent Email is an open-source TypeScript MCP server that lets Claude Code, Cursor, Gemini CLI, OpenClaw, and other MCP-compatible runtimes read email, search threads, draft replies, label messages, change read state, move messages, and send mail through your own mailbox. Microsoft 365 / Outlook is supported today; Gmail wiring is in progress. Security-first defaults mean agents cannot send email until you explicitly configure an allowlist.
+
+## Quick Start
+
+```bash
+npx -y email-agent-mcp
+```
+
+The interactive setup wizard walks you through OAuth configuration and mailbox selection.
+
+## What Works Today
+
+- Microsoft 365 / Outlook mailbox access through MCP stdio
+- `list_emails`, `read_email`, `search_emails`, and `get_thread`
+- `create_draft`, `update_draft`, `send_draft`, `send_email`, and `reply_to_email`
+- `label_email`, `mark_read`, and `move_to_folder`
+- send allowlists, delete disabled by default, and sanitized errors
+
+The current launch-prep pass was validated against a real Outlook mailbox for read, draft, send, categorize, move, and read-state flows.
 
 ## Why This Exists
 
@@ -44,12 +62,6 @@ Add to `~/.claude/settings.json` or your project `.claude/settings.json`:
 }
 ```
 
-## Use with Gemini CLI
-
-```bash
-gemini extensions install https://github.com/UseJunior/email-agent-mcp
-```
-
 ## Use with Cursor
 
 ```json
@@ -64,13 +76,34 @@ gemini extensions install https://github.com/UseJunior/email-agent-mcp
 }
 ```
 
-## Use with CLI
+## Use with Gemini CLI
 
 ```bash
-npx -y email-agent-mcp
+gemini extensions install https://github.com/UseJunior/email-agent-mcp
 ```
 
-The interactive setup wizard walks you through OAuth configuration and mailbox selection.
+## Launch Prep Smoke Test
+
+Before recording a demo, run the live smoke script against a real mailbox and a safe send allowlist. The script exercises:
+
+- `get_mailbox_status`
+- `list_emails` + `read_email`
+- `mark_read` unread -> read -> unread
+- `label_email` on a safe inbox candidate
+- `create_draft`
+- draft-only `reply_to_email`
+- optional `send_email`
+
+Example:
+
+```bash
+EMAIL_AGENT_MCP_HOME=/tmp/email-agent-mcp-live \
+AGENT_EMAIL_SEND_ALLOWLIST=/tmp/email-agent-mcp-live/send-allowlist.json \
+npm run launch:prep:smoke -- --live-write --send-to beta@usejunior.com
+```
+
+Default safe-candidate selection looks for `notifications@github.com` in the inbox so you can rehearse the recording flow on a public-safe message instead of customer mail.
+If your mailbox status name is not an email address, pass `--reply-sender <email>` or set `EMAIL_AGENT_MCP_REPLY_SENDER` so the script can find a self-sent message for the draft-reply check.
 
 ## Tool Reference
 
@@ -129,7 +162,7 @@ Agent Email ships with restrictive defaults that you loosen as needed:
 - CodeQL and Semgrep security scanning
 - Coverage published to Codecov
 - OpenSpec traceability enforcement via `npm run check:spec-coverage`
-- 310 tests across 34 test files
+- 300+ tests across the suite
 - Maintainer: [Steven Obiajulu](https://www.linkedin.com/in/steven-obiajulu/)
 
 ## Architecture
@@ -148,7 +181,7 @@ email-agent-mcp/
 
 ## Releasing
 
-Tag-driven release via GitHub Actions with npm OIDC trusted publishing. All 5 packages publish in dependency order with `--provenance`.
+Tag-driven release via GitHub Actions with npm OIDC trusted publishing. All 5 packages publish in dependency order with `--provenance`, then `server.json` is published to the official MCP Registry with `mcp-publisher`.
 
 ## FAQ
 

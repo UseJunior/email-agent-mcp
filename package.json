@@ -1,8 +1,8 @@
 {
   "name": "email-agent-mcp-suite",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
-  "description": "Open-source email connectivity for AI agents — MCP server for OpenClaw, Claude Code, Gemini CLI, and more",
+  "description": "Local email connectivity for AI agents — MCP server for Microsoft 365 today, Gmail wiring in progress",
   "type": "module",
   "workspaces": [
     "packages/*"
@@ -20,6 +20,7 @@
     "check:server-json": "node scripts/check-server-json.mjs",
     "check:gemini-extension-manifest": "node scripts/check-gemini-extension-manifest.mjs",
     "check:isolated-runtime": "node scripts/check-isolated-runtime.mjs",
+    "launch:prep:smoke": "node scripts/launch-prep-smoke.mjs",
     "dev:serve": "npx tsx packages/email-mcp/src/serve-entry.ts",
     "dev:watch": "npx tsx packages/email-mcp/src/cli.ts watch",
     "dev:configure": "npx tsx packages/email-mcp/src/cli.ts configure"
@@ -37,8 +38,11 @@
     "mcp",
     "ai-agent",
     "microsoft-graph",
+    "microsoft-365",
     "gmail",
+    "outlook",
     "model-context-protocol",
+    "openclaw",
     "claude",
     "gemini",
     "typescript"

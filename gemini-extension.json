@@ -1,7 +1,7 @@
 {
   "name": "email-agent-mcp",
-  "version": "0.1.0",
-  "description": "Email connectivity for AI agents — read, reply, send, categorize emails from Microsoft 365 and Gmail via MCP.",
+  "version": "0.1.1",
+  "description": "Local email connectivity for AI agents — read, draft, send, and organize Microsoft 365 / Outlook mail via MCP.",
   "contextFileName": "GEMINI.md",
   "entrypoint": "GEMINI.md",
   "mcpServers": {

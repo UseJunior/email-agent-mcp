@@ -73,8 +73,10 @@ describe('email-security/Allowlist Protection', () => {
     // WHEN no env var is set
     // THEN defaults to ~/.email-agent-mcp/send-allowlist.json
     const originalEnv = process.env['AGENT_EMAIL_SEND_ALLOWLIST'];
+    const originalHome = process.env['EMAIL_AGENT_MCP_HOME'];
     try {
       delete process.env['AGENT_EMAIL_SEND_ALLOWLIST'];
+      delete process.env['EMAIL_AGENT_MCP_HOME'];
       const path = getSendAllowlistPath();
       expect(path).toContain('.email-agent-mcp');
       expect(path).toContain('send-allowlist.json');
@@ -85,6 +87,32 @@ describe('email-security/Allowlist Protection', () => {
         delete process.env['AGENT_EMAIL_SEND_ALLOWLIST'];
       } else {
         process.env['AGENT_EMAIL_SEND_ALLOWLIST'] = originalEnv;
+      }
+      if (originalHome === undefined) {
+        delete process.env['EMAIL_AGENT_MCP_HOME'];
+      } else {
+        process.env['EMAIL_AGENT_MCP_HOME'] = originalHome;
+      }
+    }
+  });
+
+  it('Scenario: EMAIL_AGENT_MCP_HOME controls default allowlist path', () => {
+    const originalEnv = process.env['AGENT_EMAIL_SEND_ALLOWLIST'];
+    const originalHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    try {
+      delete process.env['AGENT_EMAIL_SEND_ALLOWLIST'];
+      process.env['EMAIL_AGENT_MCP_HOME'] = '/tmp/email-agent-mcp-live';
+      expect(getSendAllowlistPath()).toBe('/tmp/email-agent-mcp-live/send-allowlist.json');
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env['AGENT_EMAIL_SEND_ALLOWLIST'];
+      } else {
+        process.env['AGENT_EMAIL_SEND_ALLOWLIST'] = originalEnv;
+      }
+      if (originalHome === undefined) {
+        delete process.env['EMAIL_AGENT_MCP_HOME'];
+      } else {
+        process.env['EMAIL_AGENT_MCP_HOME'] = originalHome;
       }
     }
   });

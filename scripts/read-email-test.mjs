@@ -2,8 +2,11 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const transport = new StdioClientTransport({
-  command: 'npx',
-  args: ['tsx', 'packages/email-mcp/src/serve-entry.ts'],
+  command: 'node',
+  args: ['packages/email-agent-mcp/bin/email-agent-mcp.js', 'serve'],
+  cwd: process.cwd(),
+  env: { ...process.env },
+  stderr: 'inherit',
 });
 
 const client = new Client({ name: 'test', version: '1.0' }, { capabilities: {} });
