@@ -6,14 +6,12 @@
 [![CI](https://github.com/UseJunior/email-agent-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/UseJunior/email-agent-mcp/actions/workflows/ci.yml)
 [![codecov](https://img.shields.io/codecov/c/github/UseJunior/email-agent-mcp/main)](https://app.codecov.io/gh/UseJunior/email-agent-mcp)
 [![GitHub stargazers](https://img.shields.io/github/stars/UseJunior/email-agent-mcp?style=social)](https://github.com/UseJunior/email-agent-mcp/stargazers)
-[![Tests: Vitest](https://img.shields.io/badge/tests-vitest-6E9F18)](https://vitest.dev/)
-[![OpenSpec Traceability](https://img.shields.io/badge/openspec-traceability%20gate-brightgreen)](./scripts/check-spec-coverage.mjs)
 [![Socket Badge](https://socket.dev/api/badge/npm/package/email-agent-mcp)](https://socket.dev/npm/package/email-agent-mcp)
 [![install size](https://img.shields.io/npm/unpacked-size/email-agent-mcp)](https://www.npmjs.com/package/email-agent-mcp)
 
-[English](./README.md) | [Español](./README.es.md) | [简体中文](./README.zh.md) | [Português (Brasil)](./README.pt-br.md) | [Deutsch](./README.de.md)
+[English](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-agent-mcp/README.md) | [Español](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-agent-mcp/README.es.md) | [简体中文](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-agent-mcp/README.zh.md) | [Português (Brasil)](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-agent-mcp/README.pt-br.md) | [Deutsch](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-agent-mcp/README.de.md)
 
-> **Hinweis zur Ubersetzung:** Die englische README.md ist die kanonische Quelle. Diese Ubersetzung kann leicht verzogert sein.
+> **Hinweis zur Ubersetzung:** Die englische `README.md` ist die kanonische Quelle. Diese Ubersetzung kann leicht verzogert sein. Wichtige Aenderungen im englischen README sollten innerhalb von 72 Stunden uebernommen werden.
 
 **email-agent-mcp** von [UseJunior](https://usejunior.com) -- E-Mail-Anbindung fuer KI-Agenten.
 
@@ -115,43 +113,6 @@ Agent Email wird mit restriktiven Standardeinstellungen ausgeliefert, die Sie be
 - **Fehlerbereinigung**: API-Schluessel, Dateipfade und Stack-Traces werden aus Fehlerantworten entfernt
 - **Body-Datei-Sandboxing**: kein `../`-Traversieren, keine Symlinks, Binaererkennung
 
-## Pakete
-
-| Paket | Beschreibung |
-|-------|--------------|
-| `@usejunior/email-core` | Kern-E-Mail-Aktionen, Content-Engine, Sicherheit und Provider-Schnittstellen |
-| `@usejunior/email-mcp` | MCP-Server-Adapter, CLI und Watcher |
-| `@usejunior/provider-microsoft` | Microsoft Graph API E-Mail-Provider |
-| `@usejunior/provider-gmail` | Gmail API E-Mail-Provider |
-| `email-agent-mcp` | Distributionspaket (`npx email-agent-mcp`) |
-
-## Qualitaet und Vertrauenssignale
-
-- CI laeuft bei jedem Pull Request und Push auf main (Lint, Typueberpruefung, Tests auf Node 20 + 22)
-- CodeQL- und Semgrep-Sicherheitsscans
-- Coverage wird auf Codecov veroeffentlicht
-- OpenSpec-Nachverfolgbarkeit ueber `npm run check:spec-coverage`
-- 310 Tests in 34 Testdateien
-- Maintainer: [Steven Obiajulu](https://www.linkedin.com/in/steven-obiajulu/)
-
-## Architektur
-
-```
-email-agent-mcp/
-├── packages/
-│   ├── email-core          Kern-Aktionen, Content-Engine, Sicherheit
-│   ├── email-mcp           MCP-Server-Adapter, CLI, Watcher
-│   ├── provider-microsoft  Microsoft Graph Provider
-│   ├── provider-gmail      Gmail API Provider
-│   └── email-agent-mcp         Distributionspaket (npx-Einstiegspunkt)
-├── openspec/               Spezifikationsgetriebene Entwicklung
-└── scripts/                CI- und Validierungsskripte
-```
-
-## Veroeffentlichung
-
-Tag-gesteuerte Veroeffentlichung ueber GitHub Actions mit npm OIDC Trusted Publishing. Alle 5 Pakete werden in Abhaengigkeitsreihenfolge mit `--provenance` veroeffentlicht.
-
 ## Haeufig gestellte Fragen
 
 ### Funktioniert das mit Claude Code?
@@ -170,18 +131,6 @@ OAuth-Tokens werden von MSAL (Microsoft) verwaltet und in Ihrem Betriebssystem-S
 
 Ja. Sie koennen Microsoft 365 und Gmail gleichzeitig konfigurieren. Leseaktionen verwenden standardmaessig Ihr primaeres Postfach; Schreibaktionen erfordern die Angabe eines Postfachs, wenn mehrere konfiguriert sind.
 
-## Entwicklung
-
-Siehe die englische [README.md](./README.md#development) fuer Entwicklungsanweisungen.
-
-```bash
-npm ci
-npm run build
-npm run lint --workspaces --if-present
-npm run test:run
-npm run check:spec-coverage
-```
-
 ## Siehe auch
 
 - [Safe DOCX Suite](https://github.com/UseJunior/safe-docx) -- chirurgische Bearbeitung von Word-Dokumenten mit Coding-Agenten
@@ -193,7 +142,7 @@ Agent Email laeuft vollstaendig auf Ihrem lokalen Rechner. E-Mail-Zugangsdaten w
 
 ## Governance
 
-- [Beitragsleitfaden](CONTRIBUTING.md) (Englisch)
-- [Verhaltenskodex](CODE_OF_CONDUCT.md) (Englisch)
-- [Sicherheitsrichtlinie](SECURITY.md) (Englisch)
-- [Aenderungsprotokoll](CHANGELOG.md) (Englisch)
+- [Beitragsleitfaden](https://github.com/UseJunior/email-agent-mcp/blob/main/CONTRIBUTING.md) (Englisch)
+- [Verhaltenskodex](https://github.com/UseJunior/email-agent-mcp/blob/main/CODE_OF_CONDUCT.md) (Englisch)
+- [Sicherheitsrichtlinie](https://github.com/UseJunior/email-agent-mcp/blob/main/SECURITY.md) (Englisch)
+- [Aenderungsprotokoll](https://github.com/UseJunior/email-agent-mcp/blob/main/CHANGELOG.md) (Englisch)

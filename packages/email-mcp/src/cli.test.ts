@@ -4,6 +4,11 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
+// Linux CI runners do not provide libsecret, so auth imports must not load the real cache plugin.
+vi.mock('@azure/identity-cache-persistence', () => ({
+  cachePersistencePlugin: vi.fn(),
+}));
+
 beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
