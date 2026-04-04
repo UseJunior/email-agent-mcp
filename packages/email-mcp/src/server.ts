@@ -149,12 +149,14 @@ export async function runServer(): Promise<void> {
   const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
   const { ListToolsRequestSchema, CallToolRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
 
-  // Load send allowlist at startup (convention: ~/.email-agent-mcp/send-allowlist.json)
-  const { loadSendAllowlist, getSendAllowlistPath } = await import('@usejunior/email-core');
+  // Load send allowlist with hot-reload (convention: ~/.email-agent-mcp/send-allowlist.json)
+  const { loadSendAllowlist, getSendAllowlistPath, WatchedAllowlist } = await import('@usejunior/email-core');
   const sendAllowlistPath = getSendAllowlistPath();
-  const sendAllowlist = await loadSendAllowlist(sendAllowlistPath);
-  if (sendAllowlist && sendAllowlist.entries.length > 0) {
-    console.error(`[email-agent-mcp] Send allowlist loaded: ${sendAllowlist.entries.length} entries from ${sendAllowlistPath}`);
+  const sendAllowlistWatcher = new WatchedAllowlist(sendAllowlistPath, loadSendAllowlist);
+  await sendAllowlistWatcher.start();
+  const getSendAllowlist = () => sendAllowlistWatcher.config;
+  if (sendAllowlistWatcher.config && sendAllowlistWatcher.config.entries.length > 0) {
+    console.error(`[email-agent-mcp] Send allowlist loaded (watched): ${sendAllowlistWatcher.config.entries.length} entries from ${sendAllowlistPath}`);
   } else {
     console.error(`[email-agent-mcp] WARNING: Send allowlist empty or not found at ${sendAllowlistPath} — all outbound email is disabled`);
   }
@@ -183,7 +185,7 @@ export async function runServer(): Promise<void> {
           const provider = new GraphEmailProvider(client);
 
           // Build real actions from the provider
-          actions = await buildRealActions(provider, auth, sendAllowlist);
+          actions = await buildRealActions(provider, auth, getSendAllowlist);
           console.error(`[email-agent-mcp] Connected to mailbox "${displayName}" (${metadata.clientId})`);
           connected = true;
           break;
@@ -235,7 +237,7 @@ export async function runServer(): Promise<void> {
 }
 
 // Import z lazily for action definitions
-async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthWarning: () => string | undefined; tryReconnect: () => Promise<boolean> }, sendAllowlist?: { entries: string[] }): Promise<EmailActionDef[]> {
+async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthWarning: () => string | undefined; tryReconnect: () => Promise<boolean> }, getSendAllowlist: () => { entries: string[] } | undefined): Promise<EmailActionDef[]> {
   const { z } = await import('zod');
   const {
     sendEmailAction,
@@ -251,8 +253,11 @@ async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthW
     deleteEmailAction,
   } = await import('@usejunior/email-core');
 
-  // Build ActionContext for send/reply actions
-  const actionCtx = { provider: provider as never, sendAllowlist };
+  // Build ActionContext for send/reply actions — getter ensures hot-reloaded allowlist
+  const actionCtx = {
+    provider: provider as never,
+    get sendAllowlist() { return getSendAllowlist(); },
+  };
   const wrapAction = (action: EmailAction<any, any>): EmailActionDef => ({
     name: action.name,
     description: action.description,
@@ -348,7 +353,8 @@ async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthW
         const warnings: string[] = [];
         const healthWarning = auth.getTokenHealthWarning();
         if (healthWarning) warnings.push(healthWarning);
-        if (!sendAllowlist || sendAllowlist.entries.length === 0) {
+        const currentAllowlist = getSendAllowlist();
+        if (!currentAllowlist || currentAllowlist.entries.length === 0) {
           warnings.push('Send allowlist not configured — all outbound email is disabled. Run: email-agent-mcp configure');
         }
         return { name: 'default', provider: 'microsoft', status: 'connected', isDefault: true, warnings };
