@@ -17,7 +17,7 @@
   "dependencies": {
     "@usejunior/email-mcp": "^0.1.2"
   },
-  "mcpName": "io.github.usejunior/email-agent-mcp",
+  "mcpName": "io.github.UseJunior/email-agent-mcp",
   "engines": {
     "node": ">=20"
   },
