@@ -6,6 +6,7 @@ const ListEmailsInput = z.object({
   mailbox: z.string().optional(),
   unread: z.boolean().optional(),
   limit: z.number().optional().default(25),
+  offset: z.number().optional().default(0),
   folder: z.string().optional().default('inbox'),
   from: z.string().optional(),
 });
@@ -36,6 +37,7 @@ export const listEmailsAction: EmailAction<
       folder: input.folder,
       unread: input.unread,
       limit: input.limit,
+      offset: input.offset,
       from: input.from,
     });
 

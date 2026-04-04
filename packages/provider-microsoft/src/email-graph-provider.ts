@@ -157,6 +157,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   async listMessages(opts: ListOptions): Promise<EmailMessage[]> {
     const params = new URLSearchParams();
     params.set('$top', String(opts.limit ?? 25));
+    if (opts.offset) params.set('$skip', String(opts.offset));
     params.set('$orderby', 'receivedDateTime desc');
 
     const filters: string[] = [];
@@ -175,12 +176,13 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     return mapGraphMessage(response);
   }
 
-  async searchMessages(query: string, folder?: string): Promise<EmailMessage[]> {
+  async searchMessages(query: string, folder?: string, limit?: number, offset?: number): Promise<EmailMessage[]> {
     if (!query || !query.trim()) return [];
 
     const params = new URLSearchParams();
     params.set('$search', `"${query}"`);
-    params.set('$top', '50');
+    params.set('$top', String(limit ?? 50));
+    if (offset) params.set('$skip', String(offset));
     const normalizedFolder = folder ? normalizeFolderId(folder) : undefined;
     const base = normalizedFolder
       ? `${this.basePath}/mailFolders/${normalizedFolder}/messages`
@@ -196,7 +198,8 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
         if (simplified && simplified !== query) {
           const retryParams = new URLSearchParams();
           retryParams.set('$search', `"${simplified}"`);
-          retryParams.set('$top', '50');
+          retryParams.set('$top', String(limit ?? 50));
+          if (offset) retryParams.set('$skip', String(offset));
           const response = await this.client.get(`${base}?${retryParams}`);
           return ((response.value ?? []) as GraphMessage[]).map(mapGraphMessage);
         }

@@ -51,16 +51,19 @@ export class GmailEmailProvider {
   async listMessages(opts: ListOptions): Promise<EmailMessage[]> {
     const folder = opts.folder ?? 'inbox';
     const label = FOLDER_TO_LABEL[folder] ?? folder.toUpperCase();
+    const limit = opts.limit ?? 25;
+    const offset = opts.offset ?? 0;
 
     const response = await this.client.listMessages({
       labelIds: [label],
-      maxResults: opts.limit ?? 25,
+      maxResults: offset + limit,
     });
 
     if (!response.messages?.length) return [];
 
+    const page = response.messages.slice(offset);
     const messages = await Promise.all(
-      response.messages.map(m => this.client.getMessage(m.id)),
+      page.map(m => this.client.getMessage(m.id)),
     );
 
     return messages.map(m => mapGmailMessage(m));
@@ -71,12 +74,13 @@ export class GmailEmailProvider {
     return mapGmailMessage(msg);
   }
 
-  async searchMessages(query: string): Promise<EmailMessage[]> {
-    const response = await this.client.listMessages({ q: query });
+  async searchMessages(query: string, _folder?: string, limit?: number, offset?: number): Promise<EmailMessage[]> {
+    const response = await this.client.listMessages({ q: query, maxResults: (offset ?? 0) + (limit ?? 50) });
     if (!response.messages?.length) return [];
 
+    const page = response.messages.slice(offset ?? 0);
     const messages = await Promise.all(
-      response.messages.map(m => this.client.getMessage(m.id)),
+      page.map(m => this.client.getMessage(m.id)),
     );
     return messages.map(m => mapGmailMessage(m));
   }
