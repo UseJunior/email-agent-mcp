@@ -7,6 +7,7 @@ const SearchEmailsInput = z.object({
   mailbox: z.string().nullable().optional(),
   folder: z.string().optional(),
   limit: z.number().optional().default(25),
+  offset: z.number().optional().default(0),
 });
 
 const SearchEmailsOutput = z.object({
@@ -40,9 +41,10 @@ export const searchEmailsAction: EmailAction<
           return results.map(m => ({ ...m, mailbox: mb.name }));
         }),
       );
+      const start = input.offset ?? 0;
       const merged = allResults.flat()
         .sort((a, b) => new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime())
-        .slice(0, input.limit);
+        .slice(start, start + (input.limit ?? 25));
 
       return {
         emails: merged.map(m => ({
@@ -58,9 +60,9 @@ export const searchEmailsAction: EmailAction<
       };
     }
 
-    const results = await ctx.provider.searchMessages(input.query, input.folder);
+    const results = await ctx.provider.searchMessages(input.query, input.folder, input.limit, input.offset);
     return {
-      emails: results.slice(0, input.limit).map(m => ({
+      emails: results.map(m => ({
         id: m.id,
         subject: m.subject,
         from: m.from.name ? `${m.from.name} <${m.from.email}>` : m.from.email,

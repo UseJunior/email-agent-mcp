@@ -105,14 +105,16 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
     return { ...msg };
   }
 
-  async searchMessages(query: string): Promise<EmailMessage[]> {
+  async searchMessages(query: string, _folder?: string, limit?: number, offset?: number): Promise<EmailMessage[]> {
     this.maybeThrow();
     const lowerQuery = query.toLowerCase();
-    return this.messages.filter(m =>
+    const filtered = this.messages.filter(m =>
       m.subject.toLowerCase().includes(lowerQuery) ||
       (m.body ?? '').toLowerCase().includes(lowerQuery) ||
       m.from.email.toLowerCase().includes(lowerQuery),
     );
+    const start = offset ?? 0;
+    return filtered.slice(start, limit ? start + limit : undefined);
   }
 
   async getThread(messageId: string): Promise<EmailThread> {

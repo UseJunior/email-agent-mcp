@@ -742,6 +742,54 @@ describe('provider-microsoft/Email Address Retrieval from /me', () => {
   });
 });
 
+describe('provider-microsoft/Offset Pagination', () => {
+  it('listMessages includes $skip when offset is provided', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.listMessages({ limit: 10, offset: 25 });
+
+    const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    const decoded = decodeURIComponent(url);
+    expect(decoded).toContain('$top=10');
+    expect(decoded).toContain('$skip=25');
+  });
+
+  it('listMessages omits $skip when offset is not provided', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.listMessages({ limit: 10 });
+
+    const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(url).toContain('%24top=10');
+    expect(url).not.toContain('skip');
+  });
+
+  it('searchMessages includes $top and $skip when provided', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.searchMessages('budget', undefined, 20, 10);
+
+    const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    const decoded = decodeURIComponent(url);
+    expect(decoded).toContain('$top=20');
+    expect(decoded).toContain('$skip=10');
+  });
+
+  it('searchMessages uses default $top=50 when limit not provided', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.searchMessages('report');
+
+    const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(url).toContain('%24top=50');
+    expect(url).not.toContain('skip');
+  });
+});
+
 describe('provider-microsoft/Watcher Timestamp Boundary', () => {
   it('Scenario: getNewMessages uses ge not gt', async () => {
     const client = createMockClient();

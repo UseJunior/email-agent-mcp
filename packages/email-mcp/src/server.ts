@@ -265,13 +265,13 @@ async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthW
   return [
     {
       name: 'list_emails',
-      description: 'List recent emails with filtering by unread status, folder, sender, and limit',
-      input: z.object({ mailbox: z.string().optional(), unread: z.boolean().optional(), limit: z.number().optional(), folder: z.string().optional() }),
+      description: 'List recent emails with filtering by unread status, folder, sender, and limit. Use offset for pagination.',
+      input: z.object({ mailbox: z.string().optional(), unread: z.boolean().optional(), limit: z.number().optional(), offset: z.number().optional(), folder: z.string().optional() }),
       output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean() })) }),
       annotations: { readOnlyHint: true, destructiveHint: false },
       run: async (_ctx, input) => {
-        const inp = input as { unread?: boolean; limit?: number; folder?: string };
-        const messages = await provider.listMessages({ unread: inp.unread, limit: inp.limit ?? 25, folder: inp.folder ?? 'inbox' });
+        const inp = input as { unread?: boolean; limit?: number; offset?: number; folder?: string };
+        const messages = await provider.listMessages({ unread: inp.unread, limit: inp.limit ?? 25, offset: inp.offset, folder: inp.folder ?? 'inbox' });
         return {
           emails: (messages as Array<{ id: string; subject: string; from: { email: string; name?: string }; receivedAt: string; isRead: boolean; hasAttachments: boolean }>).map(m => ({
             id: m.id,
@@ -319,13 +319,13 @@ async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthW
     },
     {
       name: 'search_emails',
-      description: 'Search emails using full-text query across one or all mailboxes',
-      input: z.object({ query: z.string(), mailbox: z.string().optional(), limit: z.number().optional() }),
+      description: 'Search emails using full-text query across one or all mailboxes. Use offset for pagination.',
+      input: z.object({ query: z.string(), mailbox: z.string().optional(), limit: z.number().optional(), offset: z.number().optional() }),
       output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean() })) }),
       annotations: { readOnlyHint: true, destructiveHint: false },
       run: async (_ctx, input) => {
-        const inp = input as { query: string };
-        const results = await provider.searchMessages(inp.query) as Array<{ id: string; subject: string; from: { email: string; name?: string }; receivedAt: string; isRead: boolean; hasAttachments: boolean }>;
+        const inp = input as { query: string; limit?: number; offset?: number };
+        const results = await provider.searchMessages(inp.query, undefined, inp.limit, inp.offset) as Array<{ id: string; subject: string; from: { email: string; name?: string }; receivedAt: string; isRead: boolean; hasAttachments: boolean }>;
         return {
           emails: results.map(m => ({
             id: m.id,

@@ -14,7 +14,7 @@ import type {
 export interface EmailReader {
   listMessages(opts: ListOptions): Promise<EmailMessage[]>;
   getMessage(id: string): Promise<EmailMessage>;
-  searchMessages(query: string, mailbox?: string): Promise<EmailMessage[]>;
+  searchMessages(query: string, folder?: string, limit?: number, offset?: number): Promise<EmailMessage[]>;
   getThread(messageId: string): Promise<EmailThread>;
 }
 

@@ -90,6 +90,7 @@ export interface ListOptions {
   folder?: string;
   unread?: boolean;
   limit?: number;
+  offset?: number;
   from?: string;
   dateFrom?: string;
   dateTo?: string;
