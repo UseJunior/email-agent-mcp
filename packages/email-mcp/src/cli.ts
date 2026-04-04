@@ -157,6 +157,8 @@ export async function runCli(args: string[]): Promise<number> {
       return await runConfigure(opts);
     case 'status':
       return await runStatus();
+    case 'token':
+      return await runToken(opts);
     case 'help':
       printHelp();
       return 0;
@@ -653,6 +655,63 @@ export async function runStatus(): Promise<number> {
   return 0;
 }
 
+async function runToken(opts: CliOptions): Promise<number> {
+  const {
+    DelegatedAuthManager,
+    listConfiguredMailboxesWithMetadata,
+    loadMailboxMetadata,
+  } = await import('@usejunior/provider-microsoft');
+
+  let metadata;
+
+  if (opts.mailbox) {
+    metadata = await loadMailboxMetadata(opts.mailbox);
+    if (!metadata) {
+      process.stderr.write(`Error: mailbox "${opts.mailbox}" not found.\n`);
+      return 2;
+    }
+  } else {
+    const mailboxes = await listConfiguredMailboxesWithMetadata();
+    if (mailboxes.length === 0) {
+      process.stderr.write('Error: no mailboxes configured. Run: npx email-agent-mcp configure\n');
+      return 1;
+    }
+    if (mailboxes.length > 1) {
+      process.stderr.write('Error: multiple mailboxes configured. Use --mailbox to select:\n');
+      for (const m of mailboxes) {
+        process.stderr.write(`  ${m.emailAddress ?? m.mailboxName}\n`);
+      }
+      return 2;
+    }
+    metadata = mailboxes[0]!;
+  }
+
+  const auth = new DelegatedAuthManager(
+    { mode: 'delegated', clientId: metadata.clientId },
+    metadata.mailboxName,
+  );
+
+  try {
+    await auth.reconnect();
+    const token = await auth.getAccessToken();
+
+    // Await stdout flush — the CLI wrapper calls process.exit() after runCli()
+    // resolves, which can truncate piped output if the write hasn't drained.
+    await new Promise<void>((resolve, reject) => {
+      process.stdout.write(token, (err) => err ? reject(err) : resolve());
+    });
+    return 0;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('interaction_required') || msg.includes('invalid_grant')) {
+      process.stderr.write('Error: authentication expired. Run: npx email-agent-mcp configure\n');
+    } else {
+      process.stderr.write(`Error: ${msg}\n`);
+    }
+    return 1;
+  }
+}
+
 function printHelp(): void {
   console.error(`
 email-agent-mcp — Email connectivity for AI agents
@@ -667,6 +726,7 @@ COMMANDS:
   email-agent-mcp setup        Configure a mailbox (interactive)
   email-agent-mcp configure    Configure a mailbox (interactive, alias for setup)
   email-agent-mcp status       Show account + connection health
+  email-agent-mcp token        Print a Graph API bearer token to stdout
   email-agent-mcp serve        Force MCP server mode
   email-agent-mcp help         Show this help
 
@@ -677,7 +737,7 @@ OPTIONS:
   --poll-interval <sec>  Poll interval in seconds (default 10, min 2)
   --nemoclaw             NemoClaw egress bootstrap
   --log-level <level>    Log level (debug, info, warn, error)
-  --mailbox <name>       Mailbox name (default: "default")
+  --mailbox <name>       Mailbox alias or email address (required if multiple configured)
   --provider <name>      Auth provider (microsoft, gmail)
   --client-id <id>       OAuth client ID override
 `.trim());
