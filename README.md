@@ -82,6 +82,41 @@ Add to `~/.claude/settings.json` or your project `.claude/settings.json`:
 gemini extensions install https://github.com/UseJunior/email-agent-mcp
 ```
 
+## Use with OpenClaw
+
+Add an `mcp` block to `~/.openclaw/openclaw.json`:
+
+```json5
+{
+  // ... existing config ...
+  mcp: {
+    servers: {
+      email: {
+        command: "npx",
+        args: ["tsx", "/path/to/email-agent-mcp/packages/email-mcp/src/serve-entry.ts"],
+        transport: "stdio"
+      }
+    }
+  }
+}
+```
+
+> **Version note**: The `mcp` config key requires OpenClaw app >= 2026.3.24. If the CLI is older than the app, it may reject this key during validation even though the gateway accepts it. Update the CLI with `npm install openclaw@latest` in your NemoClaw directory, or restart the gateway directly with `launchctl kickstart -k gui/501/ai.openclaw.gateway`.
+
+### Email watcher
+
+The watcher polls your mailbox and sends wake signals to OpenClaw when new email arrives:
+
+```bash
+# Set the hooks token (must match hooks.token in openclaw.json)
+export OPENCLAW_HOOKS_TOKEN="your-hooks-token"
+
+# Start the watcher (defaults to http://localhost:18789/hooks/wake)
+npm run dev:watch
+```
+
+The watcher requires at least one configured mailbox. Run `npx email-agent-mcp` or `npm run dev:configure` first to complete the OAuth flow.
+
 ## Launch Prep Smoke Test
 
 Before recording a demo, run the live smoke script against a real mailbox and a safe send allowlist. The script exercises:
@@ -200,6 +235,26 @@ OAuth tokens are managed by MSAL (Microsoft) and stored in your OS keychain or l
 ### Can I connect multiple mailboxes?
 
 Yes. You can configure Microsoft 365 and Gmail simultaneously. Read actions default to your primary mailbox; write actions require specifying a mailbox when multiple are configured.
+
+### The OpenClaw CLI rejects my config with "Unrecognized key: mcp"
+
+The OpenClaw CLI and macOS app can be different versions. The app (which runs the gateway) may support config keys the CLI doesn't recognize yet. Update the CLI: `cd ~/Projects/NemoClaw && npm install openclaw@latest`. Alternatively, restart the gateway directly: `launchctl kickstart -k gui/501/ai.openclaw.gateway`.
+
+### The watcher starts but finds zero mailboxes
+
+Mailbox credentials are stored in `~/.email-agent-mcp/tokens/`. If this directory is empty, run `npx email-agent-mcp` or `npm run dev:configure` to authenticate via OAuth. The watcher will exit with no mailboxes to poll until at least one is configured.
+
+### OpenClaw says "Demo mode -- run email-agent-mcp configure to connect"
+
+The MCP server is running but has no real mailbox credentials. Run `npx email-agent-mcp` to complete the interactive OAuth setup, then restart the OpenClaw gateway so the MCP server reconnects with valid tokens.
+
+### Token expired after a week even though I just authenticated
+
+Microsoft refresh tokens typically last 90 days, but your Azure AD tenant may enforce shorter lifetimes. The code uses MSAL with OS keychain persistence (`@azure/identity-cache-persistence`), which handles silent token refresh automatically. If MSAL reports `interaction_required` or `invalid_grant`, re-run `npx email-agent-mcp` to re-authenticate. Common causes: conditional access policies, MFA re-verification requirements, or admin-configured token lifetime policies.
+
+### OpenClaw Telegram bot receives messages but doesn't respond
+
+Verify the Telegram channel is healthy with `openclaw status`. If the channel shows OK but no responses come back, check that: (1) your Telegram user ID is in `channels.telegram.allowFrom` in `openclaw.json`, (2) a binding exists matching `channel: "telegram"`, and (3) the gateway was restarted after config changes. For one-owner bots, use `dmPolicy: "allowlist"` with explicit `allowFrom` IDs rather than relying on pairing approvals.
 
 ## Development
 
