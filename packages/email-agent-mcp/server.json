@@ -11,13 +11,25 @@
     "id": "UseJunior/email-agent-mcp"
   },
   "license": "Apache-2.0",
-  "tags": ["email", "mcp", "ai-agent", "microsoft-graph", "microsoft-365", "gmail", "outlook", "model-context-protocol", "openclaw"],
+  "tags": [
+    "email",
+    "mcp",
+    "ai-agent",
+    "microsoft-graph",
+    "microsoft-365",
+    "gmail",
+    "outlook",
+    "model-context-protocol",
+    "openclaw"
+  ],
   "packages": [
     {
       "registryType": "npm",
       "identifier": "email-agent-mcp",
       "version": "0.1.2",
-      "transport": { "type": "stdio" },
+      "transport": {
+        "type": "stdio"
+      },
       "runtimeHint": "npx",
       "environmentVariables": []
     }

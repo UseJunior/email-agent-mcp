@@ -47,6 +47,12 @@
   "bugs": {
     "url": "https://github.com/UseJunior/email-agent-mcp/issues"
   },
-  "keywords": ["email", "gmail", "google", "oauth", "ai-agent"],
+  "keywords": [
+    "email",
+    "gmail",
+    "google",
+    "oauth",
+    "ai-agent"
+  ],
   "license": "Apache-2.0"
 }
