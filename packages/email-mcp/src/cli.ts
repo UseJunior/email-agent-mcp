@@ -231,6 +231,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
     isAllowedSender,
     loadReceiveAllowlist,
     getReceiveAllowlistPath,
+    WatchedAllowlist,
   } = await import('@usejunior/email-core');
   const {
     buildWakePayload,
@@ -244,10 +245,11 @@ export async function runWatch(opts: CliOptions): Promise<number> {
     releaseAllLocks,
   } = await import('./watcher.js');
 
-  // Load receive allowlist
+  // Load receive allowlist with hot-reload
   const allowlistPath = getReceiveAllowlistPath();
-  const allowlist = await loadReceiveAllowlist(allowlistPath);
-  if (!allowlist) {
+  const receiveWatcher = new WatchedAllowlist(allowlistPath, loadReceiveAllowlist);
+  await receiveWatcher.start();
+  if (!receiveWatcher.config) {
     console.error('[email-agent-mcp] WARNING: No receive allowlist configured — accepting all senders');
   }
 
@@ -280,6 +282,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
     if (shuttingDown) return;
     shuttingDown = true;
     console.error('\n[email-agent-mcp] Shutting down watcher...');
+    receiveWatcher.close();
     await releaseAllLocks();
     console.error('[email-agent-mcp] Lock files cleaned up. Goodbye.');
     process.exit(0);
@@ -383,7 +386,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
 
           // Receive allowlist check
           const senderEmail = msg.from?.email ?? '';
-          if (!isAllowedSender(senderEmail, allowlist)) {
+          if (!isAllowedSender(senderEmail, receiveWatcher.config)) {
             skippedAllowlist++;
             markProcessed(msg.id);
             console.error(`[email-agent-mcp] Skipping email from ${senderEmail} (not on receive allowlist)`);
