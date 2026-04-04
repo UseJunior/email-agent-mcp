@@ -7,7 +7,10 @@
   "mcpServers": {
     "email-agent-mcp": {
       "command": "npx",
-      "args": ["-y", "email-agent-mcp"]
+      "args": [
+        "-y",
+        "email-agent-mcp"
+      ]
     }
   }
 }

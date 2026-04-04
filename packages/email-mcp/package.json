@@ -52,6 +52,13 @@
   "bugs": {
     "url": "https://github.com/UseJunior/email-agent-mcp/issues"
   },
-  "keywords": ["email", "mcp", "model-context-protocol", "mcp-server", "ai-agent", "typescript"],
+  "keywords": [
+    "email",
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "ai-agent",
+    "typescript"
+  ],
   "license": "Apache-2.0"
 }
