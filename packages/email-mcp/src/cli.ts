@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // CLI entry point — serve, watch, configure, setup subcommands + TTY-aware default
 
 import { createRequire } from 'node:module';
@@ -224,6 +225,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
     GraphEmailProvider,
     listConfiguredMailboxesWithMetadata,
     toFilesystemSafeKey,
+    isAuthError,
   } = await import('@usejunior/provider-microsoft');
   const {
     isAllowedSender,
@@ -267,6 +269,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
     emailAddress: string;
     provider: InstanceType<typeof GraphEmailProvider>;
     lastCheckedAt: string;
+    auth: InstanceType<typeof DelegatedAuthManager>;
   }
 
   const watchStates: MailboxWatchState[] = [];
@@ -309,8 +312,8 @@ export async function runWatch(opts: CliOptions): Promise<number> {
       );
       await auth.reconnect();
 
-      // Create Graph client and provider
-      const graphClient = new RealGraphApiClient(() => auth.getAccessToken());
+      // Create Graph client and provider (with auth-aware retry on 401)
+      const graphClient = new RealGraphApiClient(() => auth.getAccessToken(), () => auth.tryReconnect());
       const provider = new GraphEmailProvider(graphClient);
 
       // Load last checked timestamp or start from now
@@ -327,7 +330,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
         console.error(`[email-agent-mcp] Watching ${emailAddress} for new emails starting now`);
       }
 
-      watchStates.push({ safeKey, emailAddress, provider, lastCheckedAt });
+      watchStates.push({ safeKey, emailAddress, provider, lastCheckedAt, auth });
     } catch (err) {
       console.error(`[email-agent-mcp] WARNING: Failed to set up ${emailAddress}: ${err instanceof Error ? err.message : err}`);
       await releaseLock(safeKey);
@@ -352,6 +355,16 @@ export async function runWatch(opts: CliOptions): Promise<number> {
 
       const now = new Date().toISOString();
       console.error(`[email-agent-mcp] [${now}] Polling ${state.emailAddress} (since ${state.lastCheckedAt})...`);
+
+      // Proactive token refresh if expiring soon
+      if (state.auth.isTokenExpiringSoon) {
+        console.error(`[email-agent-mcp] Token expiring soon for ${state.emailAddress}, refreshing...`);
+        const ok = await state.auth.tryReconnect();
+        if (!ok) {
+          console.error(`[email-agent-mcp] WARNING: Proactive refresh failed for ${state.emailAddress}. Run: email-agent-mcp configure`);
+          continue;
+        }
+      }
 
       try {
         const newMessages = await state.provider.getNewMessages(state.lastCheckedAt);
@@ -407,14 +420,17 @@ export async function runWatch(opts: CliOptions): Promise<number> {
           );
         }
       } catch (err) {
-        // Handle token errors gracefully
-        const errMsg = err instanceof Error ? err.message : String(err);
-        if (errMsg.includes('interaction_required') || errMsg.includes('invalid_grant')) {
-          console.error(`[email-agent-mcp] WARNING: Token error for ${state.emailAddress}: ${errMsg}. Run: email-agent-mcp configure`);
+        if (isAuthError(err)) {
+          console.error(`[email-agent-mcp] Token error for ${state.emailAddress}, attempting reconnect...`);
+          const ok = await state.auth.tryReconnect();
+          if (ok) {
+            console.error(`[email-agent-mcp] Reconnect succeeded for ${state.emailAddress}`);
+          } else {
+            console.error(`[email-agent-mcp] WARNING: Reconnect failed for ${state.emailAddress}. Run: email-agent-mcp configure`);
+          }
           continue;
         }
-
-        console.error(`[email-agent-mcp] WARNING: Poll error for ${state.emailAddress}: ${errMsg}`);
+        console.error(`[email-agent-mcp] WARNING: Poll error for ${state.emailAddress}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
   };

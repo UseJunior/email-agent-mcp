@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
+import { GraphApiError } from './email-graph-provider.js';
 
 // Enable MSAL persistent cache (OS keychain on macOS, DPAPI on Windows, libsecret on Linux)
 useIdentityPlugin(cachePersistencePlugin);
@@ -19,6 +20,8 @@ export const GRAPH_SCOPES_FULL = [
   'https://graph.microsoft.com/User.Read',
   'offline_access',
 ];
+
+const TOKEN_EXPIRY_BUFFER_MS = 10 * 60 * 1000; // 10 minutes
 /**
  * Resolve the config directory for token storage.
  * Supports EMAIL_AGENT_MCP_HOME env var override for test isolation.
@@ -73,6 +76,8 @@ export class DelegatedAuthManager implements AuthManager {
   private _needsReauth = false;
   private _lastInteractiveAuthAt: string | null = null;
   private _emailAddress: string | null = null;
+  private _tokenExpiresAt: number | null = null;
+  private _reconnectPromise: Promise<boolean> | null = null;
 
   constructor(config: MicrosoftAuthConfig, mailboxName = 'default') {
     this.config = config;
@@ -91,6 +96,13 @@ export class DelegatedAuthManager implements AuthManager {
 
   get needsReauth(): boolean { return this._needsReauth; }
   get lastInteractiveAuthAt(): string | null { return this._lastInteractiveAuthAt; }
+  get tokenExpiresAt(): number | null { return this._tokenExpiresAt; }
+
+  get isTokenExpiringSoon(): boolean {
+    if (this._needsReauth) return true;
+    if (!this._tokenExpiresAt) return false;
+    return Date.now() > this._tokenExpiresAt - TOKEN_EXPIRY_BUFFER_MS;
+  }
 
   /**
    * Interactive device code flow — prints URL + code to stderr.
@@ -143,7 +155,8 @@ export class DelegatedAuthManager implements AuthManager {
 
     // Verify the token still works
     try {
-      await this.credential.getToken(GRAPH_SCOPES_FULL);
+      const token = await this.credential.getToken(GRAPH_SCOPES_FULL);
+      this._tokenExpiresAt = token.expiresOnTimestamp;
       this._needsReauth = false;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -165,6 +178,7 @@ export class DelegatedAuthManager implements AuthManager {
     try {
       const token = await this.credential.getToken(GRAPH_SCOPES_FULL);
       if (!token) throw new Error('Failed to acquire token');
+      this._tokenExpiresAt = token.expiresOnTimestamp;
       return token.token;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -180,16 +194,40 @@ export class DelegatedAuthManager implements AuthManager {
     await this.getAccessToken();
   }
 
+  /**
+   * Attempt reconnect with single-flight guard — safe for concurrent callers.
+   * Returns true if reconnect succeeded, false if it failed.
+   */
+  async tryReconnect(): Promise<boolean> {
+    if (this._reconnectPromise) return this._reconnectPromise;
+    this._reconnectPromise = (async () => {
+      try {
+        console.error(`[email-agent-mcp] Attempting reconnect for mailbox "${this.mailboxName}"...`);
+        await this.reconnect();
+        console.error(`[email-agent-mcp] Reconnect succeeded for mailbox "${this.mailboxName}"`);
+        return true;
+      } catch (err) {
+        console.error(`[email-agent-mcp] Reconnect failed for mailbox "${this.mailboxName}": ${err instanceof Error ? err.message : err}`);
+        return false;
+      } finally {
+        this._reconnectPromise = null;
+      }
+    })();
+    return this._reconnectPromise;
+  }
+
   async disconnect(): Promise<void> {
     this.credential = null;
     this.authRecord = null;
     this.cacheName = null;
+    this._tokenExpiresAt = null;
+    this._reconnectPromise = null;
   }
 
   isTokenExpired(): boolean {
-    // With MSAL cache, we don't track expiry directly — MSAL handles it.
-    // We use needsReauth as the signal.
-    return this._needsReauth;
+    if (this._needsReauth) return true;
+    if (this._tokenExpiresAt && Date.now() >= this._tokenExpiresAt) return true;
+    return false;
   }
 
   /**
@@ -198,6 +236,9 @@ export class DelegatedAuthManager implements AuthManager {
   getTokenHealthWarning(): string | undefined {
     if (this._needsReauth) {
       return `Authentication expired. Run: email-agent-mcp configure --mailbox ${this.mailboxName}`;
+    }
+    if (this._tokenExpiresAt && Date.now() > this._tokenExpiresAt) {
+      return `Access token expired — next API call will attempt refresh`;
     }
     if (this._lastInteractiveAuthAt) {
       const daysSinceAuth = (Date.now() - new Date(this._lastInteractiveAuthAt).getTime()) / (1000 * 60 * 60 * 24);
@@ -265,6 +306,37 @@ export class DelegatedAuthManager implements AuthManager {
     // and new-style (email-based) filenames, plus fallback search
     return loadMailboxMetadata(this.mailboxName);
   }
+}
+
+/** Auth-related keywords in Graph API 403 error bodies */
+const AUTH_403_KEYWORDS = ['InvalidAuthenticationToken', 'CompactToken', 'token validation'];
+
+/**
+ * Detect auth-related errors from MSAL token acquisition or Graph API responses.
+ * 401 is always auth. 403 only if the body indicates token issues (not permission errors).
+ */
+export function isAuthError(err: unknown): boolean {
+  // MSAL token-acquisition failures
+  if (err instanceof Error) {
+    const msg = err.message;
+    if (msg.includes('interaction_required') || msg.includes('invalid_grant')) return true;
+  }
+  // Graph API errors — instanceof fast path
+  if (err instanceof GraphApiError) {
+    if (err.status === 401) return true;
+    if (err.status === 403) return AUTH_403_KEYWORDS.some(kw => err.body.includes(kw));
+    return false;
+  }
+  // Structural fallback for mocks/cross-boundary errors
+  const obj = err as Record<string, unknown> | null;
+  if (obj && typeof obj === 'object' && obj.name === 'GraphApiError') {
+    const status = obj.status as number;
+    if (status === 401) return true;
+    if (status === 403 && typeof obj.body === 'string') {
+      return AUTH_403_KEYWORDS.some(kw => (obj.body as string).includes(kw));
+    }
+  }
+  return false;
 }
 
 /**

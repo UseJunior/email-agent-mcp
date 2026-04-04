@@ -179,7 +179,7 @@ export async function runServer(): Promise<void> {
             metadata.mailboxName,
           );
           await auth.reconnect();
-          const client = new RealGraphApiClient(() => auth.getAccessToken());
+          const client = new RealGraphApiClient(() => auth.getAccessToken(), () => auth.tryReconnect());
           const provider = new GraphEmailProvider(client);
 
           // Build real actions from the provider
@@ -195,7 +195,7 @@ export async function runServer(): Promise<void> {
 
       if (!connected) {
         actions = await buildDemoActions();
-        console.error('[email-agent-mcp] All mailboxes failed to connect — running in demo mode');
+        console.error('[email-agent-mcp] WARNING: All configured mailboxes failed to authenticate — running in demo mode. Run: email-agent-mcp configure');
       }
     } else {
       actions = await buildDemoActions();
@@ -235,7 +235,7 @@ export async function runServer(): Promise<void> {
 }
 
 // Import z lazily for action definitions
-async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthWarning: () => string | undefined }, sendAllowlist?: { entries: string[] }): Promise<EmailActionDef[]> {
+async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthWarning: () => string | undefined; tryReconnect: () => Promise<boolean> }, sendAllowlist?: { entries: string[] }): Promise<EmailActionDef[]> {
   const { z } = await import('zod');
   const {
     sendEmailAction,
