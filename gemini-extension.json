@@ -1,6 +1,6 @@
 {
   "name": "email-agent-mcp",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Local email connectivity for AI agents — read, draft, send, and organize Microsoft 365 / Outlook mail via MCP.",
   "contextFileName": "GEMINI.md",
   "entrypoint": "GEMINI.md",
