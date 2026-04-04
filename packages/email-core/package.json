@@ -1,6 +1,6 @@
 {
   "name": "@usejunior/email-core",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Core email actions, content engine, security, and provider interfaces for email-agent-mcp",
   "type": "module",
   "main": "dist/index.js",

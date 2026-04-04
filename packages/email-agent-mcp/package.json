@@ -1,6 +1,6 @@
 {
   "name": "email-agent-mcp",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Local email connectivity for AI agents — MCP server for Microsoft 365 / Outlook with Gmail wiring in progress",
   "type": "module",
   "main": "./index.js",
@@ -15,9 +15,9 @@
     }
   },
   "dependencies": {
-    "@usejunior/email-mcp": "^0.1.2"
+    "@usejunior/email-mcp": "^0.1.3"
   },
-  "mcpName": "io.github.usejunior/email-agent-mcp",
+  "mcpName": "io.github.UseJunior/email-agent-mcp",
   "engines": {
     "node": ">=20"
   },
