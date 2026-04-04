@@ -309,6 +309,89 @@ describe('provider-microsoft/Graph API Client', () => {
   });
 });
 
+describe('provider-microsoft/Graph API Auth Retry', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('retries GET on 401 when onAuthError succeeds', async () => {
+    let tokenVersion = 0;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 401, text: async () => 'Unauthorized' })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ value: [{ id: 'msg-1' }] }) });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const onAuthError = vi.fn().mockResolvedValue(true);
+    const client = new RealGraphApiClient(
+      async () => `token-v${++tokenVersion}`,
+      onAuthError,
+    );
+
+    const result = await client.get('/me/messages');
+    expect(onAuthError).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Retry should use fresh token
+    const retryHeaders = fetchMock.mock.calls[1]![1]!.headers as Record<string, string>;
+    expect(retryHeaders['Authorization']).toBe('Bearer token-v2');
+    expect(result.value).toHaveLength(1);
+  });
+
+  it('throws GraphApiError on 401 when no onAuthError callback', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false, status: 401, text: async () => 'Unauthorized',
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new RealGraphApiClient(async () => 'token');
+    await expect(client.get('/me/messages')).rejects.toThrow(GraphApiError);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('throws GraphApiError on 401 when onAuthError returns false', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false, status: 401, text: async () => 'Unauthorized',
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const onAuthError = vi.fn().mockResolvedValue(false);
+    const client = new RealGraphApiClient(async () => 'token', onAuthError);
+    await expect(client.get('/me/messages')).rejects.toThrow(GraphApiError);
+    expect(onAuthError).toHaveBeenCalledOnce();
+    // Should not retry
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('does not trigger onAuthError for non-401 errors', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false, status: 403, text: async () => 'Forbidden',
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const onAuthError = vi.fn().mockResolvedValue(true);
+    const client = new RealGraphApiClient(async () => 'token', onAuthError);
+    await expect(client.get('/me/messages')).rejects.toThrow(GraphApiError);
+    expect(onAuthError).not.toHaveBeenCalled();
+  });
+
+  it('retries POST on 401 when onAuthError succeeds', async () => {
+    let tokenVersion = 0;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 401, text: async () => 'Unauthorized' })
+      .mockResolvedValueOnce({ ok: true, status: 202 });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const onAuthError = vi.fn().mockResolvedValue(true);
+    const client = new RealGraphApiClient(
+      async () => `token-v${++tokenVersion}`,
+      onAuthError,
+    );
+
+    const result = await client.post('/me/sendMail', { message: {} });
+    expect(onAuthError).toHaveBeenCalledOnce();
+    expect(result).toEqual({});
+  });
+});
+
 describe('provider-microsoft/Delta Query Sync Protocol', () => {
   it('Scenario: Uses $select for efficiency', async () => {
     const client = createMockClient({

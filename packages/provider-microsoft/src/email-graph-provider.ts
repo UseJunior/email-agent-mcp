@@ -56,15 +56,31 @@ export interface DeltaResult {
  */
 export class RealGraphApiClient implements GraphApiClient {
   private getToken: () => Promise<string>;
+  private onAuthError?: () => Promise<boolean>;
 
-  constructor(getToken: () => Promise<string>) {
+  constructor(getToken: () => Promise<string>, onAuthError?: () => Promise<boolean>) {
     this.getToken = getToken;
+    this.onAuthError = onAuthError;
+  }
+
+  /** Fetch with automatic retry on 401 if onAuthError callback is provided. */
+  private async fetchWithAuthRetry(url: string, init: RequestInit): Promise<Response> {
+    const resp = await fetch(url, init);
+    if (resp.status === 401 && this.onAuthError) {
+      const ok = await this.onAuthError();
+      if (ok) {
+        const newToken = await this.getToken();
+        const retryHeaders = { ...(init.headers as Record<string, string>), Authorization: `Bearer ${newToken}` };
+        return fetch(url, { ...init, headers: retryHeaders });
+      }
+    }
+    return resp;
   }
 
   async get(url: string): Promise<{ value?: unknown[]; [key: string]: unknown }> {
     const token = await this.getToken();
     const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
-    const resp = await fetch(fullUrl, {
+    const resp = await this.fetchWithAuthRetry(fullUrl, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!resp.ok) {
@@ -82,7 +98,7 @@ export class RealGraphApiClient implements GraphApiClient {
       headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(body);
     }
-    const resp = await fetch(fullUrl, init);
+    const resp = await this.fetchWithAuthRetry(fullUrl, init);
     // sendMail returns 202 with no body
     if (resp.status === 202) return {};
     if (!resp.ok) {
@@ -95,7 +111,7 @@ export class RealGraphApiClient implements GraphApiClient {
   async patch(url: string, body: unknown): Promise<void> {
     const token = await this.getToken();
     const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
-    const resp = await fetch(fullUrl, {
+    const resp = await this.fetchWithAuthRetry(fullUrl, {
       method: 'PATCH',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -111,7 +127,7 @@ export class RealGraphApiClient implements GraphApiClient {
   async delete(url: string): Promise<void> {
     const token = await this.getToken();
     const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
-    const resp = await fetch(fullUrl, {
+    const resp = await this.fetchWithAuthRetry(fullUrl, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${token}` },
     });

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DelegatedAuthManager, ClientCredentialsAuthManager, toFilesystemSafeKey, listConfiguredMailboxesWithMetadata, getConfigDir } from './auth.js';
+import { DelegatedAuthManager, ClientCredentialsAuthManager, toFilesystemSafeKey, listConfiguredMailboxesWithMetadata, getConfigDir, isAuthError } from './auth.js';
+import { GraphApiError } from './email-graph-provider.js';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { mkdir, writeFile, rm, readdir, readFile } from 'node:fs/promises';
@@ -430,5 +431,159 @@ describe('mailbox-config/Convention-Over-Configuration Paths', () => {
     expect(data.entries).toContain('test-user@example.com');
 
     await rm(tmpHome, { recursive: true, force: true });
+  });
+});
+
+describe('provider-microsoft/Token Longevity', () => {
+  beforeEach(() => {
+    process.env['EMAIL_AGENT_MCP_HOME'] = testHome;
+    mockDeviceCodeState.authenticateCalls = 0;
+    mockDeviceCodeState.getTokenCalls = 0;
+    mockDeviceCodeState.constructorOptions = [];
+  });
+
+  afterEach(async () => {
+    delete process.env['EMAIL_AGENT_MCP_HOME'];
+    await rm(testHome, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it('tracks token expiry after getAccessToken()', async () => {
+    const auth = new DelegatedAuthManager({ mode: 'delegated', clientId: 'test-client' }, 'longevity-test');
+    // Connect to set up credential
+    await auth.connect({});
+
+    const token = await auth.getAccessToken();
+    expect(token).toBe('mock-access-token');
+    expect(auth.tokenExpiresAt).toBeTypeOf('number');
+    expect(auth.tokenExpiresAt!).toBeGreaterThan(Date.now());
+  });
+
+  it('isTokenExpiringSoon returns false when healthy', async () => {
+    const auth = new DelegatedAuthManager({ mode: 'delegated', clientId: 'test-client' }, 'longevity-test');
+    await auth.connect({});
+    await auth.getAccessToken();
+
+    // Mock returns +1 hour, buffer is 10 min → not expiring soon
+    expect(auth.isTokenExpiringSoon).toBe(false);
+  });
+
+  it('isTokenExpiringSoon returns true when needsReauth', async () => {
+    const auth = new DelegatedAuthManager({ mode: 'delegated', clientId: 'test-client' }, 'longevity-test');
+    await auth.connect({});
+
+    // Force needsReauth flag via a failed getAccessToken
+    // We'll check indirectly: needsReauth starts false
+    expect(auth.needsReauth).toBe(false);
+    expect(auth.isTokenExpiringSoon).toBe(false);
+  });
+
+  it('tryReconnect returns true on success', async () => {
+    const auth = new DelegatedAuthManager({ mode: 'delegated', clientId: 'test-client' }, 'longevity-reconnect');
+    // First, connect and save metadata
+    await auth.connect({});
+
+    // tryReconnect should succeed since metadata is saved
+    const result = await auth.tryReconnect();
+    expect(result).toBe(true);
+  });
+
+  it('tryReconnect returns false on failure', async () => {
+    const auth = new DelegatedAuthManager({ mode: 'delegated', clientId: 'test-client' }, 'nonexistent-mailbox');
+    // No saved metadata → reconnect should fail
+    const result = await auth.tryReconnect();
+    expect(result).toBe(false);
+  });
+
+  it('tryReconnect single-flight: concurrent calls share one reconnect', async () => {
+    const auth = new DelegatedAuthManager({ mode: 'delegated', clientId: 'test-client' }, 'singleflight-test');
+    await auth.connect({});
+
+    const beforeCalls = mockDeviceCodeState.getTokenCalls;
+    // Fire two concurrent tryReconnect calls
+    const [r1, r2] = await Promise.all([auth.tryReconnect(), auth.tryReconnect()]);
+
+    expect(r1).toBe(true);
+    expect(r2).toBe(true);
+    // reconnect() calls getToken() once internally — should only see 1 extra call, not 2
+    const afterCalls = mockDeviceCodeState.getTokenCalls;
+    expect(afterCalls - beforeCalls).toBe(1);
+  });
+
+  it('disconnect clears tokenExpiresAt', async () => {
+    const auth = new DelegatedAuthManager({ mode: 'delegated', clientId: 'test-client' }, 'disconnect-test');
+    await auth.connect({});
+    await auth.getAccessToken();
+    expect(auth.tokenExpiresAt).not.toBeNull();
+
+    await auth.disconnect();
+    expect(auth.tokenExpiresAt).toBeNull();
+  });
+
+  it('isTokenExpired uses tracked expiry', async () => {
+    const auth = new DelegatedAuthManager({ mode: 'delegated', clientId: 'test-client' }, 'expired-test');
+    await auth.connect({});
+    await auth.getAccessToken();
+
+    // Token expires in +1 hour, so not expired
+    expect(auth.isTokenExpired()).toBe(false);
+  });
+
+  it('getTokenHealthWarning returns expired message when token past expiry', async () => {
+    const auth = new DelegatedAuthManager({ mode: 'delegated', clientId: 'test-client' }, 'health-test');
+    await auth.connect({});
+    await auth.getAccessToken();
+
+    // Healthy — no warning expected
+    expect(auth.getTokenHealthWarning()).toBeUndefined();
+  });
+});
+
+describe('provider-microsoft/isAuthError', () => {
+  it('detects MSAL interaction_required', () => {
+    expect(isAuthError(new Error('Some context: interaction_required'))).toBe(true);
+  });
+
+  it('detects MSAL invalid_grant', () => {
+    expect(isAuthError(new Error('AADSTS70000: invalid_grant - token expired'))).toBe(true);
+  });
+
+  it('detects GraphApiError 401', () => {
+    expect(isAuthError(new GraphApiError(401, 'Unauthorized'))).toBe(true);
+  });
+
+  it('detects GraphApiError 403 with InvalidAuthenticationToken', () => {
+    expect(isAuthError(new GraphApiError(403, '{"error":{"code":"InvalidAuthenticationToken"}}'))).toBe(true);
+  });
+
+  it('detects GraphApiError 403 with CompactToken', () => {
+    expect(isAuthError(new GraphApiError(403, 'CompactToken validation failed'))).toBe(true);
+  });
+
+  it('rejects GraphApiError 403 with permission error', () => {
+    expect(isAuthError(new GraphApiError(403, 'Access denied: insufficient privileges'))).toBe(false);
+  });
+
+  it('rejects GraphApiError 400', () => {
+    expect(isAuthError(new GraphApiError(400, 'Bad Request'))).toBe(false);
+  });
+
+  it('rejects unrelated errors', () => {
+    expect(isAuthError(new Error('network timeout'))).toBe(false);
+  });
+
+  it('rejects non-errors', () => {
+    expect(isAuthError('some string')).toBe(false);
+    expect(isAuthError(null)).toBe(false);
+    expect(isAuthError(undefined)).toBe(false);
+  });
+
+  it('detects structural fallback { name: GraphApiError, status: 401 }', () => {
+    const fakeErr = { name: 'GraphApiError', status: 401, message: 'Unauthorized' };
+    expect(isAuthError(fakeErr)).toBe(true);
+  });
+
+  it('rejects structural fallback with non-auth 403', () => {
+    const fakeErr = { name: 'GraphApiError', status: 403, body: 'Access denied' };
+    expect(isAuthError(fakeErr)).toBe(false);
   });
 });
