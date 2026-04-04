@@ -1,6 +1,6 @@
 {
   "name": "@usejunior/email-mcp",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "MCP server adapter + CLI + watcher for email-agent-mcp",
   "type": "module",
   "main": "dist/index.js",
@@ -24,8 +24,8 @@
   "dependencies": {
     "@clack/prompts": "^1.1.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@usejunior/email-core": "^0.1.4",
-    "@usejunior/provider-microsoft": "^0.1.4"
+    "@usejunior/email-core": "^0.1.5",
+    "@usejunior/provider-microsoft": "^0.1.5"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

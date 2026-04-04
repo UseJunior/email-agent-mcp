@@ -1,6 +1,6 @@
 {
   "name": "@usejunior/provider-microsoft",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Microsoft Graph API email provider for email-agent-mcp",
   "type": "module",
   "main": "dist/index.js",
@@ -22,7 +22,7 @@
     "@azure/identity": "^4.0.0",
     "@azure/identity-cache-persistence": "^1.2.0",
     "@microsoft/microsoft-graph-client": "^3.0.0",
-    "@usejunior/email-core": "^0.1.4"
+    "@usejunior/email-core": "^0.1.5"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
