@@ -9,6 +9,104 @@ vi.mock('@azure/identity-cache-persistence', () => ({
   cachePersistencePlugin: vi.fn(),
 }));
 
+// Hoisted state for watcher poll-loop tests — controls mock behavior per test.
+const watcherMockState = vi.hoisted(() => ({
+  /** When non-empty, listConfiguredMailboxesWithMetadata returns these mailboxes. */
+  mailboxes: [] as Array<{
+    mailboxName: string;
+    emailAddress?: string;
+    clientId: string;
+    authenticationRecord: Record<string, string>;
+    lastInteractiveAuthAt: string;
+  }>,
+  /** Controls the mock DelegatedAuthManager behavior. */
+  auth: {
+    isTokenExpiringSoon: false,
+    tryReconnectResult: true,
+    tryReconnectCalls: 0,
+    reconnectCalls: 0,
+    getAccessTokenResult: 'mock-token',
+    /** When true, tryReconnect sends SIGINT to stop the poll loop. */
+    shutdownOnTryReconnect: false,
+  },
+  /** Controls getNewMessages behavior. null = return [], Error = throw. */
+  getNewMessagesResult: null as Error | null,
+  /** Number of poll iterations before sending SIGINT. */
+  pollCountBeforeShutdown: 1,
+  /** Track poll calls. */
+  pollCount: 0,
+}));
+
+// Mock @usejunior/provider-microsoft for watcher poll-loop tests.
+// Uses importOriginal to preserve real exports; overrides are conditional on watcherMockState.
+vi.mock('@usejunior/provider-microsoft', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+
+  class MockDelegatedAuthManager {
+    constructor(_config: Record<string, unknown>, _mailboxName: string) {}
+    async reconnect() { watcherMockState.auth.reconnectCalls++; }
+    async getAccessToken() { return watcherMockState.auth.getAccessTokenResult; }
+    async tryReconnect() {
+      watcherMockState.auth.tryReconnectCalls++;
+      if (watcherMockState.auth.shutdownOnTryReconnect) {
+        setTimeout(() => { process.emit('SIGINT', 'SIGINT'); }, 10);
+      }
+      return watcherMockState.auth.tryReconnectResult;
+    }
+    get isTokenExpiringSoon() { return watcherMockState.auth.isTokenExpiringSoon; }
+  }
+
+  class MockRealGraphApiClient {
+    constructor(_getToken: () => Promise<string>, _tryReconnect: () => Promise<boolean>) {}
+  }
+
+  class MockGraphEmailProvider {
+    async getNewMessages(_since: string) {
+      watcherMockState.pollCount++;
+      if (watcherMockState.pollCount >= watcherMockState.pollCountBeforeShutdown) {
+        setTimeout(() => { process.emit('SIGINT', 'SIGINT'); }, 10);
+      }
+      if (watcherMockState.getNewMessagesResult instanceof Error) {
+        throw watcherMockState.getNewMessagesResult;
+      }
+      return [];
+    }
+  }
+
+  // Store the real implementations for delegation
+  const RealDelegatedAuth = actual.DelegatedAuthManager as new (...args: unknown[]) => unknown;
+  const RealGraphClient = actual.RealGraphApiClient as new (...args: unknown[]) => unknown;
+  const RealGraphProvider = actual.GraphEmailProvider as new (...args: unknown[]) => unknown;
+  const realList = actual.listConfiguredMailboxesWithMetadata as () => Promise<unknown[]>;
+
+  return {
+    ...actual,
+    // Proxy that delegates to mock or real based on test state
+    DelegatedAuthManager: new Proxy(MockDelegatedAuthManager, {
+      construct(target, args) {
+        if (watcherMockState.mailboxes.length > 0) return new target(...args);
+        return new RealDelegatedAuth(...args);
+      },
+    }),
+    RealGraphApiClient: new Proxy(MockRealGraphApiClient, {
+      construct(target, args) {
+        if (watcherMockState.mailboxes.length > 0) return new target(...args);
+        return new RealGraphClient(...args);
+      },
+    }),
+    GraphEmailProvider: new Proxy(MockGraphEmailProvider, {
+      construct(target, args) {
+        if (watcherMockState.mailboxes.length > 0) return new target(...args);
+        return new RealGraphProvider(...args);
+      },
+    }),
+    listConfiguredMailboxesWithMetadata: vi.fn(async () => {
+      if (watcherMockState.mailboxes.length > 0) return watcherMockState.mailboxes;
+      return realList();
+    }),
+  };
+});
+
 beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
@@ -359,4 +457,131 @@ describe('cli/Poll Interval Validation', () => {
     expect(opts.pollInterval).toBe(1);
     // Clamping happens at runtime in runWatch, not in parseCliArgs
   });
+});
+
+describe('cli/Watcher Token Error Recovery', () => {
+  let savedHome: string | undefined;
+  let tmpDir: string;
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'email-agent-mcp-watcher-recovery-'));
+    savedHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    process.env['EMAIL_AGENT_MCP_HOME'] = tmpDir;
+
+    // Prevent process.exit from killing the test runner
+    exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+
+    // Reset mock state for each test
+    watcherMockState.mailboxes = [
+      {
+        mailboxName: 'test-work',
+        emailAddress: 'test@example.com',
+        clientId: 'test-client-id',
+        authenticationRecord: { authority: 'test', homeAccountId: 'test', clientId: 'test', tenantId: 'test' },
+        lastInteractiveAuthAt: new Date().toISOString(),
+      },
+    ];
+    watcherMockState.auth.isTokenExpiringSoon = false;
+    watcherMockState.auth.tryReconnectResult = true;
+    watcherMockState.auth.tryReconnectCalls = 0;
+    watcherMockState.auth.reconnectCalls = 0;
+    watcherMockState.auth.getAccessTokenResult = 'mock-token';
+    watcherMockState.auth.shutdownOnTryReconnect = false;
+    watcherMockState.getNewMessagesResult = null;
+    watcherMockState.pollCountBeforeShutdown = 1;
+    watcherMockState.pollCount = 0;
+  });
+
+  afterEach(async () => {
+    // Clear mock state so non-watcher tests (if any run after) use real implementations
+    watcherMockState.mailboxes = [];
+
+    if (savedHome === undefined) {
+      delete process.env['EMAIL_AGENT_MCP_HOME'];
+    } else {
+      process.env['EMAIL_AGENT_MCP_HOME'] = savedHome;
+    }
+    await rm(tmpDir, { recursive: true, force: true });
+    exitSpy.mockRestore();
+  });
+
+  it('Scenario: Watcher calls tryReconnect on auth error during poll', async () => {
+    // GIVEN a watcher is polling and the token becomes invalid (interaction_required)
+    watcherMockState.getNewMessagesResult = new Error('interaction_required');
+
+    // WHEN the poll loop encounters the auth error
+    const { runWatch } = await import('./cli.js');
+    const exitCode = await runWatch({ command: 'watch', pollInterval: 2 });
+
+    // THEN tryReconnect is called on the auth manager
+    expect(watcherMockState.auth.tryReconnectCalls).toBeGreaterThanOrEqual(1);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Token error for test@example.com'),
+    );
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Reconnect succeeded'),
+    );
+    expect(exitCode).toBe(0);
+  }, 10_000);
+
+  it('Scenario: Watcher logs warning when reconnect fails on auth error', async () => {
+    // GIVEN a watcher is polling and the token becomes invalid (invalid_grant)
+    // AND reconnect will fail
+    watcherMockState.getNewMessagesResult = new Error('AADSTS70000: invalid_grant - token expired');
+    watcherMockState.auth.tryReconnectResult = false;
+
+    // WHEN the poll loop encounters the auth error
+    const { runWatch } = await import('./cli.js');
+    const exitCode = await runWatch({ command: 'watch', pollInterval: 2 });
+
+    // THEN tryReconnect is called
+    expect(watcherMockState.auth.tryReconnectCalls).toBeGreaterThanOrEqual(1);
+    // AND a warning is logged telling the user to reconfigure
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Token error for test@example.com'),
+    );
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('WARNING: Reconnect failed'),
+    );
+    expect(exitCode).toBe(0);
+  }, 10_000);
+
+  it('Scenario: Proactive token refresh when isTokenExpiringSoon is true', async () => {
+    // GIVEN the auth manager reports the token is expiring soon
+    watcherMockState.auth.isTokenExpiringSoon = true;
+    watcherMockState.auth.tryReconnectResult = true;
+
+    // WHEN the poll loop runs
+    const { runWatch } = await import('./cli.js');
+    const exitCode = await runWatch({ command: 'watch', pollInterval: 2 });
+
+    // THEN tryReconnect is called proactively (before polling for messages)
+    expect(watcherMockState.auth.tryReconnectCalls).toBeGreaterThanOrEqual(1);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Token expiring soon for test@example.com'),
+    );
+    expect(exitCode).toBe(0);
+  }, 10_000);
+
+  it('Scenario: Proactive refresh failure skips poll for that mailbox', async () => {
+    // GIVEN the auth manager reports the token is expiring soon
+    // AND the proactive refresh fails
+    watcherMockState.auth.isTokenExpiringSoon = true;
+    watcherMockState.auth.tryReconnectResult = false;
+    // Since proactive refresh failure causes `continue` (skips getNewMessages),
+    // we trigger SIGINT from tryReconnect to stop the loop.
+    watcherMockState.auth.shutdownOnTryReconnect = true;
+
+    // WHEN the poll loop runs
+    const { runWatch } = await import('./cli.js');
+    const exitCode = await runWatch({ command: 'watch', pollInterval: 2 });
+
+    // THEN a warning is logged about the failed proactive refresh
+    expect(watcherMockState.auth.tryReconnectCalls).toBeGreaterThanOrEqual(1);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('WARNING: Proactive refresh failed for test@example.com'),
+    );
+    expect(exitCode).toBe(0);
+  }, 10_000);
 });
