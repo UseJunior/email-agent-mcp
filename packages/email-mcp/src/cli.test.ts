@@ -353,6 +353,95 @@ describe('cli/EMAIL_AGENT_MCP_HOME', () => {
   });
 });
 
+describe('cli/Token Subcommand', () => {
+  let tmpDir: string;
+  let originalHome: string | undefined;
+  let stderrSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'email-agent-mcp-token-test-'));
+    originalHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    process.env['EMAIL_AGENT_MCP_HOME'] = tmpDir;
+    stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(async () => {
+    stderrSpy.mockRestore();
+    if (originalHome === undefined) {
+      delete process.env['EMAIL_AGENT_MCP_HOME'];
+    } else {
+      process.env['EMAIL_AGENT_MCP_HOME'] = originalHome;
+    }
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('Scenario: Token with no mailboxes returns exit 1', async () => {
+    const exitCode = await runCli(['token']);
+    expect(exitCode).toBe(1);
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('no mailboxes configured'),
+    );
+  });
+
+  it('Scenario: Token with --mailbox nonexistent returns exit 2', async () => {
+    const exitCode = await runCli(['token', '--mailbox', 'nonexistent']);
+    expect(exitCode).toBe(2);
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('not found'),
+    );
+  });
+
+  it('Scenario: Token with multiple mailboxes and no --mailbox returns exit 2', async () => {
+    const { writeFile, mkdir } = await import('node:fs/promises');
+    const tokensDir = join(tmpDir, 'tokens');
+    await mkdir(tokensDir, { recursive: true });
+
+    await writeFile(join(tokensDir, 'alice-at-example-com.json'), JSON.stringify({
+      mailboxName: 'alice-at-example-com',
+      emailAddress: 'alice@example.com',
+      clientId: 'test-client-id',
+    }));
+    await writeFile(join(tokensDir, 'bob-at-example-com.json'), JSON.stringify({
+      mailboxName: 'bob-at-example-com',
+      emailAddress: 'bob@example.com',
+      clientId: 'test-client-id',
+    }));
+
+    const exitCode = await runCli(['token']);
+    expect(exitCode).toBe(2);
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('multiple mailboxes configured'),
+    );
+  });
+
+  it('Scenario: Token with single mailbox and expired auth returns exit 1', async () => {
+    const { writeFile, mkdir } = await import('node:fs/promises');
+    const tokensDir = join(tmpDir, 'tokens');
+    await mkdir(tokensDir, { recursive: true });
+
+    await writeFile(join(tokensDir, 'expired-at-example-com.json'), JSON.stringify({
+      mailboxName: 'expired-at-example-com',
+      emailAddress: 'expired@example.com',
+      clientId: 'test-client-id',
+    }));
+
+    // reconnect() will fail because there are no real cached credentials
+    const exitCode = await runCli(['token']);
+    expect(exitCode).toBe(1);
+  });
+
+  it('Scenario: Token arg parsing', () => {
+    const opts = parseCliArgs(['token']);
+    expect(opts.command).toBe('token');
+  });
+
+  it('Scenario: Token with --mailbox arg parsing', () => {
+    const opts = parseCliArgs(['token', '--mailbox', 'steven@usejunior.com']);
+    expect(opts.command).toBe('token');
+    expect(opts.mailbox).toBe('steven@usejunior.com');
+  });
+});
+
 describe('cli/Poll Interval Validation', () => {
   it('Scenario: Poll interval below 2 is clamped', () => {
     const opts = parseCliArgs(['watch', '--poll-interval', '1']);
