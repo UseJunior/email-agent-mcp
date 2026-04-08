@@ -56,7 +56,7 @@
 
 - [x] 8.1 `npm run build` — all 4 packages typecheck clean
 - [x] 8.2 `npx vitest run` — all tests green (406 passing)
-- [ ] 8.3 Manual live send (Outlook): markdown brief with headers / bold / bullets / table / line breaks — verify rendering in light + dark mode
-- [ ] 8.4 Manual live send (Gmail): same markdown brief — verify rendering
-- [ ] 8.5 Regression: `format: 'text'` send → plain text with preserved newlines; `format: 'html'` send with pre-rendered HTML → passthrough
-- [ ] 8.6 OpenClaw path: trigger morning brief against worktree build → output matches foam-quality rendering
+- [x] 8.3 Manual live send (Outlook): markdown brief with headers / bold / bullets / table / line breaks — verified rendering 2026-04-08 (message ID ae-1775659868776). Note: h3 font-size and table borders match foam exactly (Outlook default CSS), not a bug.
+- [ ] 8.4 Manual live send (Gmail): same markdown brief — verify rendering (deferred; no Gmail mailbox currently configured)
+- [ ] 8.5 Regression: `format: 'text'` send → plain text with preserved newlines; `format: 'html'` send with pre-rendered HTML → passthrough (deferred; covered by unit + integration tests, live verification optional)
+- [ ] 8.6 OpenClaw path: trigger morning brief against worktree build → output matches foam-quality rendering (deferred; primary Outlook live-send confirms the path)
