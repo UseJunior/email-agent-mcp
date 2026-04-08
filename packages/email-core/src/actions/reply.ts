@@ -3,7 +3,12 @@ import { z } from 'zod';
 import type { EmailAction } from './registry.js';
 import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { isPlausibleMessageId } from '../security/reply-validation.js';
-import { ProviderError, withRetry } from '../providers/provider.js';
+import { withRetry } from '../providers/provider.js';
+import {
+  checkMailboxRequired,
+  checkRateLimit,
+  handleProviderError,
+} from './compose-helpers.js';
 
 const ReplyToEmailInput = z.object({
   message_id: z.string(),
@@ -29,21 +34,15 @@ export const replyToEmailAction: EmailAction<
   z.infer<typeof ReplyToEmailOutput>
 > = {
   name: 'reply_to_email',
-  description: 'Reply to an email within an existing thread. Gated by send allowlist. Supports draft mode.',
+  description: 'Reply to an email within an existing thread. Send path gated by send allowlist; draft path bypasses.',
   input: ReplyToEmailInput,
   output: ReplyToEmailOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
   run: async (ctx, input) => {
     // Check mailbox requirement for multi-mailbox
-    if (!input.mailbox && ctx.allMailboxes && ctx.allMailboxes.length > 1) {
-      return {
-        success: false,
-        error: {
-          code: 'MAILBOX_REQUIRED',
-          message: 'mailbox parameter required when multiple mailboxes are configured',
-          recoverable: false,
-        },
-      };
+    const mailboxError = checkMailboxRequired(input.mailbox, ctx.allMailboxes);
+    if (mailboxError) {
+      return { success: false, error: mailboxError };
     }
 
     // Validate message ID plausibility
@@ -58,26 +57,7 @@ export const replyToEmailAction: EmailAction<
       };
     }
 
-    // Get the original message to check the recipient against allowlist
-    const originalMessage = await ctx.provider.getMessage(input.message_id);
-    const replyRecipient = originalMessage.from.email;
-
-    // Check send allowlist — reply recipients must also be allowed
-    const allowlistError = checkSendAllowlist([replyRecipient], ctx.sendAllowlist);
-    if (allowlistError) {
-      return {
-        success: false,
-        error: {
-          code: 'ALLOWLIST_BLOCKED',
-          message: allowlistError.includes('not configured')
-            ? allowlistError
-            : `Recipient not in send allowlist`,
-          recoverable: false,
-        },
-      };
-    }
-
-    // Draft branch — create reply draft instead of sending
+    // Draft branch — create reply draft, bypass allowlist
     if (input.draft) {
       if (!ctx.provider.createReplyDraft) {
         return {
@@ -103,36 +83,33 @@ export const replyToEmailAction: EmailAction<
           } : undefined,
         };
       } catch (err) {
-        if (err instanceof ProviderError) {
-          return {
-            success: false,
-            error: { code: err.code, message: err.message, recoverable: err.recoverable },
-          };
-        }
-        return {
-          success: false,
-          error: {
-            code: 'DRAFT_FAILED',
-            message: err instanceof Error ? err.message : String(err),
-            recoverable: false,
-          },
-        };
+        return handleProviderError(err, 'DRAFT_FAILED');
       }
     }
 
+    // Send path — get the original message to check the recipient against allowlist
+    const originalMessage = await ctx.provider.getMessage(input.message_id);
+    const replyRecipient = originalMessage.from.email;
+
+    // Check send allowlist — reply recipients must also be allowed
+    const allowlistError = checkSendAllowlist([replyRecipient], ctx.sendAllowlist);
+    if (allowlistError) {
+      return {
+        success: false,
+        error: {
+          code: 'ALLOWLIST_BLOCKED',
+          message: allowlistError.includes('not configured')
+            ? allowlistError
+            : `Recipient not in send allowlist`,
+          recoverable: false,
+        },
+      };
+    }
+
     // Check rate limit
-    if (ctx.rateLimiter) {
-      const rateCheck = ctx.rateLimiter.checkLimit('reply_to_email');
-      if (!rateCheck.allowed) {
-        return {
-          success: false,
-          error: {
-            code: 'RATE_LIMITED',
-            message: `Send rate limit exceeded. Retry after ${rateCheck.retryAfter}s`,
-            recoverable: true,
-          },
-        };
-      }
+    const rateLimitError = checkRateLimit(ctx.rateLimiter, 'reply_to_email');
+    if (rateLimitError) {
+      return rateLimitError;
     }
 
     try {
@@ -157,20 +134,7 @@ export const replyToEmailAction: EmailAction<
         } : undefined,
       };
     } catch (err) {
-      if (err instanceof ProviderError) {
-        return {
-          success: false,
-          error: { code: err.code, message: err.message, recoverable: err.recoverable },
-        };
-      }
-      return {
-        success: false,
-        error: {
-          code: 'REPLY_FAILED',
-          message: err instanceof Error ? err.message : String(err),
-          recoverable: false,
-        },
-      };
+      return handleProviderError(err, 'REPLY_FAILED');
     }
   },
 };
