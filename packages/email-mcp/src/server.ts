@@ -77,6 +77,81 @@ export function actionsToMcpTools(actions: EmailActionDef[]): McpTool[] {
 }
 
 /**
+ * Unwrap Optional/Default/Nullable/Effects wrappers to reach the inner type.
+ * We only need to peek at the type discriminator, not fully resolve it.
+ */
+function unwrapZodType(schema: z.ZodType): z.ZodType {
+  let cur: z.ZodType = schema;
+  for (let i = 0; i < 10; i++) {
+    const def = (cur as unknown as { _def: { type?: string; typeName?: string; innerType?: z.ZodType } })._def;
+    const id = def.type ?? def.typeName ?? '';
+    if (
+      (id === 'optional' || id === 'ZodOptional' ||
+       id === 'default'  || id === 'ZodDefault'  ||
+       id === 'nullable' || id === 'ZodNullable' ||
+       id === 'effects'  || id === 'ZodEffects')
+      && def.innerType
+    ) {
+      cur = def.innerType;
+      continue;
+    }
+    return cur;
+  }
+  return cur;
+}
+
+function zodTypeId(schema: z.ZodType): string {
+  const def = (schema as unknown as { _def: { type?: string; typeName?: string } })._def;
+  return def.type ?? def.typeName ?? '';
+}
+
+/**
+ * Coerce string-typed scalar args to their Zod-declared types.
+ *
+ * Claude Code's XML parameter encoder sends scalars as strings when calling
+ * MCP tools (e.g. `<parameter name="limit">3</parameter>` arrives as `"3"`).
+ * This walks the top-level shape of an object schema and converts any
+ * string-valued arg whose declared type is number or boolean.
+ *
+ * Booleans use explicit `'true'`/`'false'` matching rather than
+ * `z.coerce.boolean` — the latter is unsafe because it uses JS `Boolean(v)`
+ * semantics where any non-empty string is truthy, so `'false'` would become
+ * `true` and silently corrupt delete/send intent.
+ *
+ * Only top-level properties are coerced. Nested objects/arrays are left
+ * untouched; the Zod parser handles them or rejects them as-is.
+ */
+export function coerceArgsForZod(schema: z.ZodType, args: unknown): unknown {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return args;
+  const shapeRoot = unwrapZodType(schema);
+  const rootId = zodTypeId(shapeRoot);
+  if (rootId !== 'object' && rootId !== 'ZodObject') return args;
+
+  const def = (shapeRoot as unknown as { _def: { shape?: Record<string, z.ZodType> | (() => Record<string, z.ZodType>) } })._def;
+  const shape = typeof def.shape === 'function' ? def.shape() : (def.shape ?? {});
+  const out: Record<string, unknown> = { ...(args as Record<string, unknown>) };
+
+  for (const [key, fieldSchema] of Object.entries(shape)) {
+    const v = out[key];
+    if (typeof v !== 'string') continue;
+    const inner = unwrapZodType(fieldSchema as z.ZodType);
+    const id = zodTypeId(inner);
+    if (id === 'boolean' || id === 'ZodBoolean') {
+      if (v === 'true') out[key] = true;
+      else if (v === 'false') out[key] = false;
+      // else leave as string — Zod will produce its normal error
+    } else if (id === 'number' || id === 'ZodNumber') {
+      if (v.trim() !== '') {
+        const n = Number(v);
+        if (Number.isFinite(n)) out[key] = n;
+        // else leave as string — Zod will reject
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * Handle an MCP tool call by dispatching to the right action.
  */
 export async function handleToolCall(
@@ -90,7 +165,8 @@ export async function handleToolCall(
     throw new Error(`Unknown tool: ${toolName}`);
   }
 
-  const input = action.input.parse(args);
+  const coerced = coerceArgsForZod(action.input, args);
+  const input = action.input.parse(coerced);
   const result = await action.run(ctx, input);
 
   return {

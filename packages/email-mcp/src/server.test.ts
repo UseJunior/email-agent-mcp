@@ -8,6 +8,7 @@ import {
   waitForInit,
   ensureProvider,
   buildLazyActions,
+  coerceArgsForZod,
   type EmailActionDef,
   type LazyProviderState,
 } from './server.js';
@@ -256,5 +257,145 @@ describe('mcp-transport/Lazy Provider State', () => {
     await waitForInit(state);
     spy.mockRestore();
     expect(state.status).toBe('not_configured');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scalar Coercion at MCP Boundary
+//
+// Claude Code's XML parameter encoder serializes boolean/number tool args as
+// strings on the wire (`"true"`, `"3"`). The email-core Zod schemas are
+// strict and reject strings. coerceArgsForZod walks the top-level shape and
+// converts matching fields so wire-format reality stops breaking tool calls,
+// without polluting the reusable email-core schemas.
+// ---------------------------------------------------------------------------
+
+describe('mcp-transport/Scalar Coercion at Boundary', () => {
+  it('Scenario: boolean "true"/"false" → true/false; other strings pass through', () => {
+    const schema = z.object({ flag: z.boolean().optional() });
+    expect(coerceArgsForZod(schema, { flag: 'true' })).toEqual({ flag: true });
+    expect(coerceArgsForZod(schema, { flag: 'false' })).toEqual({ flag: false });
+    // Unknown strings are left alone — Zod will produce its normal error.
+    expect(coerceArgsForZod(schema, { flag: 'yes' })).toEqual({ flag: 'yes' });
+    // Already-typed values are untouched.
+    expect(coerceArgsForZod(schema, { flag: true })).toEqual({ flag: true });
+    expect(coerceArgsForZod(schema, { flag: false })).toEqual({ flag: false });
+  });
+
+  it('Scenario: numeric strings → numbers; invalid strings pass through', () => {
+    const schema = z.object({ limit: z.number().optional() });
+    expect(coerceArgsForZod(schema, { limit: '3' })).toEqual({ limit: 3 });
+    expect(coerceArgsForZod(schema, { limit: '3.14' })).toEqual({ limit: 3.14 });
+    expect(coerceArgsForZod(schema, { limit: '0' })).toEqual({ limit: 0 });
+    // Non-numeric strings left alone — Zod will reject with its normal error.
+    expect(coerceArgsForZod(schema, { limit: 'abc' })).toEqual({ limit: 'abc' });
+    expect(coerceArgsForZod(schema, { limit: '' })).toEqual({ limit: '' });
+    // Already-typed numbers are untouched.
+    expect(coerceArgsForZod(schema, { limit: 42 })).toEqual({ limit: 42 });
+  });
+
+  it('Scenario: wrapped types (optional/default/nullable) still get coerced', () => {
+    const schema = z.object({
+      a: z.boolean().optional(),
+      b: z.boolean().optional().default(true),
+      c: z.number().nullable(),
+      d: z.number().default(25),
+    });
+    expect(coerceArgsForZod(schema, { a: 'false', b: 'true', c: '7', d: '100' })).toEqual({
+      a: false,
+      b: true,
+      c: 7,
+      d: 100,
+    });
+  });
+
+  it('Scenario: non-object args are returned unchanged (defensive)', () => {
+    const schema = z.object({ flag: z.boolean() });
+    expect(coerceArgsForZod(schema, null)).toBe(null);
+    expect(coerceArgsForZod(schema, undefined)).toBe(undefined);
+    expect(coerceArgsForZod(schema, 'string')).toBe('string');
+    expect(coerceArgsForZod(schema, 42)).toBe(42);
+    expect(coerceArgsForZod(schema, ['a', 'b'])).toEqual(['a', 'b']);
+  });
+
+  it('Scenario: nested object/array fields are NOT recursed into', () => {
+    // Intentional: only top-level scalars. If a future action nests a boolean
+    // inside an object, extend coerceArgsForZod then.
+    const schema = z.object({
+      filter: z.object({ unread: z.boolean() }),
+      tags: z.array(z.string()),
+    });
+    const out = coerceArgsForZod(schema, {
+      filter: { unread: 'true' },
+      tags: ['a'],
+    }) as { filter: { unread: unknown } };
+    expect(out.filter.unread).toBe('true'); // untouched
+  });
+
+  it('Scenario: unknown fields (not declared in the schema) are untouched', () => {
+    const schema = z.object({ flag: z.boolean().optional() });
+    expect(coerceArgsForZod(schema, { flag: 'true', extra: 'hello' })).toEqual({
+      flag: true,
+      extra: 'hello',
+    });
+  });
+
+  it('Scenario: handleToolCall coerces stringified scalars end-to-end', async () => {
+    const echoActions: EmailActionDef[] = [
+      {
+        name: 'echo',
+        description: 'Echo its coerced input',
+        input: z.object({ flag: z.boolean(), n: z.number() }),
+        output: z.object({ flag: z.boolean(), n: z.number() }),
+        annotations: { readOnlyHint: true, destructiveHint: false },
+        run: async (_ctx, input) => input,
+      },
+    ];
+    const result = await handleToolCall(echoActions, {}, 'echo', { flag: 'true', n: '42' });
+    const parsed = JSON.parse(result.content[0]!.text);
+    expect(parsed).toEqual({ flag: true, n: 42 });
+  });
+
+  it('Scenario: SAFETY — user_explicitly_requested_deletion: "false" stays false', async () => {
+    // This is the reason we can't use z.coerce.boolean() — it turns 'false' into true
+    // because JS Boolean('false') === true. For delete_email, flipping false → true
+    // would silently enable destructive operations. Lock this behaviour in forever.
+    const deleteSchema = z.object({
+      id: z.string(),
+      user_explicitly_requested_deletion: z.boolean(),
+      hard_delete: z.boolean().optional().default(false),
+    });
+
+    const coerced = coerceArgsForZod(deleteSchema, {
+      id: 'msg-1',
+      user_explicitly_requested_deletion: 'false',
+      hard_delete: 'false',
+    }) as { user_explicitly_requested_deletion: boolean; hard_delete: boolean };
+
+    expect(coerced.user_explicitly_requested_deletion).toBe(false);
+    expect(coerced.hard_delete).toBe(false);
+
+    // And end-to-end through handleToolCall: the run fn must receive false.
+    const seen: Array<{ user_explicitly_requested_deletion: boolean; hard_delete: boolean }> = [];
+    const deleteActions: EmailActionDef[] = [
+      {
+        name: 'delete_email',
+        description: 'delete',
+        input: deleteSchema,
+        output: z.object({ success: z.boolean() }),
+        annotations: { readOnlyHint: false, destructiveHint: true },
+        run: async (_ctx, input) => {
+          seen.push(input as never);
+          return { success: false };
+        },
+      },
+    ];
+    await handleToolCall(deleteActions, {}, 'delete_email', {
+      id: 'msg-1',
+      user_explicitly_requested_deletion: 'false',
+      hard_delete: 'false',
+    });
+    expect(seen[0]!.user_explicitly_requested_deletion).toBe(false);
+    expect(seen[0]!.hard_delete).toBe(false);
   });
 });
