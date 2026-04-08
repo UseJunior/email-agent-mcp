@@ -3,6 +3,40 @@ import { createRequire } from 'node:module';
 import type { EmailAction, EmailProvider } from '@usejunior/email-core';
 import { z } from 'zod';
 
+/**
+ * Lazy provider state — tracks deferred init so the MCP handshake can complete
+ * instantly while OAuth token refresh runs in the background.
+ */
+export interface LazyProviderAuth {
+  getTokenHealthWarning: () => string | undefined;
+  tryReconnect: () => Promise<boolean>;
+}
+
+export interface LazyProviderState {
+  provider: EmailProvider | null;
+  auth: LazyProviderAuth | null;
+  initPromise: Promise<void> | null;
+  error: string | null;
+  /** True when no mailboxes are configured OR all auth attempts failed. */
+  isDemo: boolean;
+  status: 'pending' | 'connecting' | 'connected' | 'not_configured' | 'error';
+  /** Human-readable display name of the connected mailbox, if any. */
+  connectedMailbox: string | null;
+}
+
+/** Create a fresh lazy state. */
+export function createLazyProviderState(): LazyProviderState {
+  return {
+    provider: null,
+    auth: null,
+    initPromise: null,
+    error: null,
+    isDemo: false,
+    status: 'pending',
+    connectedMailbox: null,
+  };
+}
+
 const require = createRequire(import.meta.url);
 const { version: PACKAGE_VERSION } = require('../package.json') as { version: string };
 
@@ -140,105 +174,117 @@ function generateJsonSchema(schema: z.ZodType): Record<string, unknown> {
 }
 
 /**
- * Run the MCP server on stdio.
- * Checks for saved auth tokens and connects to real Graph API if available.
- * Falls back to demo mode if no tokens found.
+ * Wait for provider initialization to complete. Triggers init if not started yet.
+ * NEVER throws — callers inspect `state` to decide how to respond.
+ *
+ * Used by custom tools (list_emails/read_email/search_emails) that need to
+ * distinguish demo mode from a connected provider at call time.
  */
-export async function runServer(): Promise<void> {
-  const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
-  const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
-  const { ListToolsRequestSchema, CallToolRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
-
-  // Load send allowlist with hot-reload (convention: ~/.email-agent-mcp/send-allowlist.json)
-  const { loadSendAllowlist, getSendAllowlistPath, WatchedAllowlist } = await import('@usejunior/email-core');
-  const sendAllowlistPath = getSendAllowlistPath();
-  const sendAllowlistWatcher = new WatchedAllowlist(sendAllowlistPath, loadSendAllowlist);
-  await sendAllowlistWatcher.start();
-  const getSendAllowlist = () => sendAllowlistWatcher.config;
-  if (sendAllowlistWatcher.config && sendAllowlistWatcher.config.entries.length > 0) {
-    console.error(`[email-agent-mcp] Send allowlist loaded (watched): ${sendAllowlistWatcher.config.entries.length} entries from ${sendAllowlistPath}`);
-  } else {
-    console.error(`[email-agent-mcp] WARNING: Send allowlist empty or not found at ${sendAllowlistPath} — all outbound email is disabled`);
+export async function waitForInit(state: LazyProviderState): Promise<void> {
+  if (
+    state.status === 'connected' ||
+    state.status === 'not_configured' ||
+    state.status === 'error'
+  ) {
+    return;
   }
-
-  // Try to load real provider from saved tokens — try each mailbox, skip failures
-  let actions: EmailActionDef[] = await buildDemoActions();
-  let actionCtx: unknown = {};
-
+  if (!state.initPromise) {
+    state.status = 'connecting';
+    state.initPromise = initProvider(state);
+  }
   try {
-    const { listConfiguredMailboxesWithMetadata, DelegatedAuthManager } = await import('@usejunior/provider-microsoft');
-    const { RealGraphApiClient, GraphEmailProvider } = await import('@usejunior/provider-microsoft');
-    const allMailboxes = await listConfiguredMailboxesWithMetadata();
-
-    if (allMailboxes.length > 0) {
-      let connected = false;
-
-      for (const metadata of allMailboxes) {
-        const displayName = metadata.emailAddress ?? metadata.mailboxName;
-        try {
-          const auth = new DelegatedAuthManager(
-            { mode: 'delegated', clientId: metadata.clientId, tenantId: metadata.tenantId },
-            metadata.mailboxName,
-          );
-          await auth.reconnect();
-          const client = new RealGraphApiClient(() => auth.getAccessToken(), () => auth.tryReconnect());
-          const provider = new GraphEmailProvider(client);
-
-          // Build real actions from the provider
-          actions = await buildRealActions(provider, auth, getSendAllowlist);
-          console.error(`[email-agent-mcp] Connected to mailbox "${displayName}" (${metadata.clientId})`);
-          connected = true;
-          break;
-        } catch (err) {
-          console.error(`[email-agent-mcp] Skipping mailbox "${displayName}": ${err instanceof Error ? err.message : err}`);
-          continue;
-        }
-      }
-
-      if (!connected) {
-        actions = await buildDemoActions();
-        console.error('[email-agent-mcp] WARNING: All configured mailboxes failed to authenticate — running in demo mode. Run: email-agent-mcp configure');
-      }
-    } else {
-      actions = await buildDemoActions();
-      console.error('[email-agent-mcp] No configured mailboxes — running in demo mode');
-      console.error('[email-agent-mcp] Run: email-agent-mcp configure --mailbox <name> --provider microsoft');
-    }
-  } catch (err) {
-    actions = await buildDemoActions();
-    console.error(`[email-agent-mcp] Could not connect to real provider: ${err instanceof Error ? err.message : err}`);
-    console.error('[email-agent-mcp] Running in demo mode');
+    await state.initPromise;
+  } catch {
+    // initProvider never throws, but belt-and-suspenders for future changes.
   }
-
-  const server = new Server(
-    { name: 'email-agent-mcp', version: PACKAGE_VERSION },
-    { capabilities: { tools: {} } },
-  );
-
-  const tools = actionsToMcpTools(actions);
-
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  server.setRequestHandler(CallToolRequestSchema, (async (request: any) => {
-    const { name, arguments: args } = request.params;
-    try {
-      return await handleToolCall(actions, actionCtx, name, (args ?? {}) as Record<string, unknown>);
-    } catch (err) {
-      return {
-        content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
-        isError: true,
-      };
-    }
-  }) as never);
-
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error(`[email-agent-mcp] MCP server started on stdio (${tools.length} tools)`);
 }
 
-// Import z lazily for action definitions
-async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthWarning: () => string | undefined; tryReconnect: () => Promise<boolean> }, getSendAllowlist: () => { entries: string[] } | undefined): Promise<EmailActionDef[]> {
-  const { z } = await import('zod');
+/**
+ * Assert that a real provider is available. Throws if init failed or no
+ * mailbox is configured. Used by email-core action wrappers so that tool
+ * calls return a structured error in demo mode.
+ */
+export async function ensureProvider(state: LazyProviderState): Promise<void> {
+  await waitForInit(state);
+  if (!state.provider) {
+    throw new Error(
+      state.error ??
+        'No mailbox configured — run: email-agent-mcp configure --mailbox <name> --provider microsoft',
+    );
+  }
+}
+
+/**
+ * Background-safe provider initialization. Iterates configured mailboxes,
+ * records success or failure on `state`. **Never throws** — fire-and-forget
+ * callers rely on this invariant.
+ */
+export async function initProvider(state: LazyProviderState): Promise<void> {
+  try {
+    const { listConfiguredMailboxesWithMetadata, DelegatedAuthManager, RealGraphApiClient, GraphEmailProvider } =
+      await import('@usejunior/provider-microsoft');
+    const allMailboxes = await listConfiguredMailboxesWithMetadata();
+
+    if (allMailboxes.length === 0) {
+      state.isDemo = true;
+      state.status = 'not_configured';
+      console.error('[email-agent-mcp] No configured mailboxes — running in demo mode');
+      console.error('[email-agent-mcp] Run: email-agent-mcp configure --mailbox <name> --provider microsoft');
+      return;
+    }
+
+    for (const metadata of allMailboxes) {
+      const displayName = metadata.emailAddress ?? metadata.mailboxName;
+      try {
+        const auth = new DelegatedAuthManager(
+          { mode: 'delegated', clientId: metadata.clientId, tenantId: metadata.tenantId },
+          metadata.mailboxName,
+        );
+        await auth.reconnect();
+        const client = new RealGraphApiClient(() => auth.getAccessToken(), () => auth.tryReconnect());
+        const provider = new GraphEmailProvider(client);
+
+        state.provider = provider;
+        state.auth = {
+          getTokenHealthWarning: () => auth.getTokenHealthWarning(),
+          tryReconnect: () => auth.tryReconnect(),
+        };
+        state.connectedMailbox = displayName;
+        state.status = 'connected';
+        console.error(`[email-agent-mcp] Connected to mailbox "${displayName}" (${metadata.clientId})`);
+        return;
+      } catch (err) {
+        console.error(
+          `[email-agent-mcp] Skipping mailbox "${displayName}": ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    // All configured mailboxes failed to authenticate.
+    state.isDemo = true;
+    state.status = 'error';
+    state.error = 'All configured mailboxes failed to authenticate';
+    console.error(
+      '[email-agent-mcp] WARNING: All configured mailboxes failed to authenticate — running in demo mode. Run: email-agent-mcp configure',
+    );
+  } catch (err) {
+    state.isDemo = true;
+    state.status = 'error';
+    state.error = `Could not load provider: ${err instanceof Error ? err.message : String(err)}`;
+    console.error(`[email-agent-mcp] Could not connect to real provider: ${state.error}`);
+    console.error('[email-agent-mcp] Running in demo mode');
+  }
+}
+
+/**
+ * Build the tool registry without performing any auth. Schemas for all tools
+ * are registered immediately so `tools/list` can return instantly. Tool `run`
+ * callbacks lazily await `ensureProvider`/`waitForInit` on first invocation.
+ */
+export async function buildLazyActions(
+  state: LazyProviderState,
+  getSendAllowlist: () => { entries: string[] } | undefined,
+): Promise<EmailActionDef[]> {
   const {
     sendEmailAction,
     replyToEmailAction,
@@ -253,18 +299,59 @@ async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthW
     deleteEmailAction,
   } = await import('@usejunior/email-core');
 
-  // Build ActionContext for send/reply actions — getter ensures hot-reloaded allowlist
+  // Shared context for email-core actions — provider is resolved at call time.
   const actionCtx = {
-    provider: provider as never,
+    get provider() { return state.provider as never; },
     get sendAllowlist() { return getSendAllowlist(); },
   };
+
+  // Structured "provider unavailable" error — matches the shape of email-core errors.
+  const providerUnavailableError = (err: unknown) => ({
+    success: false,
+    error: {
+      code: 'PROVIDER_UNAVAILABLE',
+      message: err instanceof Error ? err.message : String(err),
+      recoverable: false,
+    },
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const wrapAction = (action: EmailAction<any, any>): EmailActionDef => ({
     name: action.name,
     description: action.description,
     input: action.input,
     output: action.output,
     annotations: action.annotations,
-    run: async (_ctx, input) => action.run(actionCtx as never, input as never),
+    run: async (_ctx, input) => {
+      try {
+        await ensureProvider(state);
+      } catch (err) {
+        return providerUnavailableError(err);
+      }
+      return action.run(actionCtx as never, input as never);
+    },
+  });
+
+  // Demo fallback responses for the 4 custom tools (preserved from buildDemoActions).
+  const demoListEmails = () => ({
+    emails: [
+      {
+        id: 'demo-1',
+        subject: 'Demo mode — run email-agent-mcp configure to connect',
+        from: 'system@email-agent-mcp.dev',
+        receivedAt: new Date().toISOString(),
+        isRead: false,
+        hasAttachments: false,
+      },
+    ],
+  });
+  const demoReadEmail = (id: string) => ({
+    id,
+    subject: 'Demo mode',
+    from: 'system@email-agent-mcp.dev',
+    to: ['user@example.com'],
+    body: 'No mailbox configured. Run: email-agent-mcp configure --mailbox <name> --provider microsoft',
+    receivedAt: new Date().toISOString(),
   });
 
   return [
@@ -275,8 +362,10 @@ async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthW
       output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean() })) }),
       annotations: { readOnlyHint: true, destructiveHint: false },
       run: async (_ctx, input) => {
+        await waitForInit(state);
+        if (!state.provider) return demoListEmails();
         const inp = input as { unread?: boolean; limit?: number; offset?: number; folder?: string };
-        const messages = await provider.listMessages({ unread: inp.unread, limit: inp.limit ?? 25, offset: inp.offset, folder: inp.folder ?? 'inbox' });
+        const messages = await state.provider.listMessages({ unread: inp.unread, limit: inp.limit ?? 25, offset: inp.offset, folder: inp.folder ?? 'inbox' });
         return {
           emails: (messages as Array<{ id: string; subject: string; from: { email: string; name?: string }; receivedAt: string; isRead: boolean; hasAttachments: boolean }>).map(m => ({
             id: m.id,
@@ -296,17 +385,18 @@ async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthW
       output: z.object({ id: z.string(), subject: z.string(), from: z.string(), to: z.array(z.string()), body: z.string(), receivedAt: z.string() }),
       annotations: { readOnlyHint: true, destructiveHint: false },
       run: async (_ctx, input) => {
+        await waitForInit(state);
         const inp = input as { id: string };
-        const msg = await provider.getMessage(inp.id) as { id: string; subject: string; from: { email: string; name?: string }; to: Array<{ email: string; name?: string }>; receivedAt: string; body?: string; bodyHtml?: string };
+        if (!state.provider) return demoReadEmail(inp.id);
+        const msg = await state.provider.getMessage(inp.id) as { id: string; subject: string; from: { email: string; name?: string }; to: Array<{ email: string; name?: string }>; receivedAt: string; body?: string; bodyHtml?: string };
 
-        // Transform HTML to markdown, or use plaintext body
         let emailBody = '';
         if (msg.bodyHtml) {
           try {
             const { htmlToMarkdown } = await import('@usejunior/email-core');
             emailBody = htmlToMarkdown(msg.bodyHtml);
           } catch {
-            emailBody = msg.bodyHtml; // fallback to raw HTML
+            emailBody = msg.bodyHtml;
           }
         } else if (msg.body) {
           emailBody = msg.body;
@@ -329,8 +419,10 @@ async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthW
       output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean() })) }),
       annotations: { readOnlyHint: true, destructiveHint: false },
       run: async (_ctx, input) => {
+        await waitForInit(state);
+        if (!state.provider) return { emails: [] };
         const inp = input as { query: string; limit?: number; offset?: number };
-        const results = await provider.searchMessages(inp.query, undefined, inp.limit, inp.offset) as Array<{ id: string; subject: string; from: { email: string; name?: string }; receivedAt: string; isRead: boolean; hasAttachments: boolean }>;
+        const results = await state.provider.searchMessages(inp.query, undefined, inp.limit, inp.offset) as Array<{ id: string; subject: string; from: { email: string; name?: string }; receivedAt: string; isRead: boolean; hasAttachments: boolean }>;
         return {
           emails: results.map(m => ({
             id: m.id,
@@ -349,57 +441,35 @@ async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthW
       input: z.object({ mailbox: z.string().optional() }),
       output: z.object({ name: z.string(), provider: z.string(), status: z.string(), isDefault: z.boolean(), warnings: z.array(z.string()) }),
       annotations: { readOnlyHint: true, destructiveHint: false },
+      // NON-BLOCKING — reports state directly without awaiting ensureProvider.
+      // This is how callers check whether the server is still warming up.
       run: async () => {
         const warnings: string[] = [];
-        const healthWarning = auth.getTokenHealthWarning();
-        if (healthWarning) warnings.push(healthWarning);
-        const currentAllowlist = getSendAllowlist();
-        if (!currentAllowlist || currentAllowlist.entries.length === 0) {
-          warnings.push('Send allowlist not configured — all outbound email is disabled. Run: email-agent-mcp configure');
+        switch (state.status) {
+          case 'pending':
+          case 'connecting':
+            return { name: 'pending', provider: 'pending', status: 'connecting', isDefault: false, warnings: ['Authenticating — provider is warming up'] };
+          case 'not_configured':
+            return { name: 'none', provider: 'none', status: 'not configured', isDefault: false, warnings: ['No mailbox configured. Run: email-agent-mcp configure --mailbox <name> --provider microsoft'] };
+          case 'error':
+            return { name: 'none', provider: 'none', status: 'error', isDefault: false, warnings: [state.error ?? 'Provider init failed'] };
+          case 'connected': {
+            const healthWarning = state.auth?.getTokenHealthWarning();
+            if (healthWarning) warnings.push(healthWarning);
+            const currentAllowlist = getSendAllowlist();
+            if (!currentAllowlist || currentAllowlist.entries.length === 0) {
+              warnings.push('Send allowlist not configured — all outbound email is disabled. Run: email-agent-mcp configure');
+            }
+            return { name: state.connectedMailbox ?? 'default', provider: 'microsoft', status: 'connected', isDefault: true, warnings };
+          }
         }
-        return { name: 'default', provider: 'microsoft', status: 'connected', isDefault: true, warnings };
       },
     },
-    {
-      name: sendEmailAction.name,
-      description: sendEmailAction.description,
-      input: sendEmailAction.input,
-      output: sendEmailAction.output,
-      annotations: sendEmailAction.annotations,
-      run: async (_ctx, input) => sendEmailAction.run(actionCtx as never, input as never),
-    },
-    {
-      name: replyToEmailAction.name,
-      description: replyToEmailAction.description,
-      input: replyToEmailAction.input,
-      output: replyToEmailAction.output,
-      annotations: replyToEmailAction.annotations,
-      run: async (_ctx, input) => replyToEmailAction.run(actionCtx as never, input as never),
-    },
-    {
-      name: createDraftAction.name,
-      description: createDraftAction.description,
-      input: createDraftAction.input,
-      output: createDraftAction.output,
-      annotations: createDraftAction.annotations,
-      run: async (_ctx, input) => createDraftAction.run(actionCtx as never, input as never),
-    },
-    {
-      name: sendDraftAction.name,
-      description: sendDraftAction.description,
-      input: sendDraftAction.input,
-      output: sendDraftAction.output,
-      annotations: sendDraftAction.annotations,
-      run: async (_ctx, input) => sendDraftAction.run(actionCtx as never, input as never),
-    },
-    {
-      name: updateDraftAction.name,
-      description: updateDraftAction.description,
-      input: updateDraftAction.input,
-      output: updateDraftAction.output,
-      annotations: updateDraftAction.annotations,
-      run: async (_ctx, input) => updateDraftAction.run(actionCtx as never, input as never),
-    },
+    wrapAction(sendEmailAction),
+    wrapAction(replyToEmailAction),
+    wrapAction(createDraftAction),
+    wrapAction(sendDraftAction),
+    wrapAction(updateDraftAction),
     wrapAction(getThreadAction),
     wrapAction(labelEmailAction),
     wrapAction(flagEmailAction),
@@ -409,91 +479,62 @@ async function buildRealActions(provider: EmailProvider, auth: { getTokenHealthW
   ];
 }
 
-async function buildDemoActions(): Promise<EmailActionDef[]> {
-  const { z } = await import('zod');
-  const {
-    sendEmailAction,
-    replyToEmailAction,
-    createDraftAction,
-    sendDraftAction,
-    updateDraftAction,
-    getThreadAction,
-    labelEmailAction,
-    flagEmailAction,
-    markReadAction,
-    moveToFolderAction,
-    deleteEmailAction,
-  } = await import('@usejunior/email-core');
-  const demoError = {
-    success: false,
-    error: {
-      code: 'DEMO_MODE',
-      message: 'Demo mode — run email-agent-mcp configure to connect a mailbox',
-      recoverable: false,
-    },
-  };
-  const demoFailureAction = (action: EmailAction<any, any>): EmailActionDef => ({
-    name: action.name,
-    description: action.description,
-    input: action.input,
-    output: action.output,
-    annotations: action.annotations,
-    run: async () => demoError,
-  });
+/**
+ * Run the MCP server on stdio. Connects the transport immediately, then kicks
+ * off provider init in the background so the MCP handshake never waits on OAuth.
+ */
+export async function runServer(): Promise<void> {
+  const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
+  const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
+  const { ListToolsRequestSchema, CallToolRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
 
-  return [
-    {
-      name: 'list_emails', description: 'List recent emails', input: z.object({ unread: z.boolean().optional(), limit: z.number().optional(), folder: z.string().optional() }), output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean() })) }),
-      annotations: { readOnlyHint: true, destructiveHint: false },
-      run: async () => ({ emails: [{ id: 'demo-1', subject: 'Demo mode — run email-agent-mcp configure to connect', from: 'system@email-agent-mcp.dev', receivedAt: new Date().toISOString(), isRead: false, hasAttachments: false }] }),
-    },
-    {
-      name: 'read_email', description: 'Read email by ID', input: z.object({ id: z.string() }), output: z.object({ id: z.string(), subject: z.string(), from: z.string(), to: z.array(z.string()), body: z.string(), receivedAt: z.string() }),
-      annotations: { readOnlyHint: true, destructiveHint: false },
-      run: async (_ctx, input) => ({ id: (input as {id:string}).id, subject: 'Demo mode', from: 'system@email-agent-mcp.dev', to: ['user@example.com'], body: 'No mailbox configured. Run: email-agent-mcp configure --mailbox <name> --provider microsoft', receivedAt: new Date().toISOString() }),
-    },
-    {
-      name: 'search_emails', description: 'Search emails', input: z.object({ query: z.string() }), output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean() })) }),
-      annotations: { readOnlyHint: true, destructiveHint: false },
-      run: async () => ({ emails: [] }),
-    },
-    {
-      name: 'get_mailbox_status', description: 'Get mailbox status', input: z.object({ mailbox: z.string().optional() }), output: z.object({ name: z.string(), provider: z.string(), status: z.string(), isDefault: z.boolean(), warnings: z.array(z.string()) }),
-      annotations: { readOnlyHint: true, destructiveHint: false },
-      run: async () => ({ name: 'none', provider: 'none', status: 'not configured', isDefault: false, warnings: ['No mailbox configured. Run: email-agent-mcp configure --mailbox <name> --provider microsoft'] }),
-    },
-    {
-      name: getThreadAction.name,
-      description: getThreadAction.description,
-      input: getThreadAction.input,
-      output: getThreadAction.output,
-      annotations: getThreadAction.annotations,
-      run: async () => ({
-        id: 'demo-thread-1',
-        subject: 'Demo mode',
-        messages: [{
-          id: 'demo-1',
-          subject: 'Demo mode',
-          from: 'system@email-agent-mcp.dev',
-          receivedAt: new Date().toISOString(),
-          body: 'No mailbox configured. Run: email-agent-mcp configure --mailbox <name> --provider microsoft',
-          isRead: false,
-        }],
-        messageCount: 1,
-        isTruncated: false,
-      }),
-    },
-    demoFailureAction(sendEmailAction),
-    demoFailureAction(replyToEmailAction),
-    demoFailureAction(createDraftAction),
-    demoFailureAction(sendDraftAction),
-    demoFailureAction(updateDraftAction),
-    demoFailureAction(labelEmailAction),
-    demoFailureAction(flagEmailAction),
-    demoFailureAction(markReadAction),
-    demoFailureAction(moveToFolderAction),
-    demoFailureAction(deleteEmailAction),
-  ];
+  // Load send allowlist with hot-reload (convention: ~/.email-agent-mcp/send-allowlist.json)
+  const { loadSendAllowlist, getSendAllowlistPath, WatchedAllowlist } = await import('@usejunior/email-core');
+  const sendAllowlistPath = getSendAllowlistPath();
+  const sendAllowlistWatcher = new WatchedAllowlist(sendAllowlistPath, loadSendAllowlist);
+  await sendAllowlistWatcher.start();
+  const getSendAllowlist = () => sendAllowlistWatcher.config;
+  if (sendAllowlistWatcher.config && sendAllowlistWatcher.config.entries.length > 0) {
+    console.error(`[email-agent-mcp] Send allowlist loaded (watched): ${sendAllowlistWatcher.config.entries.length} entries from ${sendAllowlistPath}`);
+  } else {
+    console.error(`[email-agent-mcp] WARNING: Send allowlist empty or not found at ${sendAllowlistPath} — all outbound email is disabled`);
+  }
+
+  // Build tool registry with lazy provider state (no auth yet).
+  const state = createLazyProviderState();
+  const actions = await buildLazyActions(state, getSendAllowlist);
+
+  const server = new Server(
+    { name: 'email-agent-mcp', version: PACKAGE_VERSION },
+    { capabilities: { tools: {} } },
+  );
+
+  const tools = actionsToMcpTools(actions);
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  server.setRequestHandler(CallToolRequestSchema, (async (request: any) => {
+    const { name, arguments: args } = request.params;
+    try {
+      return await handleToolCall(actions, {}, name, (args ?? {}) as Record<string, unknown>);
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  }) as never);
+
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error(`[email-agent-mcp] MCP server started on stdio (${tools.length} tools) — provider init deferred`);
+
+  // Fire-and-forget: warm up the provider in the background so most first tool
+  // calls hit a ready provider. initProvider is safe to call without awaiting
+  // because it never throws; .catch() is belt-and-suspenders.
+  void waitForInit(state).catch(() => {
+    /* initProvider records errors in state.error */
+  });
 }
 
 /**
