@@ -43,4 +43,11 @@ export { moveToFolderAction } from './actions/move.js';
 export { parseFrontmatter } from './content/frontmatter.js';
 export type { FrontmatterFields } from './content/frontmatter.js';
 export { resolveBodyFile, truncateBody, BODY_SIZE_LIMIT } from './content/body-loader.js';
+export {
+  checkMailboxRequired,
+  resolveComposeFields,
+  validateRequiredFields,
+  checkRateLimit,
+  handleProviderError,
+} from './actions/compose-helpers.js';
 export { isPlausibleMessageId, checkReplyThreading } from './security/reply-validation.js';
