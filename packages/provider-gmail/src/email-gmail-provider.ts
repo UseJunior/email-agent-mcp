@@ -104,12 +104,13 @@ export class GmailEmailProvider {
     return { success: true, messageId: result.id };
   }
 
-  async replyToMessage(messageId: string, body: string, _opts?: ReplyOptions): Promise<SendResult> {
+  async replyToMessage(messageId: string, body: string, opts?: ReplyOptions): Promise<SendResult> {
     const original = await this.getMessage(messageId);
     const replyMsg: ComposeMessage = {
       to: [original.from],
       subject: `Re: ${original.subject}`,
       body,
+      bodyHtml: opts?.bodyHtml,
     };
     return this.sendMessage(replyMsg);
   }
@@ -198,12 +199,17 @@ function parseEmailAddress(raw: string): { email: string; name?: string } {
 }
 
 function buildRawMessage(msg: ComposeMessage): string {
+  // When the caller rendered HTML, ship as text/html; otherwise send as
+  // text/plain so line breaks are preserved without requiring <br> markup.
+  const hasHtml = msg.bodyHtml !== undefined;
+  const contentType = hasHtml ? 'text/html' : 'text/plain';
+  const content = hasHtml ? msg.bodyHtml! : msg.body;
   const lines = [
     `To: ${msg.to.map(r => r.name ? `"${r.name}" <${r.email}>` : r.email).join(', ')}`,
     `Subject: ${msg.subject}`,
-    `Content-Type: text/html; charset=utf-8`,
+    `Content-Type: ${contentType}; charset=utf-8`,
     '',
-    msg.body,
+    content,
   ];
   return Buffer.from(lines.join('\r\n')).toString('base64url');
 }

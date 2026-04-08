@@ -270,3 +270,46 @@ describe('email-write/Update Draft', () => {
     expect(result.error!.code).toBe('NOT_SUPPORTED');
   });
 });
+
+describe('email-write/Body Rendering', () => {
+  it('Scenario: create_draft and update_draft also render', async () => {
+    // create_draft renders markdown
+    const created = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Markdown Draft',
+      body: '### Hi\n\n**bold**',
+    });
+
+    expect(created.success).toBe(true);
+    const createdDraft = provider.getDrafts().get(created.draftId!)!;
+    expect(createdDraft.body).toContain('### Hi');
+    expect(createdDraft.bodyHtml).toContain('<h3>Hi</h3>');
+    expect(createdDraft.bodyHtml).toContain('<strong>bold</strong>');
+
+    // update_draft renders markdown
+    const updated = await updateDraftAction.run(ctx, {
+      draft_id: created.draftId!,
+      body: '## Updated',
+    });
+
+    expect(updated.success).toBe(true);
+    const updatedDraft = provider.getDrafts().get(created.draftId!)!;
+    expect(updatedDraft.body).toContain('## Updated');
+    expect(updatedDraft.bodyHtml).toContain('<h2>Updated</h2>');
+  });
+
+  // Non-spec regression: format: text also works on drafts
+  it('create_draft format: text sends no bodyHtml', async () => {
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Plain Draft',
+      body: '### Not a header',
+      format: 'text',
+    });
+
+    expect(result.success).toBe(true);
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.body).toBe('### Not a header');
+    expect(draft.bodyHtml).toBeUndefined();
+  });
+});

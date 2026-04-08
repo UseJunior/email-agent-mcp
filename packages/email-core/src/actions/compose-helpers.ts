@@ -2,6 +2,7 @@
 import type { RateLimiter, MailboxEntry } from './registry.js';
 import { ProviderError } from '../providers/provider.js';
 import { resolveBodyFile } from '../content/body-loader.js';
+import type { BodyFormat } from '../content/body-renderer.js';
 
 // --- Error shape used by all actions ---
 
@@ -36,6 +37,8 @@ export interface ComposeFields {
   subject?: string;
   replyTo?: string;
   draft?: boolean;
+  format?: BodyFormat;
+  forceBlack?: boolean;
   error?: ActionError;
 }
 
@@ -55,6 +58,8 @@ export async function resolveComposeFields(
     subject?: string;
     reply_to?: string;
     draft?: boolean;
+    format?: BodyFormat;
+    force_black?: boolean;
   },
   safeDir?: string,
   opts?: { bodyOptional?: boolean },
@@ -65,6 +70,8 @@ export async function resolveComposeFields(
   let subject = input.subject;
   let replyTo = input.reply_to;
   let draft = input.draft;
+  let format = input.format;
+  let forceBlack = input.force_black;
 
   if (input.body_file) {
     const bodyResult = await resolveBodyFile(input.body_file, safeDir);
@@ -81,6 +88,8 @@ export async function resolveComposeFields(
       if (fm.subject !== undefined) subject = fm.subject;
       if (fm.reply_to !== undefined) replyTo = fm.reply_to;
       if (fm.draft !== undefined) draft = fm.draft;
+      if (fm.format !== undefined) format = fm.format;
+      if (fm.force_black !== undefined) forceBlack = fm.force_black;
     }
   } else if (input.body) {
     body = input.body;
@@ -91,7 +100,7 @@ export async function resolveComposeFields(
     };
   }
 
-  return { body: body ?? '', to, cc, subject, replyTo, draft };
+  return { body: body ?? '', to, cc, subject, replyTo, draft, format, forceBlack };
 }
 
 // --- validateRequiredFields ---

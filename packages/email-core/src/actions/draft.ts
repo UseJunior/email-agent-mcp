@@ -5,6 +5,7 @@ import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { checkReplyThreading } from '../security/reply-validation.js';
 import { withRetry } from '../providers/provider.js';
 import { truncateBody, BODY_SIZE_LIMIT } from '../content/body-loader.js';
+import { renderEmailBody } from '../content/body-renderer.js';
 import {
   checkMailboxRequired,
   resolveComposeFields,
@@ -35,6 +36,10 @@ const CreateDraftInput = z.object({
   body_file: z.string().optional(),
   reply_to: z.string().optional(),
   mailbox: z.string().optional(),
+  format: z.enum(['markdown', 'html', 'text']).optional()
+    .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
+  force_black: z.boolean().optional()
+    .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true.'),
 });
 
 export const createDraftAction: EmailAction<
@@ -59,7 +64,7 @@ export const createDraftAction: EmailAction<
       return { success: false, error: fields.error };
     }
 
-    const { to, cc, subject, replyTo } = fields;
+    const { to, cc, subject, replyTo, format, forceBlack } = fields;
     let { body } = fields;
 
     // Validate required fields
@@ -78,10 +83,18 @@ export const createDraftAction: EmailAction<
       return { success: false, error: threadingError };
     }
 
-    // Truncate if needed
-    if (Buffer.byteLength(body, 'utf-8') > BODY_SIZE_LIMIT) {
-      body = truncateBody(body);
+    // Render body: markdown → HTML by default
+    const rendered = renderEmailBody(body, { format, forceBlack });
+    let outBody = rendered.body;
+    let outBodyHtml = rendered.bodyHtml;
+
+    if (Buffer.byteLength(outBody, 'utf-8') > BODY_SIZE_LIMIT) {
+      outBody = truncateBody(outBody);
     }
+    if (outBodyHtml !== undefined && Buffer.byteLength(outBodyHtml, 'utf-8') > BODY_SIZE_LIMIT) {
+      outBodyHtml = truncateBody(outBodyHtml);
+    }
+    body = outBody;
 
     // Reply draft path
     if (replyTo) {
@@ -94,6 +107,7 @@ export const createDraftAction: EmailAction<
       try {
         const result = await ctx.provider.createReplyDraft(replyTo, body, {
           cc: cc?.map(email => ({ email })),
+          bodyHtml: outBodyHtml,
         });
         return {
           success: result.success,
@@ -112,6 +126,7 @@ export const createDraftAction: EmailAction<
         cc: cc?.map(email => ({ email })),
         subject: subject!,
         body,
+        bodyHtml: outBodyHtml,
       });
       return {
         success: result.success,
@@ -228,6 +243,10 @@ const UpdateDraftInput = z.object({
   body: z.string().optional(),
   body_file: z.string().optional(),
   mailbox: z.string().optional(),
+  format: z.enum(['markdown', 'html', 'text']).optional()
+    .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
+  force_black: z.boolean().optional()
+    .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true.'),
 });
 
 export const updateDraftAction: EmailAction<
@@ -260,7 +279,7 @@ export const updateDraftAction: EmailAction<
       return { success: false, error: fields.error };
     }
 
-    const { to, cc, subject } = fields;
+    const { to, cc, subject, format, forceBlack } = fields;
     let { body } = fields;
 
     // Drafts bypass allowlist — enforcement happens at send_draft time
@@ -282,10 +301,18 @@ export const updateDraftAction: EmailAction<
     if (cc) partial.cc = cc.map(email => ({ email }));
     if (subject) partial.subject = subject;
     if (body) {
-      if (Buffer.byteLength(body, 'utf-8') > BODY_SIZE_LIMIT) {
-        body = truncateBody(body);
+      const rendered = renderEmailBody(body, { format, forceBlack });
+      let outBody = rendered.body;
+      let outBodyHtml = rendered.bodyHtml;
+      if (Buffer.byteLength(outBody, 'utf-8') > BODY_SIZE_LIMIT) {
+        outBody = truncateBody(outBody);
       }
+      if (outBodyHtml !== undefined && Buffer.byteLength(outBodyHtml, 'utf-8') > BODY_SIZE_LIMIT) {
+        outBodyHtml = truncateBody(outBodyHtml);
+      }
+      body = outBody;
       partial.body = body;
+      if (outBodyHtml !== undefined) partial.bodyHtml = outBodyHtml;
     }
 
     try {

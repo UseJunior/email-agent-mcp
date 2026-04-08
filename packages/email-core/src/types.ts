@@ -100,6 +100,12 @@ export interface ReplyOptions {
   cc?: EmailAddress[];
   bcc?: EmailAddress[];
   attachments?: OutboundAttachment[];
+  /**
+   * Pre-rendered HTML body. When set, providers send with HTML content-type
+   * and use this instead of the plain `body` argument. When unset, providers
+   * send with plain-text content-type.
+   */
+  bodyHtml?: string;
 }
 
 export interface Subscription {

@@ -275,7 +275,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     const trackingId = msg.trackingId ?? `ae-${Date.now()}`;
     const graphMsg = {
       subject: msg.subject.slice(0, SUBJECT_MAX_LENGTH),
-      body: { contentType: 'HTML', content: truncateBody(msg.body) },
+      body: buildGraphBody(msg.bodyHtml, msg.body),
       toRecipients: msg.to.map(r => ({ emailAddress: { address: r.email, name: r.name } })),
       ccRecipients: msg.cc?.map(r => ({ emailAddress: { address: r.email, name: r.name } })),
       singleValueExtendedProperties: [
@@ -297,9 +297,9 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       );
 
       if (draft.id) {
-        // Update draft body
+        // Update draft body — pick HTML if caller rendered it, else plain text
         await this.client.patch(`${this.basePath}/messages/${draft.id}`, {
-          body: { contentType: 'HTML', content: truncateBody(body) },
+          body: buildGraphBody(opts?.bodyHtml, body),
         });
 
         // Send the draft
@@ -315,13 +315,14 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       to: opts?.cc ?? [],
       subject: `Re: `,
       body,
+      bodyHtml: opts?.bodyHtml,
     });
   }
 
   async createDraft(msg: ComposeMessage): Promise<DraftResult> {
     const graphMsg = {
       subject: msg.subject,
-      body: { contentType: 'HTML', content: msg.body },
+      body: buildGraphBody(msg.bodyHtml, msg.body),
       toRecipients: msg.to.map(r => ({ emailAddress: { address: r.email, name: r.name } })),
     };
 
@@ -342,9 +343,9 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     );
 
     if (draft.id) {
-      // Update draft body
+      // Update draft body — HTML if caller rendered it, else plain text
       const patch: Record<string, unknown> = {
-        body: { contentType: 'HTML', content: truncateBody(body) },
+        body: buildGraphBody(opts?.bodyHtml, body),
       };
       if (opts?.cc?.length) {
         patch.ccRecipients = opts.cc.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
@@ -358,7 +359,9 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
 
   async updateDraft(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult> {
     const patch: Record<string, unknown> = {};
-    if (msg.body !== undefined) patch.body = { contentType: 'HTML', content: truncateBody(msg.body) };
+    if (msg.body !== undefined || msg.bodyHtml !== undefined) {
+      patch.body = buildGraphBody(msg.bodyHtml, msg.body ?? '');
+    }
     if (msg.subject !== undefined) patch.subject = msg.subject.slice(0, SUBJECT_MAX_LENGTH);
     if (msg.to) patch.toRecipients = msg.to.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
     if (msg.cc) patch.ccRecipients = msg.cc.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
@@ -525,4 +528,19 @@ function truncateBody(body: string): string {
   const lastTag = truncated.lastIndexOf('>');
   const safeCut = lastTag > 0 ? lastTag + 1 : truncated.length;
   return truncated.substring(0, safeCut) + notice;
+}
+
+/**
+ * Build a Graph `body` object choosing HTML vs Text based on what's populated.
+ * When `bodyHtml` is set, sends as HTML; otherwise plain text (preserves newlines).
+ * Content is truncated to fit Graph body size limits.
+ */
+function buildGraphBody(
+  bodyHtml: string | undefined,
+  body: string,
+): { contentType: 'HTML' | 'Text'; content: string } {
+  if (bodyHtml !== undefined) {
+    return { contentType: 'HTML', content: truncateBody(bodyHtml) };
+  }
+  return { contentType: 'Text', content: truncateBody(body) };
 }

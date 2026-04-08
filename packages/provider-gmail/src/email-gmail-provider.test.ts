@@ -113,3 +113,41 @@ describe('provider-gmail/NemoClaw Compatibility', () => {
     expect(domains).toContain('pubsub.googleapis.com');
   });
 });
+
+describe('provider-gmail/Body Content Type', () => {
+  function decodeRaw(base64url: string): string {
+    return Buffer.from(base64url, 'base64url').toString('utf-8');
+  }
+
+  it('Scenario: bodyHtml set → Content-Type: text/html', async () => {
+    const client = createMockGmailClient();
+    const provider = new GmailEmailProvider(client);
+
+    await provider.sendMessage({
+      to: [{ email: 'bob@corp.com' }],
+      subject: 'HTML body',
+      body: '### Hi',
+      bodyHtml: '<h3>Hi</h3>',
+    });
+
+    const raw = decodeRaw((client.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string);
+    expect(raw).toContain('Content-Type: text/html; charset=utf-8');
+    expect(raw).toContain('<h3>Hi</h3>');
+  });
+
+  it('Scenario: only body set → Content-Type: text/plain', async () => {
+    const client = createMockGmailClient();
+    const provider = new GmailEmailProvider(client);
+
+    await provider.sendMessage({
+      to: [{ email: 'bob@corp.com' }],
+      subject: 'Plain body',
+      body: 'line one\nline two',
+    });
+
+    const raw = decodeRaw((client.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string);
+    expect(raw).toContain('Content-Type: text/plain; charset=utf-8');
+    // Body newlines are preserved verbatim — outer CRLF is from the mime header join.
+    expect(raw).toContain('line one\nline two');
+  });
+});

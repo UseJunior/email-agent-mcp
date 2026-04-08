@@ -223,6 +223,7 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
       bcc: opts?.bcc,
       subject: `Re: ${original.subject}`,
       body,
+      bodyHtml: opts?.bodyHtml,
       attachments: opts?.attachments,
     });
 
@@ -259,6 +260,7 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
       cc: opts?.cc,
       subject: `Re: ${original.subject}`,
       body,
+      bodyHtml: opts?.bodyHtml,
     });
     return { success: true, draftId };
   }
@@ -275,6 +277,7 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
       ...(msg.cc !== undefined && { cc: msg.cc }),
       ...(msg.subject !== undefined && { subject: msg.subject }),
       ...(msg.body !== undefined && { body: msg.body }),
+      ...(msg.bodyHtml !== undefined && { bodyHtml: msg.bodyHtml }),
     });
     return { success: true, draftId };
   }
