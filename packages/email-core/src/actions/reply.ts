@@ -4,6 +4,7 @@ import type { EmailAction } from './registry.js';
 import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { isPlausibleMessageId } from '../security/reply-validation.js';
 import { withRetry } from '../providers/provider.js';
+import { renderEmailBody } from '../content/body-renderer.js';
 import {
   checkMailboxRequired,
   checkRateLimit,
@@ -16,6 +17,10 @@ const ReplyToEmailInput = z.object({
   mailbox: z.string().optional(),
   cc: z.array(z.string()).optional(),
   draft: z.boolean().optional(),
+  format: z.enum(['markdown', 'html', 'text']).optional()
+    .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
+  force_black: z.boolean().optional()
+    .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true.'),
 });
 
 const ReplyToEmailOutput = z.object({
@@ -57,6 +62,11 @@ export const replyToEmailAction: EmailAction<
       };
     }
 
+    // Render body: markdown → HTML by default
+    const rendered = renderEmailBody(input.body, { format: input.format, forceBlack: input.force_black });
+    const bodyPlain = rendered.body;
+    const bodyHtml = rendered.bodyHtml;
+
     // Draft branch — create reply draft, bypass allowlist
     if (input.draft) {
       if (!ctx.provider.createReplyDraft) {
@@ -70,8 +80,9 @@ export const replyToEmailAction: EmailAction<
         };
       }
       try {
-        const draftResult = await ctx.provider.createReplyDraft(input.message_id, input.body, {
+        const draftResult = await ctx.provider.createReplyDraft(input.message_id, bodyPlain, {
           cc: input.cc?.map(email => ({ email })),
+          bodyHtml,
         });
         return {
           success: draftResult.success,
@@ -114,8 +125,9 @@ export const replyToEmailAction: EmailAction<
 
     try {
       const result = await withRetry(
-        () => ctx.provider.replyToMessage(input.message_id, input.body, {
+        () => ctx.provider.replyToMessage(input.message_id, bodyPlain, {
           cc: input.cc?.map(email => ({ email })),
+          bodyHtml,
         }),
         { maxRetries: 3, baseDelay: 1000 },
       );

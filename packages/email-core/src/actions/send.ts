@@ -5,6 +5,7 @@ import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { checkReplyThreading } from '../security/reply-validation.js';
 import { withRetry } from '../providers/provider.js';
 import { truncateBody, BODY_SIZE_LIMIT } from '../content/body-loader.js';
+import { renderEmailBody } from '../content/body-renderer.js';
 import {
   checkMailboxRequired,
   resolveComposeFields,
@@ -21,6 +22,10 @@ const SendEmailInput = z.object({
   body_file: z.string().optional(),
   mailbox: z.string().optional(),
   draft: z.boolean().optional(),
+  format: z.enum(['markdown', 'html', 'text']).optional()
+    .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
+  force_black: z.boolean().optional()
+    .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true. Ignored when format is "text".'),
 });
 
 const SendEmailOutput = z.object({
@@ -56,7 +61,7 @@ export const sendEmailAction: EmailAction<
       return { success: false, error: fields.error };
     }
 
-    const { to, cc, subject, draft } = fields;
+    const { to, cc, subject, draft, format, forceBlack } = fields;
     let { body } = fields;
 
     // Validate required fields after merge
@@ -74,10 +79,21 @@ export const sendEmailAction: EmailAction<
       return { success: false, error: threadingError };
     }
 
-    // Graceful body truncation
-    if (Buffer.byteLength(body, 'utf-8') > BODY_SIZE_LIMIT) {
-      body = truncateBody(body);
+    // Render body for transport: markdown → HTML by default.
+    // Provider branches on bodyHtml to pick HTML vs Text content-type; the
+    // raw source stays in `body` as a plain-text fallback.
+    const rendered = renderEmailBody(body, { format, forceBlack });
+    let outBody = rendered.body;
+    let outBodyHtml = rendered.bodyHtml;
+
+    // Graceful truncation — each field independently capped at size limit.
+    if (Buffer.byteLength(outBody, 'utf-8') > BODY_SIZE_LIMIT) {
+      outBody = truncateBody(outBody);
     }
+    if (outBodyHtml !== undefined && Buffer.byteLength(outBodyHtml, 'utf-8') > BODY_SIZE_LIMIT) {
+      outBodyHtml = truncateBody(outBodyHtml);
+    }
+    body = outBody;
 
     // Draft workflow — skip allowlist check and rate limit
     if (draft) {
@@ -86,6 +102,7 @@ export const sendEmailAction: EmailAction<
         cc: cc?.map(email => ({ email })),
         subject: subject!,
         body,
+        bodyHtml: outBodyHtml,
       });
       return {
         success: draftResult.success,
@@ -121,6 +138,7 @@ export const sendEmailAction: EmailAction<
           cc: cc?.map(email => ({ email })),
           subject: subject!,
           body,
+          bodyHtml: outBodyHtml,
         }),
         { maxRetries: 3, baseDelay: 1000 },
       );

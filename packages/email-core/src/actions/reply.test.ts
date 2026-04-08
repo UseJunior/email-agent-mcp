@@ -150,3 +150,44 @@ describe('email-write/Message ID Validation', () => {
     expect(result.error!.code).toBe('INVALID_MESSAGE_ID');
   });
 });
+
+describe('email-write/Reply Body Rendering', () => {
+  it('Scenario: Reply renders markdown to HTML by default', async () => {
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: VALID_MSG_ID,
+      body: '### Thanks\n\n**Here is the info:**\n- item 1\n- item 2',
+    });
+
+    expect(result.success).toBe(true);
+    const sent = provider.getSentMessages()[0]!;
+    expect(sent.body).toContain('### Thanks');
+    expect(sent.bodyHtml).toContain('<h3>Thanks</h3>');
+    expect(sent.bodyHtml).toContain('<li>item 1</li>');
+  });
+
+  it('Scenario: Reply format: text sends no bodyHtml', async () => {
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: VALID_MSG_ID,
+      body: '### Not a header',
+      format: 'text',
+    });
+
+    expect(result.success).toBe(true);
+    const sent = provider.getSentMessages()[0]!;
+    expect(sent.body).toBe('### Not a header');
+    expect(sent.bodyHtml).toBeUndefined();
+  });
+
+  it('Scenario: Reply draft also renders markdown', async () => {
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: VALID_MSG_ID,
+      body: '## Draft reply\n\nWith **markdown**',
+      draft: true,
+    });
+
+    expect(result.success).toBe(true);
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.bodyHtml).toContain('<h2>Draft reply</h2>');
+    expect(draft.bodyHtml).toContain('<strong>markdown</strong>');
+  });
+});

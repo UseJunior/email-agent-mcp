@@ -93,6 +93,76 @@ describe('provider-microsoft/Size Limits', () => {
   });
 });
 
+describe('provider-microsoft/Body Content Type', () => {
+  it('Scenario: bodyHtml set → contentType HTML', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.sendMessage({
+      to: [{ email: 'alice@corp.com' }],
+      subject: 'HTML body',
+      body: '### Hi',
+      bodyHtml: '<h3>Hi</h3>',
+    });
+
+    const callArgs = (client.post as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const body = (callArgs[1] as { message: { body: { contentType: string; content: string } } }).message.body;
+    expect(body.contentType).toBe('HTML');
+    expect(body.content).toBe('<h3>Hi</h3>');
+  });
+
+  it('Scenario: only body set → contentType Text', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.sendMessage({
+      to: [{ email: 'alice@corp.com' }],
+      subject: 'Plain body',
+      body: 'line one\nline two',
+    });
+
+    const callArgs = (client.post as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const body = (callArgs[1] as { message: { body: { contentType: string; content: string } } }).message.body;
+    expect(body.contentType).toBe('Text');
+    expect(body.content).toBe('line one\nline two');
+  });
+
+  it('Scenario: createDraft honors bodyHtml', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createDraft({
+      to: [{ email: 'alice@corp.com' }],
+      subject: 'Draft',
+      body: '# fallback',
+      bodyHtml: '<h1>rendered</h1>',
+    });
+
+    const callArgs = (client.post as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const body = (callArgs[1] as { body: { contentType: string; content: string } }).body;
+    expect(body.contentType).toBe('HTML');
+    expect(body.content).toBe('<h1>rendered</h1>');
+  });
+
+  it('Scenario: replyToMessage forwards bodyHtml via opts', async () => {
+    const client = createMockClient({
+      post: vi.fn()
+        .mockResolvedValueOnce({ id: 'draft-xyz' }) // createReplyAll
+        .mockResolvedValueOnce({}), // send
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.replyToMessage('msg-1', 'plain reply', {
+      bodyHtml: '<p>rendered reply</p>',
+    });
+
+    const patchCall = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const body = (patchCall[1] as { body: { contentType: string; content: string } }).body;
+    expect(body.contentType).toBe('HTML');
+    expect(body.content).toBe('<p>rendered reply</p>');
+  });
+});
+
 describe('provider-microsoft/Sent Message Tracking', () => {
   it('Scenario: Find sent message', async () => {
     const client = createMockClient();

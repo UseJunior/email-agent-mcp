@@ -329,7 +329,101 @@ describe('email-write/Graceful Body Truncation', () => {
     expect(result.success).toBe(true);
     const sent = provider.getSentMessages();
     expect(sent).toHaveLength(1);
+    // Both plain body and rendered HTML are truncated with the notice
     expect(sent[0]!.body).toContain('This response was truncated because it exceeded email size limits.');
     expect(Buffer.byteLength(sent[0]!.body, 'utf-8')).toBeLessThanOrEqual(3.5 * 1024 * 1024 + 200);
+    expect(sent[0]!.bodyHtml).toContain('This response was truncated because it exceeded email size limits.');
+    expect(Buffer.byteLength(sent[0]!.bodyHtml!, 'utf-8')).toBeLessThanOrEqual(3.5 * 1024 * 1024 + 200);
+  });
+});
+
+describe('email-write/Body Rendering', () => {
+  it('Scenario: Markdown is rendered to HTML by default', async () => {
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Morning Brief',
+      body: '### Header\n\n**bold** and *italic*\n\n- item 1\n- item 2',
+    });
+
+    expect(result.success).toBe(true);
+    const sent = provider.getSentMessages()[0]!;
+    // Raw markdown kept in body as plain-text fallback
+    expect(sent.body).toContain('### Header');
+    // Rendered HTML shipped in bodyHtml
+    expect(sent.bodyHtml).toContain('<h3>Header</h3>');
+    expect(sent.bodyHtml).toContain('<strong>bold</strong>');
+    expect(sent.bodyHtml).toContain('<li>item 1</li>');
+    // Dark-mode defense wrapper on by default
+    expect(sent.bodyHtml).toContain('<div style="color: #000000;">');
+  });
+
+  it('Scenario: Single newlines become <br> (breaks: true)', async () => {
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Line Breaks',
+      body: 'line one\nline two\nline three',
+    });
+
+    expect(result.success).toBe(true);
+    const sent = provider.getSentMessages()[0]!;
+    expect(sent.bodyHtml).toMatch(/line one<br\s*\/?>\s*line two/);
+  });
+
+  it('Scenario: format: text sends as plain text with no bodyHtml', async () => {
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Plain',
+      body: '### Not a header',
+      format: 'text',
+    });
+
+    expect(result.success).toBe(true);
+    const sent = provider.getSentMessages()[0]!;
+    expect(sent.body).toBe('### Not a header');
+    expect(sent.bodyHtml).toBeUndefined();
+  });
+
+  it('Scenario: format: html passes through without marked', async () => {
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Pre-rendered',
+      body: '<h1>Already HTML</h1>',
+      format: 'html',
+    });
+
+    expect(result.success).toBe(true);
+    const sent = provider.getSentMessages()[0]!;
+    expect(sent.bodyHtml).toContain('<h1>Already HTML</h1>');
+  });
+
+  it('Scenario: force_black: false skips the dark-mode wrapper', async () => {
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'No wrapper',
+      body: 'plain text',
+      force_black: false,
+    });
+
+    expect(result.success).toBe(true);
+    const sent = provider.getSentMessages()[0]!;
+    expect(sent.bodyHtml).not.toContain('<div style="color: #000000;">');
+  });
+
+  it('Scenario: Frontmatter format: text overrides default markdown', async () => {
+    await writeFile(join(testDir, 'plain.md'), `---
+to: alice@allowed.com
+subject: Plain from fm
+format: text
+---
+### Not rendered`);
+
+    const result = await sendEmailAction.run(ctx, {
+      body_file: 'plain.md',
+    });
+
+    expect(result.success).toBe(true);
+    const sent = provider.getSentMessages()[0]!;
+    expect(sent.body).toBe('### Not rendered');
+    expect(sent.bodyHtml).toBeUndefined();
   });
 });
