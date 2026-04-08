@@ -70,6 +70,66 @@ describe('mcp-transport/Zod Schema Constraints', () => {
       expect(tool.inputSchema.properties).toBeDefined();
     }
   });
+
+  it('Scenario: ZodUnion fields emit anyOf, not {}', () => {
+    // Regression lock for the `z.toJsonSchema` casing bug: previously the
+    // feature-detect fell through to a hand-rolled generator that returned
+    // `{}` for ZodUnion, so `send_email.to` (a string | string[] union)
+    // emitted an empty object in tools/list and some MCP clients couldn't
+    // validate calls. z.toJSONSchema handles unions natively.
+    const unionAction: EmailActionDef[] = [
+      {
+        name: 'send_like',
+        description: 'Schema shape mirrors send_email.to',
+        input: z.object({
+          to: z.string().or(z.array(z.string())).optional(),
+          subject: z.string().optional(),
+        }),
+        output: z.object({ success: z.boolean() }),
+        annotations: { readOnlyHint: false, destructiveHint: false },
+        run: async () => ({ success: true }),
+      },
+    ];
+    const [tool] = actionsToMcpTools(unionAction);
+    const props = (tool!.inputSchema.properties as Record<string, unknown>);
+    const toSchema = props.to as { anyOf?: Array<{ type: string }> };
+    expect(toSchema.anyOf).toBeDefined();
+    expect(toSchema.anyOf).toHaveLength(2);
+    expect(toSchema.anyOf?.[0]?.type).toBe('string');
+    expect(toSchema.anyOf?.[1]?.type).toBe('array');
+    // Explicitly NOT `{}` — this is the assertion that would have caught the bug.
+    expect(Object.keys(toSchema)).not.toEqual([]);
+  });
+
+  it('Scenario: defaults are exposed in tool input schema (io: input)', () => {
+    // z.toJSONSchema with io:'input' emits `default` so clients know what
+    // value they get if they omit the field. Backwards-compatible with the
+    // old hand-rolled generator (which dropped defaults entirely) — this
+    // test documents the intentional enrichment.
+    const action: EmailActionDef[] = [
+      {
+        name: 'test_defaults',
+        description: 'Exercises default exposure',
+        input: z.object({
+          flagged: z.boolean().default(true),
+          limit: z.number().default(25),
+        }),
+        output: z.object({}),
+        annotations: { readOnlyHint: true, destructiveHint: false },
+        run: async () => ({}),
+      },
+    ];
+    const [tool] = actionsToMcpTools(action);
+    const props = (tool!.inputSchema.properties as Record<string, { default?: unknown; type?: string }>);
+    expect(props.flagged?.default).toBe(true);
+    expect(props.flagged?.type).toBe('boolean');
+    expect(props.limit?.default).toBe(25);
+    expect(props.limit?.type).toBe('number');
+    // Defaults make fields optional — not in required[].
+    const required = (tool!.inputSchema.required as string[] | undefined) ?? [];
+    expect(required).not.toContain('flagged');
+    expect(required).not.toContain('limit');
+  });
 });
 
 describe('mcp-transport/Tool Annotations', () => {
