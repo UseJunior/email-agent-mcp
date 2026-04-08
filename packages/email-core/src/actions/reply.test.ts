@@ -151,21 +151,35 @@ describe('email-write/Message ID Validation', () => {
   });
 });
 
-describe('email-write/Reply Body Rendering', () => {
-  it('Scenario: Reply renders markdown to HTML by default', async () => {
-    const result = await replyToEmailAction.run(ctx, {
+describe('email-write/Body Rendering', () => {
+  it('Scenario: reply_to_email also renders', async () => {
+    // Send path renders markdown
+    const sendResult = await replyToEmailAction.run(ctx, {
       message_id: VALID_MSG_ID,
       body: '### Thanks\n\n**Here is the info:**\n- item 1\n- item 2',
     });
 
-    expect(result.success).toBe(true);
+    expect(sendResult.success).toBe(true);
     const sent = provider.getSentMessages()[0]!;
     expect(sent.body).toContain('### Thanks');
     expect(sent.bodyHtml).toContain('<h3>Thanks</h3>');
     expect(sent.bodyHtml).toContain('<li>item 1</li>');
+
+    // Draft path also renders
+    const draftResult = await replyToEmailAction.run(ctx, {
+      message_id: VALID_MSG_ID,
+      body: '## Draft reply\n\nWith **markdown**',
+      draft: true,
+    });
+
+    expect(draftResult.success).toBe(true);
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.bodyHtml).toContain('<h2>Draft reply</h2>');
+    expect(draft.bodyHtml).toContain('<strong>markdown</strong>');
   });
 
-  it('Scenario: Reply format: text sends no bodyHtml', async () => {
+  // Non-spec regression: format: text on reply
+  it('reply format: text sends no bodyHtml', async () => {
     const result = await replyToEmailAction.run(ctx, {
       message_id: VALID_MSG_ID,
       body: '### Not a header',
@@ -176,18 +190,5 @@ describe('email-write/Reply Body Rendering', () => {
     const sent = provider.getSentMessages()[0]!;
     expect(sent.body).toBe('### Not a header');
     expect(sent.bodyHtml).toBeUndefined();
-  });
-
-  it('Scenario: Reply draft also renders markdown', async () => {
-    const result = await replyToEmailAction.run(ctx, {
-      message_id: VALID_MSG_ID,
-      body: '## Draft reply\n\nWith **markdown**',
-      draft: true,
-    });
-
-    expect(result.success).toBe(true);
-    const draft = [...provider.getDrafts().values()][0]!;
-    expect(draft.bodyHtml).toContain('<h2>Draft reply</h2>');
-    expect(draft.bodyHtml).toContain('<strong>markdown</strong>');
   });
 });

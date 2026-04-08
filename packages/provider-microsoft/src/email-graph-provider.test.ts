@@ -93,8 +93,8 @@ describe('provider-microsoft/Size Limits', () => {
   });
 });
 
-describe('provider-microsoft/Body Content Type', () => {
-  it('Scenario: bodyHtml set → contentType HTML', async () => {
+describe('provider-interface/Capability Interfaces', () => {
+  it('Scenario: Provider honors bodyHtml on send', async () => {
     const client = createMockClient();
     const provider = new GraphEmailProvider(client);
 
@@ -107,11 +107,12 @@ describe('provider-microsoft/Body Content Type', () => {
 
     const callArgs = (client.post as ReturnType<typeof vi.fn>).mock.calls[0]!;
     const body = (callArgs[1] as { message: { body: { contentType: string; content: string } } }).message.body;
+    // Graph → contentType: HTML when bodyHtml is set, content is the rendered HTML
     expect(body.contentType).toBe('HTML');
     expect(body.content).toBe('<h3>Hi</h3>');
   });
 
-  it('Scenario: only body set → contentType Text', async () => {
+  it('Scenario: Provider sends plain text when bodyHtml is absent', async () => {
     const client = createMockClient();
     const provider = new GraphEmailProvider(client);
 
@@ -123,28 +124,12 @@ describe('provider-microsoft/Body Content Type', () => {
 
     const callArgs = (client.post as ReturnType<typeof vi.fn>).mock.calls[0]!;
     const body = (callArgs[1] as { message: { body: { contentType: string; content: string } } }).message.body;
+    // Graph → contentType: Text when only body is set; newlines preserved verbatim
     expect(body.contentType).toBe('Text');
     expect(body.content).toBe('line one\nline two');
   });
 
-  it('Scenario: createDraft honors bodyHtml', async () => {
-    const client = createMockClient();
-    const provider = new GraphEmailProvider(client);
-
-    await provider.createDraft({
-      to: [{ email: 'alice@corp.com' }],
-      subject: 'Draft',
-      body: '# fallback',
-      bodyHtml: '<h1>rendered</h1>',
-    });
-
-    const callArgs = (client.post as ReturnType<typeof vi.fn>).mock.calls[0]!;
-    const body = (callArgs[1] as { body: { contentType: string; content: string } }).body;
-    expect(body.contentType).toBe('HTML');
-    expect(body.content).toBe('<h1>rendered</h1>');
-  });
-
-  it('Scenario: replyToMessage forwards bodyHtml via opts', async () => {
+  it('Scenario: Provider honors ReplyOptions.bodyHtml', async () => {
     const client = createMockClient({
       post: vi.fn()
         .mockResolvedValueOnce({ id: 'draft-xyz' }) // createReplyAll
@@ -160,6 +145,35 @@ describe('provider-microsoft/Body Content Type', () => {
     const body = (patchCall[1] as { body: { contentType: string; content: string } }).body;
     expect(body.contentType).toBe('HTML');
     expect(body.content).toBe('<p>rendered reply</p>');
+  });
+
+  it('Scenario: createDraft and updateDraft honor bodyHtml', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    // createDraft
+    await provider.createDraft({
+      to: [{ email: 'alice@corp.com' }],
+      subject: 'Draft',
+      body: '# fallback',
+      bodyHtml: '<h1>rendered</h1>',
+    });
+
+    const createArgs = (client.post as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const createBody = (createArgs[1] as { body: { contentType: string; content: string } }).body;
+    expect(createBody.contentType).toBe('HTML');
+    expect(createBody.content).toBe('<h1>rendered</h1>');
+
+    // updateDraft
+    await provider.updateDraft('draft-1', {
+      body: '# fallback 2',
+      bodyHtml: '<h1>updated</h1>',
+    });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const updateBody = (patchArgs[1] as { body: { contentType: string; content: string } }).body;
+    expect(updateBody.contentType).toBe('HTML');
+    expect(updateBody.content).toBe('<h1>updated</h1>');
   });
 });
 

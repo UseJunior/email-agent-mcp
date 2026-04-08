@@ -271,22 +271,35 @@ describe('email-write/Update Draft', () => {
   });
 });
 
-describe('email-write/Draft Body Rendering', () => {
-  it('Scenario: create_draft renders markdown to HTML by default', async () => {
-    const result = await createDraftAction.run(ctx, {
+describe('email-write/Body Rendering', () => {
+  it('Scenario: create_draft and update_draft also render', async () => {
+    // create_draft renders markdown
+    const created = await createDraftAction.run(ctx, {
       to: 'alice@allowed.com',
       subject: 'Markdown Draft',
       body: '### Hi\n\n**bold**',
     });
 
-    expect(result.success).toBe(true);
-    const draft = [...provider.getDrafts().values()][0]!;
-    expect(draft.body).toContain('### Hi');
-    expect(draft.bodyHtml).toContain('<h3>Hi</h3>');
-    expect(draft.bodyHtml).toContain('<strong>bold</strong>');
+    expect(created.success).toBe(true);
+    const createdDraft = provider.getDrafts().get(created.draftId!)!;
+    expect(createdDraft.body).toContain('### Hi');
+    expect(createdDraft.bodyHtml).toContain('<h3>Hi</h3>');
+    expect(createdDraft.bodyHtml).toContain('<strong>bold</strong>');
+
+    // update_draft renders markdown
+    const updated = await updateDraftAction.run(ctx, {
+      draft_id: created.draftId!,
+      body: '## Updated',
+    });
+
+    expect(updated.success).toBe(true);
+    const updatedDraft = provider.getDrafts().get(created.draftId!)!;
+    expect(updatedDraft.body).toContain('## Updated');
+    expect(updatedDraft.bodyHtml).toContain('<h2>Updated</h2>');
   });
 
-  it('Scenario: create_draft format: text sends no bodyHtml', async () => {
+  // Non-spec regression: format: text also works on drafts
+  it('create_draft format: text sends no bodyHtml', async () => {
     const result = await createDraftAction.run(ctx, {
       to: 'alice@allowed.com',
       subject: 'Plain Draft',
@@ -298,23 +311,5 @@ describe('email-write/Draft Body Rendering', () => {
     const draft = [...provider.getDrafts().values()][0]!;
     expect(draft.body).toBe('### Not a header');
     expect(draft.bodyHtml).toBeUndefined();
-  });
-
-  it('Scenario: update_draft renders markdown to HTML by default', async () => {
-    const created = await createDraftAction.run(ctx, {
-      to: 'alice@allowed.com',
-      subject: 'Original',
-      body: 'Original',
-    });
-
-    const result = await updateDraftAction.run(ctx, {
-      draft_id: created.draftId!,
-      body: '## Updated',
-    });
-
-    expect(result.success).toBe(true);
-    const draft = provider.getDrafts().get(created.draftId!)!;
-    expect(draft.body).toContain('## Updated');
-    expect(draft.bodyHtml).toContain('<h2>Updated</h2>');
   });
 });
