@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
+import { deleteEmailAction } from '@usejunior/email-core';
 import {
   actionsToMcpTools,
   handleToolCall,
@@ -282,16 +283,50 @@ describe('mcp-transport/Scalar Coercion at Boundary', () => {
     expect(coerceArgsForZod(schema, { flag: false })).toEqual({ flag: false });
   });
 
-  it('Scenario: numeric strings → numbers; invalid strings pass through', () => {
+  it('Scenario: strict decimal/float strings → numbers; exotic shapes pass through', () => {
     const schema = z.object({ limit: z.number().optional() });
+    // Accepted: plain decimals, floats, zero, negatives.
     expect(coerceArgsForZod(schema, { limit: '3' })).toEqual({ limit: 3 });
     expect(coerceArgsForZod(schema, { limit: '3.14' })).toEqual({ limit: 3.14 });
     expect(coerceArgsForZod(schema, { limit: '0' })).toEqual({ limit: 0 });
-    // Non-numeric strings left alone — Zod will reject with its normal error.
+    expect(coerceArgsForZod(schema, { limit: '-5' })).toEqual({ limit: -5 });
+    expect(coerceArgsForZod(schema, { limit: '-3.14' })).toEqual({ limit: -3.14 });
+    // Rejected (passed through as-is): Zod will throw its own invalid_type.
+    // `Number()` would silently accept all of these, which is the footgun we
+    // are closing off.
     expect(coerceArgsForZod(schema, { limit: 'abc' })).toEqual({ limit: 'abc' });
     expect(coerceArgsForZod(schema, { limit: '' })).toEqual({ limit: '' });
+    expect(coerceArgsForZod(schema, { limit: '  3  ' })).toEqual({ limit: '  3  ' }); // whitespace
+    expect(coerceArgsForZod(schema, { limit: '0x10' })).toEqual({ limit: '0x10' });   // hex
+    expect(coerceArgsForZod(schema, { limit: '1e3' })).toEqual({ limit: '1e3' });     // scientific
+    expect(coerceArgsForZod(schema, { limit: 'Infinity' })).toEqual({ limit: 'Infinity' });
+    expect(coerceArgsForZod(schema, { limit: 'NaN' })).toEqual({ limit: 'NaN' });
+    expect(coerceArgsForZod(schema, { limit: '3.' })).toEqual({ limit: '3.' });       // trailing dot
+    expect(coerceArgsForZod(schema, { limit: '.5' })).toEqual({ limit: '.5' });       // leading dot
     // Already-typed numbers are untouched.
     expect(coerceArgsForZod(schema, { limit: 42 })).toEqual({ limit: 42 });
+  });
+
+  it('Scenario: .refine() wrappers preserve the inner type discriminator', () => {
+    // Zod v4 does not have ZodEffects — a refined number still reports
+    // type: 'number' so coercion works through .refine() without any extra
+    // unwrapping logic. Lock that in.
+    const schema = z.object({
+      n: z.number().refine(v => v > 0, 'must be positive'),
+      flag: z.boolean().refine(v => v === true, 'must be true'),
+    });
+    expect(coerceArgsForZod(schema, { n: '5', flag: 'true' })).toEqual({ n: 5, flag: true });
+  });
+
+  it('Scenario: .pipe()/.transform() fields are NOT descended into', () => {
+    // pipe/transform can change the accepted input type, so coercing through
+    // them would be ambiguous. Intentional non-goal — document by test.
+    const schema = z.object({
+      n: z.string().pipe(z.coerce.number()),
+    });
+    // 'n' is declared as `pipe`, not `number`, so we leave it alone and let
+    // the downstream parser handle it.
+    expect(coerceArgsForZod(schema, { n: '5' })).toEqual({ n: '5' });
   });
 
   it('Scenario: wrapped types (optional/default/nullable) still get coerced', () => {
@@ -356,46 +391,77 @@ describe('mcp-transport/Scalar Coercion at Boundary', () => {
     expect(parsed).toEqual({ flag: true, n: 42 });
   });
 
-  it('Scenario: SAFETY — user_explicitly_requested_deletion: "false" stays false', async () => {
-    // This is the reason we can't use z.coerce.boolean() — it turns 'false' into true
-    // because JS Boolean('false') === true. For delete_email, flipping false → true
-    // would silently enable destructive operations. Lock this behaviour in forever.
-    const deleteSchema = z.object({
-      id: z.string(),
-      user_explicitly_requested_deletion: z.boolean(),
-      hard_delete: z.boolean().optional().default(false),
-    });
+  it('Scenario: SAFETY — real deleteEmailAction rejects stringified "false"', async () => {
+    // The entire reason we do not use z.coerce.boolean() — it would turn
+    // 'false' into true because JS Boolean('false') === true, silently
+    // enabling destructive operations. This test wires the REAL
+    // deleteEmailAction from email-core through handleToolCall so a future
+    // refactor that bypasses coerceArgsForZod can't silently break the
+    // safety guarantee.
 
-    const coerced = coerceArgsForZod(deleteSchema, {
-      id: 'msg-1',
-      user_explicitly_requested_deletion: 'false',
-      hard_delete: 'false',
-    }) as { user_explicitly_requested_deletion: boolean; hard_delete: boolean };
+    const deleteMessage = vi.fn();
+    const fakeCtx = {
+      provider: { deleteMessage },
+      deleteEnabled: true, // bypass "deletion disabled" so we reach the auth check
+    };
 
-    expect(coerced.user_explicitly_requested_deletion).toBe(false);
-    expect(coerced.hard_delete).toBe(false);
-
-    // And end-to-end through handleToolCall: the run fn must receive false.
-    const seen: Array<{ user_explicitly_requested_deletion: boolean; hard_delete: boolean }> = [];
-    const deleteActions: EmailActionDef[] = [
+    // Wrap the real action as an EmailActionDef so handleToolCall can dispatch it.
+    const actions: EmailActionDef[] = [
       {
-        name: 'delete_email',
-        description: 'delete',
-        input: deleteSchema,
-        output: z.object({ success: z.boolean() }),
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        run: async (_ctx, input) => {
-          seen.push(input as never);
-          return { success: false };
-        },
+        name: deleteEmailAction.name,
+        description: deleteEmailAction.description,
+        input: deleteEmailAction.input,
+        output: deleteEmailAction.output,
+        annotations: deleteEmailAction.annotations,
+        run: (_ctx, input) => deleteEmailAction.run(fakeCtx as never, input as never),
       },
     ];
-    await handleToolCall(deleteActions, {}, 'delete_email', {
+
+    const result = await handleToolCall(actions, {}, 'delete_email', {
       id: 'msg-1',
-      user_explicitly_requested_deletion: 'false',
+      user_explicitly_requested_deletion: 'false', // wire format — string
       hard_delete: 'false',
     });
-    expect(seen[0]!.user_explicitly_requested_deletion).toBe(false);
-    expect(seen[0]!.hard_delete).toBe(false);
+
+    // Provider must NOT have been called. If 'false' had been flipped to
+    // true, checkDeletePolicy would pass and deleteMessage would run.
+    expect(deleteMessage).not.toHaveBeenCalled();
+
+    // The action should return a policy error indicating the missing consent.
+    const parsed = JSON.parse(result.content[0]!.text);
+    expect(parsed.success).toBe(false);
+    expect(parsed.error.message).toMatch(/user_explicitly_requested_deletion must be true/);
+  });
+
+  it('Scenario: SAFETY — real deleteEmailAction executes when "true" is passed', async () => {
+    // Complement to the regression above: if the caller explicitly sends
+    // 'true' as a string, coercion must flip it to `true` so the legitimate
+    // delete path still works end-to-end.
+    const deleteMessage = vi.fn();
+    const fakeCtx = {
+      provider: { deleteMessage },
+      deleteEnabled: true,
+    };
+
+    const actions: EmailActionDef[] = [
+      {
+        name: deleteEmailAction.name,
+        description: deleteEmailAction.description,
+        input: deleteEmailAction.input,
+        output: deleteEmailAction.output,
+        annotations: deleteEmailAction.annotations,
+        run: (_ctx, input) => deleteEmailAction.run(fakeCtx as never, input as never),
+      },
+    ];
+
+    const result = await handleToolCall(actions, {}, 'delete_email', {
+      id: 'msg-1',
+      user_explicitly_requested_deletion: 'true',
+      hard_delete: 'false',
+    });
+
+    expect(deleteMessage).toHaveBeenCalledWith('msg-1', false);
+    const parsed = JSON.parse(result.content[0]!.text);
+    expect(parsed.success).toBe(true);
   });
 });
