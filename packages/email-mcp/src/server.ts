@@ -76,23 +76,42 @@ export function actionsToMcpTools(actions: EmailActionDef[]): McpTool[] {
   }));
 }
 
+// Strict decimal/float regex for coercing numeric strings. Rejects hex
+// (`0x10`), scientific notation (`1e3`), `Infinity`, whitespace, and other
+// shapes that `Number()` silently accepts but which are unlikely to be
+// intended when an LLM emits a tool-call arg.
+const NUMERIC_STRING = /^-?\d+(?:\.\d+)?$/;
+
 /**
- * Unwrap Optional/Default/Nullable/Effects wrappers to reach the inner type.
- * We only need to peek at the type discriminator, not fully resolve it.
+ * Read the Zod v4 public type discriminator for a schema.
+ *
+ * Uses `.type` / `.def.type`, which are part of the stable `zod@^4` surface
+ * (see `node_modules/zod/v4/classic/schemas.d.ts` — `_def` is explicitly
+ * `@deprecated Use .def instead.`). Falls back through both for safety.
+ */
+function zodTypeId(schema: z.ZodType): string {
+  const s = schema as unknown as { type?: string; def?: { type?: string } };
+  return s.type ?? s.def?.type ?? '';
+}
+
+/**
+ * Unwrap Optional/Default/Nullable wrappers to reach the inner scalar type.
+ *
+ * Zod v4 no longer has `ZodEffects`; `.refine()` preserves the underlying
+ * type discriminator (a refined number still reports `type: 'number'`), and
+ * `.transform()` / `.pipe()` produce a `pipe` wrapper that we deliberately
+ * do not descend into — transforms can change the accepted input type and
+ * coercing through them would be ambiguous. The cycle guard (max 10 hops)
+ * is belt-and-suspenders; real schemas nest at most 2-3 levels.
  */
 function unwrapZodType(schema: z.ZodType): z.ZodType {
   let cur: z.ZodType = schema;
   for (let i = 0; i < 10; i++) {
-    const def = (cur as unknown as { _def: { type?: string; typeName?: string; innerType?: z.ZodType } })._def;
-    const id = def.type ?? def.typeName ?? '';
-    if (
-      (id === 'optional' || id === 'ZodOptional' ||
-       id === 'default'  || id === 'ZodDefault'  ||
-       id === 'nullable' || id === 'ZodNullable' ||
-       id === 'effects'  || id === 'ZodEffects')
-      && def.innerType
-    ) {
-      cur = def.innerType;
+    const id = zodTypeId(cur);
+    if (id === 'optional' || id === 'default' || id === 'nullable') {
+      const inner = (cur as unknown as { def?: { innerType?: z.ZodType } }).def?.innerType;
+      if (!inner) return cur;
+      cur = inner;
       continue;
     }
     return cur;
@@ -100,52 +119,63 @@ function unwrapZodType(schema: z.ZodType): z.ZodType {
   return cur;
 }
 
-function zodTypeId(schema: z.ZodType): string {
-  const def = (schema as unknown as { _def: { type?: string; typeName?: string } })._def;
-  return def.type ?? def.typeName ?? '';
-}
-
 /**
- * Coerce string-typed scalar args to their Zod-declared types.
+ * Coerce string-typed scalar args to their Zod-declared types at the MCP
+ * adapter boundary.
  *
- * Claude Code's XML parameter encoder sends scalars as strings when calling
- * MCP tools (e.g. `<parameter name="limit">3</parameter>` arrives as `"3"`).
- * This walks the top-level shape of an object schema and converts any
- * string-valued arg whose declared type is number or boolean.
+ * **Why this exists.** Claude Code's XML parameter encoder serializes scalar
+ * MCP tool args as strings on the wire (`<parameter name="limit">3</parameter>`
+ * arrives as `"3"`, not `3`). The strict `z.boolean()` / `z.number()` schemas
+ * in `email-core` reject these with `invalid_type`, so every tool call with a
+ * scalar arg would fail from inside a Claude Code session. The MCP spec does
+ * not prescribe coercion — servers are expected to handle their own wire
+ * format. We fix it at the adapter boundary so the reusable `email-core`
+ * schemas stay strict for other consumers.
  *
- * Booleans use explicit `'true'`/`'false'` matching rather than
- * `z.coerce.boolean` — the latter is unsafe because it uses JS `Boolean(v)`
- * semantics where any non-empty string is truthy, so `'false'` would become
- * `true` and silently corrupt delete/send intent.
+ * **Scope.** Walks the top-level shape of an object schema only. Nested
+ * objects, arrays, unions, and discriminated unions are intentionally NOT
+ * recursed into:
+ * - no current action has a nested boolean/number field
+ * - union coercion is ambiguous (`"3"` could satisfy either branch of a
+ *   `string | number` union)
+ * - transforms/pipes can change the accepted input type
  *
- * Only top-level properties are coerced. Nested objects/arrays are left
- * untouched; the Zod parser handles them or rejects them as-is.
+ * If a future action introduces a nested scalar field, extend the walker
+ * then — don't speculatively add complexity.
+ *
+ * **Boolean safety.** Explicit `'true'`/`'false'` matching, NOT
+ * `z.coerce.boolean`. The latter uses JS `Boolean(v)` semantics where any
+ * non-empty string is truthy, so `z.coerce.boolean().parse('false') === true`
+ * — which would silently flip destructive flags like
+ * `delete_email.user_explicitly_requested_deletion`. This is enforced by the
+ * safety regression test in `server.test.ts`.
+ *
+ * **Number safety.** Uses a strict decimal/float regex (`NUMERIC_STRING`)
+ * instead of `Number(v) + isFinite`. The former rejects `"0x10"`, `"1e3"`,
+ * `"  3  "`, `"Infinity"`, and other shapes that `Number()` accepts but
+ * which are unlikely to be intended by an LLM emitting a tool arg.
  */
 export function coerceArgsForZod(schema: z.ZodType, args: unknown): unknown {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return args;
   const shapeRoot = unwrapZodType(schema);
-  const rootId = zodTypeId(shapeRoot);
-  if (rootId !== 'object' && rootId !== 'ZodObject') return args;
+  if (zodTypeId(shapeRoot) !== 'object') return args;
 
-  const def = (shapeRoot as unknown as { _def: { shape?: Record<string, z.ZodType> | (() => Record<string, z.ZodType>) } })._def;
-  const shape = typeof def.shape === 'function' ? def.shape() : (def.shape ?? {});
+  // ZodObject exposes a public `.shape` accessor on the schema itself
+  // (plain object, not a function) in Zod v4.
+  const shape = (shapeRoot as unknown as { shape?: Record<string, z.ZodType> }).shape ?? {};
   const out: Record<string, unknown> = { ...(args as Record<string, unknown>) };
 
   for (const [key, fieldSchema] of Object.entries(shape)) {
     const v = out[key];
     if (typeof v !== 'string') continue;
-    const inner = unwrapZodType(fieldSchema as z.ZodType);
-    const id = zodTypeId(inner);
-    if (id === 'boolean' || id === 'ZodBoolean') {
+    const id = zodTypeId(unwrapZodType(fieldSchema));
+    if (id === 'boolean') {
       if (v === 'true') out[key] = true;
       else if (v === 'false') out[key] = false;
       // else leave as string — Zod will produce its normal error
-    } else if (id === 'number' || id === 'ZodNumber') {
-      if (v.trim() !== '') {
-        const n = Number(v);
-        if (Number.isFinite(n)) out[key] = n;
-        // else leave as string — Zod will reject
-      }
+    } else if (id === 'number') {
+      if (NUMERIC_STRING.test(v)) out[key] = Number(v);
+      // else leave as string — Zod will reject with its normal error
     }
   }
   return out;
