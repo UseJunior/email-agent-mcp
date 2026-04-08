@@ -205,78 +205,23 @@ export async function handleToolCall(
 }
 
 /**
- * Convert a Zod schema to JSON Schema (simplified).
- * Uses Zod v4's built-in JSON Schema generation when available.
+ * Convert a Zod schema to JSON Schema for MCP `tools/list`.
+ *
+ * Uses Zod v4's first-party `z.toJSONSchema` with `io: 'input'`. Input mode
+ * is the semantically correct one for tool input schemas: fields with
+ * defaults are not marked required (because the client may omit them), and
+ * the emitted shape describes what the client sends, not what the parser
+ * produces.
+ *
+ * Historical note: this used to feature-detect a misspelled `toJsonSchema`
+ * (lowercase `s`), which never existed in Zod v4. The primary path
+ * silently fell through to a hand-rolled generator that returned `{}` for
+ * `ZodUnion`, which is why `send_email.to` (a `string | string[]` union)
+ * previously emitted `{}` in `tools/list` and some MCP clients couldn't
+ * validate calls to it. Fixed by calling the real API directly.
  */
 function zodToJsonSchema(schema: z.ZodType): Record<string, unknown> {
-  try {
-    // Try Zod v4 built-in toJsonSchema
-    if ('toJsonSchema' in z && typeof (z as unknown as { toJsonSchema: (s: z.ZodType) => Record<string, unknown> }).toJsonSchema === 'function') {
-      return (z as unknown as { toJsonSchema: (s: z.ZodType) => Record<string, unknown> }).toJsonSchema(schema);
-    }
-  } catch {
-    // Fall through to manual generation
-  }
-
-  // Manual JSON Schema generation for common patterns
-  return generateJsonSchema(schema);
-}
-
-function generateJsonSchema(schema: z.ZodType): Record<string, unknown> {
-  // Zod v4 uses `_def.type` as a string discriminator and `_def.shape` as a plain object
-  const def = schema._def as {
-    type?: string;
-    typeName?: string;
-    shape?: Record<string, z.ZodType> | (() => Record<string, z.ZodType>);
-    innerType?: z.ZodType;
-    defaultValue?: () => unknown;
-  };
-
-  const typeId = def.type ?? def.typeName ?? '';
-
-  switch (typeId) {
-    case 'string':
-    case 'ZodString':
-      return { type: 'string' };
-    case 'number':
-    case 'ZodNumber':
-      return { type: 'number' };
-    case 'boolean':
-    case 'ZodBoolean':
-      return { type: 'boolean' };
-    case 'array':
-    case 'ZodArray': {
-      const itemType = def.innerType ?? (def as { element?: z.ZodType }).element;
-      return { type: 'array', items: itemType ? generateJsonSchema(itemType) : {} };
-    }
-    case 'object':
-    case 'ZodObject': {
-      const shape = typeof def.shape === 'function' ? def.shape() : (def.shape ?? {});
-      const properties: Record<string, unknown> = {};
-      const required: string[] = [];
-      for (const [key, value] of Object.entries(shape)) {
-        const propDef = (value as z.ZodType)._def as { type?: string; typeName?: string };
-        const propType = propDef.type ?? propDef.typeName ?? '';
-        properties[key] = generateJsonSchema(value as z.ZodType);
-        if (propType !== 'optional' && propType !== 'ZodOptional' &&
-            propType !== 'default' && propType !== 'ZodDefault') {
-          required.push(key);
-        }
-      }
-      return { type: 'object', properties, ...(required.length > 0 ? { required } : {}) };
-    }
-    case 'optional':
-    case 'ZodOptional':
-      return def.innerType ? generateJsonSchema(def.innerType) : {};
-    case 'default':
-    case 'ZodDefault':
-      return def.innerType ? generateJsonSchema(def.innerType) : {};
-    case 'nullable':
-    case 'ZodNullable':
-      return def.innerType ? { ...generateJsonSchema(def.innerType), nullable: true } : {};
-    default:
-      return {};
-  }
+  return z.toJSONSchema(schema, { io: 'input' }) as Record<string, unknown>;
 }
 
 /**
