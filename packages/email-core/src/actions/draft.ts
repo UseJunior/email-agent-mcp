@@ -3,8 +3,15 @@ import { z } from 'zod';
 import type { EmailAction } from './registry.js';
 import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { checkReplyThreading } from '../security/reply-validation.js';
-import { ProviderError, withRetry } from '../providers/provider.js';
-import { resolveBodyFile, truncateBody, BODY_SIZE_LIMIT } from '../content/body-loader.js';
+import { withRetry } from '../providers/provider.js';
+import { truncateBody, BODY_SIZE_LIMIT } from '../content/body-loader.js';
+import {
+  checkMailboxRequired,
+  resolveComposeFields,
+  validateRequiredFields,
+  checkRateLimit,
+  handleProviderError,
+} from './compose-helpers.js';
 
 // --- Shared schemas ---
 
@@ -41,71 +48,32 @@ export const createDraftAction: EmailAction<
   annotations: { readOnlyHint: false, destructiveHint: false },
   run: async (ctx, input) => {
     // Check mailbox requirement
-    if (!input.mailbox && ctx.allMailboxes && ctx.allMailboxes.length > 1) {
-      return {
-        success: false,
-        error: { code: 'MAILBOX_REQUIRED', message: 'mailbox parameter required when multiple mailboxes are configured', recoverable: false },
-      };
+    const mailboxError = checkMailboxRequired(input.mailbox, ctx.allMailboxes);
+    if (mailboxError) {
+      return { success: false, error: mailboxError };
     }
 
     // Resolve body and frontmatter
-    let body: string;
-    let to = input.to;
-    let cc = input.cc;
-    let subject = input.subject;
-    let replyTo = input.reply_to;
-
-    if (input.body_file) {
-      const bodyResult = await resolveBodyFile(input.body_file, ctx.safeDir);
-      if (bodyResult.error) {
-        return { success: false, error: bodyResult.error };
-      }
-      body = bodyResult.content!;
-
-      // Frontmatter is authoritative
-      if (bodyResult.frontmatter) {
-        const fm = bodyResult.frontmatter;
-        if (fm.to !== undefined) to = fm.to;
-        if (fm.cc !== undefined) cc = Array.isArray(fm.cc) ? fm.cc : [fm.cc];
-        if (fm.subject !== undefined) subject = fm.subject;
-        if (fm.reply_to !== undefined) replyTo = fm.reply_to;
-      }
-    } else if (input.body) {
-      body = input.body;
-    } else {
-      return {
-        success: false,
-        error: { code: 'MISSING_BODY', message: 'Either body or body_file is required', recoverable: false },
-      };
+    const fields = await resolveComposeFields(input, ctx.safeDir);
+    if (fields.error) {
+      return { success: false, error: fields.error };
     }
+
+    const { to, cc, subject, replyTo } = fields;
+    let { body } = fields;
 
     // Validate required fields
-    if (!to) {
-      return {
-        success: false,
-        error: { code: 'MISSING_FIELD', message: 'to is required — provide it as a parameter or in body_file frontmatter', recoverable: false },
-      };
-    }
-    if (!subject) {
-      return {
-        success: false,
-        error: { code: 'MISSING_FIELD', message: 'subject is required — provide it as a parameter or in body_file frontmatter', recoverable: false },
-      };
+    const requiredError = validateRequiredFields(to, subject);
+    if (requiredError) {
+      return { success: false, error: requiredError };
     }
 
-    const recipients = Array.isArray(to) ? to : [to];
+    const recipients = Array.isArray(to) ? to : [to!];
 
-    // Check allowlist
-    const allowlistError = checkSendAllowlist(recipients, ctx.sendAllowlist);
-    if (allowlistError) {
-      return {
-        success: false,
-        error: { code: 'ALLOWLIST_BLOCKED', message: allowlistError, recoverable: false },
-      };
-    }
+    // Drafts bypass allowlist — enforcement happens at send_draft time
 
     // Re: threading guardrail
-    const threadingError = checkReplyThreading(subject, replyTo);
+    const threadingError = checkReplyThreading(subject!, replyTo);
     if (threadingError) {
       return { success: false, error: threadingError };
     }
@@ -142,7 +110,7 @@ export const createDraftAction: EmailAction<
       const result = await ctx.provider.createDraft({
         to: recipients.map(email => ({ email })),
         cc: cc?.map(email => ({ email })),
-        subject,
+        subject: subject!,
         body,
       });
       return {
@@ -178,32 +146,55 @@ export const sendDraftAction: EmailAction<
   z.infer<typeof SendDraftOutput>
 > = {
   name: 'send_draft',
-  description: 'Send a previously created draft. Rate-limited.',
+  description: 'Send a previously created draft. Enforces send allowlist before sending. Rate-limited.',
   input: SendDraftInput,
   output: SendDraftOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
   run: async (ctx, input) => {
     // Check mailbox requirement
-    if (!input.mailbox && ctx.allMailboxes && ctx.allMailboxes.length > 1) {
+    const mailboxError = checkMailboxRequired(input.mailbox, ctx.allMailboxes);
+    if (mailboxError) {
+      return { success: false, error: mailboxError };
+    }
+
+    // Fetch draft to check recipients against allowlist (fail closed)
+    let draftMessage;
+    try {
+      draftMessage = await ctx.provider.getMessage(input.draft_id);
+    } catch (err) {
       return {
         success: false,
-        error: { code: 'MAILBOX_REQUIRED', message: 'mailbox parameter required when multiple mailboxes are configured', recoverable: false },
+        error: {
+          code: 'DRAFT_LOOKUP_FAILED',
+          message: `Cannot verify draft recipients before sending: ${err instanceof Error ? err.message : String(err)}`,
+          recoverable: false,
+        },
+      };
+    }
+
+    const recipients = [
+      ...(draftMessage.to?.map(a => a.email) ?? []),
+      ...(draftMessage.cc?.map(a => a.email) ?? []),
+    ];
+    if (recipients.length === 0) {
+      return {
+        success: false,
+        error: { code: 'NO_RECIPIENTS', message: 'Draft has no recipients', recoverable: false },
+      };
+    }
+
+    const allowlistError = checkSendAllowlist(recipients, ctx.sendAllowlist);
+    if (allowlistError) {
+      return {
+        success: false,
+        error: { code: 'ALLOWLIST_BLOCKED', message: allowlistError, recoverable: false },
       };
     }
 
     // Check rate limit
-    if (ctx.rateLimiter) {
-      const rateCheck = ctx.rateLimiter.checkLimit('send_draft');
-      if (!rateCheck.allowed) {
-        return {
-          success: false,
-          error: {
-            code: 'RATE_LIMITED',
-            message: `Send rate limit exceeded. Retry after ${rateCheck.retryAfter}s`,
-            recoverable: true,
-          },
-        };
-      }
+    const rateLimitError = checkRateLimit(ctx.rateLimiter, 'send_draft');
+    if (rateLimitError) {
+      return rateLimitError;
     }
 
     try {
@@ -244,17 +235,15 @@ export const updateDraftAction: EmailAction<
   z.infer<typeof DraftOutput>
 > = {
   name: 'update_draft',
-  description: 'Update a draft email. Re-checks allowlist if recipients change.',
+  description: 'Update a draft email. Allowlist is enforced at send_draft time, not here.',
   input: UpdateDraftInput,
   output: DraftOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
   run: async (ctx, input) => {
     // Check mailbox requirement
-    if (!input.mailbox && ctx.allMailboxes && ctx.allMailboxes.length > 1) {
-      return {
-        success: false,
-        error: { code: 'MAILBOX_REQUIRED', message: 'mailbox parameter required when multiple mailboxes are configured', recoverable: false },
-      };
+    const mailboxError = checkMailboxRequired(input.mailbox, ctx.allMailboxes);
+    if (mailboxError) {
+      return { success: false, error: mailboxError };
     }
 
     // Check provider supports updateDraft
@@ -265,39 +254,16 @@ export const updateDraftAction: EmailAction<
       };
     }
 
-    // Resolve body from file if provided
-    let body = input.body;
-    let to = input.to;
-    let cc = input.cc;
-    let subject = input.subject;
-
-    if (input.body_file) {
-      const bodyResult = await resolveBodyFile(input.body_file, ctx.safeDir);
-      if (bodyResult.error) {
-        return { success: false, error: bodyResult.error };
-      }
-      body = bodyResult.content!;
-
-      // Frontmatter is authoritative
-      if (bodyResult.frontmatter) {
-        const fm = bodyResult.frontmatter;
-        if (fm.to !== undefined) to = fm.to;
-        if (fm.cc !== undefined) cc = Array.isArray(fm.cc) ? fm.cc : [fm.cc];
-        if (fm.subject !== undefined) subject = fm.subject;
-      }
+    // Resolve body from file if provided (body is optional for updates)
+    const fields = await resolveComposeFields(input, ctx.safeDir, { bodyOptional: true });
+    if (fields.error) {
+      return { success: false, error: fields.error };
     }
 
-    // Re-check allowlist if recipients changed
-    if (to) {
-      const recipients = Array.isArray(to) ? to : [to];
-      const allowlistError = checkSendAllowlist(recipients, ctx.sendAllowlist);
-      if (allowlistError) {
-        return {
-          success: false,
-          error: { code: 'ALLOWLIST_BLOCKED', message: allowlistError, recoverable: false },
-        };
-      }
-    }
+    const { to, cc, subject } = fields;
+    let { body } = fields;
+
+    // Drafts bypass allowlist — enforcement happens at send_draft time
 
     // Re: threading guardrail on subject if changed
     if (subject) {
@@ -334,22 +300,3 @@ export const updateDraftAction: EmailAction<
     }
   },
 };
-
-// --- Shared error handler ---
-
-function handleProviderError(err: unknown, fallbackCode: string) {
-  if (err instanceof ProviderError) {
-    return {
-      success: false as const,
-      error: { code: err.code, message: err.message, recoverable: err.recoverable },
-    };
-  }
-  return {
-    success: false as const,
-    error: {
-      code: fallbackCode,
-      message: err instanceof Error ? err.message : String(err),
-      recoverable: false,
-    },
-  };
-}

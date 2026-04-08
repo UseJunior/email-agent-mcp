@@ -34,15 +34,16 @@ describe('email-write/Create Draft', () => {
     expect(provider.getDrafts().size).toBe(1);
   });
 
-  it('Scenario: Create draft blocked by allowlist', async () => {
+  it('Scenario: Create draft to blocked recipient succeeds (drafts bypass allowlist)', async () => {
     const result = await createDraftAction.run(ctx, {
       to: 'alice@blocked.com',
       subject: 'Blocked Draft',
       body: 'Draft body',
     });
 
-    expect(result.success).toBe(false);
-    expect(result.error!.code).toBe('ALLOWLIST_BLOCKED');
+    expect(result.success).toBe(true);
+    expect(result.draftId).toBeDefined();
+    expect(provider.getDrafts().size).toBe(1);
   });
 
   it('Scenario: Create draft from body_file with frontmatter', async () => {
@@ -190,6 +191,34 @@ describe('email-write/Send Draft', () => {
     expect(result.success).toBe(false);
     expect(result.error!.code).toBe('RATE_LIMITED');
   });
+
+  it('Scenario: send_draft with blocked recipient is blocked by allowlist', async () => {
+    // Create a draft to a blocked recipient (succeeds — drafts bypass allowlist)
+    const draftResult = await createDraftAction.run(ctx, {
+      to: 'hacker@evil.com',
+      subject: 'Blocked at send time',
+      body: 'Body',
+    });
+    expect(draftResult.success).toBe(true);
+
+    // Attempt to send — blocked by allowlist enforcement
+    const result = await sendDraftAction.run(ctx, {
+      draft_id: draftResult.draftId!,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('ALLOWLIST_BLOCKED');
+  });
+
+  it('Scenario: send_draft when draft lookup fails is blocked (fail closed)', async () => {
+    // Use a draft_id that doesn't exist in drafts or messages
+    const result = await sendDraftAction.run(ctx, {
+      draft_id: 'nonexistent-draft-id',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('DRAFT_LOOKUP_FAILED');
+  });
 });
 
 describe('email-write/Update Draft', () => {
@@ -211,7 +240,7 @@ describe('email-write/Update Draft', () => {
     expect(draft.body).toBe('Updated body');
   });
 
-  it('Scenario: Update draft recipients re-checks allowlist', async () => {
+  it('Scenario: Update draft recipients to blocked address succeeds (drafts bypass allowlist)', async () => {
     const draftResult = await createDraftAction.run(ctx, {
       to: 'alice@allowed.com',
       subject: 'Test',
@@ -223,8 +252,10 @@ describe('email-write/Update Draft', () => {
       to: 'hacker@evil.com',
     });
 
-    expect(result.success).toBe(false);
-    expect(result.error!.code).toBe('ALLOWLIST_BLOCKED');
+    expect(result.success).toBe(true);
+    const drafts = provider.getDrafts();
+    const draft = drafts.get(draftResult.draftId!)!;
+    expect(draft.to[0]!.email).toBe('hacker@evil.com');
   });
 
   it('Scenario: Provider lacks updateDraft', async () => {

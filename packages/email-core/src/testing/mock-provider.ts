@@ -99,10 +99,27 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
   async getMessage(id: string): Promise<EmailMessage> {
     this.maybeThrow();
     const msg = this.messages.find(m => m.id === id);
-    if (!msg) {
-      throw new Error(`Message not found: ${id}`);
+    if (msg) {
+      return { ...msg };
     }
-    return { ...msg };
+
+    // Fall back to drafts — allows send_draft to look up draft recipients
+    const draft = this.drafts.get(id);
+    if (draft) {
+      return {
+        id,
+        subject: draft.subject,
+        from: { email: 'me@company.com' },
+        to: draft.to,
+        cc: draft.cc,
+        receivedAt: new Date().toISOString(),
+        isRead: true,
+        hasAttachments: false,
+        body: draft.body,
+      };
+    }
+
+    throw new Error(`Message not found: ${id}`);
   }
 
   async searchMessages(query: string, _folder?: string, limit?: number, offset?: number): Promise<EmailMessage[]> {

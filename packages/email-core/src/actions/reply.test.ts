@@ -91,6 +91,30 @@ describe('email-write/Reply Draft', () => {
     expect(provider.getSentMessages()).toHaveLength(0);
   });
 
+  it('Scenario: Reply draft to blocked recipient succeeds (drafts bypass allowlist)', async () => {
+    const blockedMsgId = 'blocked_msg_1234567890ab';
+    provider.addMessage({
+      id: blockedMsgId,
+      subject: 'From blocked sender',
+      from: { email: 'hacker@evil.com' },
+      to: [{ email: 'me@company.com' }],
+      receivedAt: '2024-03-15T10:00:00Z',
+      isRead: false,
+      hasAttachments: false,
+    });
+
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: blockedMsgId,
+      body: 'Draft reply to blocked sender',
+      draft: true,
+    });
+
+    // Draft bypasses allowlist — succeeds
+    expect(result.success).toBe(true);
+    expect(result.draftId).toBeDefined();
+    expect(provider.getSentMessages()).toHaveLength(0);
+  });
+
   it('Scenario: Reply draft when provider lacks createReplyDraft', async () => {
     (provider as Record<string, unknown>).createReplyDraft = undefined;
 

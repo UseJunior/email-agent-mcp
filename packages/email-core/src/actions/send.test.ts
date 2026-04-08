@@ -260,6 +260,20 @@ describe('email-write/Draft Workflow', () => {
     const sendResult = await provider.sendDraft(draftResult.draftId!);
     expect(sendResult.success).toBe(true);
   });
+
+  it('Scenario: send_email with draft: true to blocked recipient succeeds (drafts bypass allowlist)', async () => {
+    const result = await sendEmailAction.run(ctx, {
+      to: 'hacker@evil.com',
+      subject: 'Draft to blocked',
+      body: 'Body',
+      draft: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.draftId).toBeDefined();
+    expect(provider.getSentMessages()).toHaveLength(0);
+    expect(provider.getDrafts().size).toBe(1);
+  });
 });
 
 describe('email-write/Delivery Failure Handling', () => {
