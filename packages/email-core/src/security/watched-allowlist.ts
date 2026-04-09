@@ -16,6 +16,7 @@ export class WatchedAllowlist {
     private readonly filePath: string,
     private readonly loader: (path: string) => Promise<AllowlistConfig | undefined>,
     private readonly debounceMs = 150,
+    private readonly watchFactory: typeof watch = watch,
   ) {}
 
   /** Current allowlist config. undefined if file doesn't exist or hasn't been loaded. */
@@ -43,18 +44,18 @@ export class WatchedAllowlist {
 
     // 2. Arm the watch BEFORE loading — eliminates the startup race window
     try {
-      this._watcher = watch(dir, (_event, filename) => {
+      this._watcher = this.watchFactory(dir, (_event, filename) => {
         // filename can be null on some platforms — treat as possible target change
         if (!filename || filename === name) {
           this.scheduleReload();
         }
       });
       this._watcher.on('error', (err) => {
-        console.error(`[email-agent-mcp] Allowlist watcher error for ${this.filePath}: ${err.message}`);
+        this.disableWatching(err);
       });
       this._watcher.unref();
     } catch (err) {
-      console.error(`[email-agent-mcp] Cannot watch allowlist directory ${dir}: ${err instanceof Error ? err.message : err}`);
+      this.disableWatching(err);
     }
 
     // 3. Load initial config AFTER watch is armed
@@ -98,5 +99,20 @@ export class WatchedAllowlist {
     } catch {
       // Keep previous config on unexpected error
     }
+  }
+
+  private disableWatching(err: unknown): void {
+    const message = err instanceof Error ? err.message : String(err);
+    if (this._watcher) {
+      try {
+        this._watcher.close();
+      } catch {
+        // Best-effort cleanup on watcher failure.
+      }
+      this._watcher = undefined;
+    }
+    console.error(
+      `[email-agent-mcp] Allowlist watcher disabled for ${this.filePath}: ${message}. Continuing without hot reload.`,
+    );
   }
 }

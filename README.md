@@ -15,7 +15,7 @@
 
 **email-agent-mcp** by [UseJunior](https://usejunior.com) -- local email connectivity for AI agents.
 
-Agent Email is an open-source TypeScript MCP server that lets Claude Code, Cursor, Gemini CLI, OpenClaw, and other MCP-compatible runtimes read email, search threads, draft replies, label messages, change read state, move messages, and send mail through your own mailbox. Microsoft 365 / Outlook is supported today; Gmail wiring is in progress. Security-first defaults mean agents cannot send email until you explicitly configure an allowlist.
+Agent Email is an open-source TypeScript MCP server that lets Claude Code, Cursor, Gemini CLI, OpenClaw, and other MCP-compatible runtimes read email, search threads, draft replies, label messages, change read state, move messages, and send mail through your own mailbox. Microsoft 365 / Outlook and Gmail are supported today. Security-first defaults mean agents cannot send email until you explicitly configure an allowlist.
 
 ## Quick Start
 
@@ -167,9 +167,9 @@ Agent Email exposes 15 MCP tools:
 | Provider | Status | Package |
 |----------|--------|---------|
 | Microsoft 365 (Graph API) | Fully supported | `@usejunior/provider-microsoft` |
-| Gmail | Coming soon | `@usejunior/provider-gmail` |
+| Gmail | Supported via interactive CLI OAuth or manual refresh-token setup | `@usejunior/provider-gmail` |
 
-The Gmail provider package exists with full test coverage. Wiring into the MCP server is in progress.
+Use `email-agent-mcp configure --provider gmail` to run the local browser OAuth flow, or add a manual mailbox token file under `~/.email-agent-mcp/tokens/`. See [packages/provider-gmail/README.md](./packages/provider-gmail/README.md).
 
 ## Security Defaults
 

@@ -12,6 +12,23 @@ export interface LazyProviderAuth {
   tryReconnect: () => Promise<boolean>;
 }
 
+export interface LazyMailboxState {
+  name: string;
+  emailAddress?: string;
+  displayName: string;
+  providerType: 'microsoft' | 'gmail';
+  provider: EmailProvider | null;
+  auth: LazyProviderAuth | null;
+  isDefault: boolean;
+  status: 'connected' | 'error';
+  error?: string;
+}
+
+interface ConnectedLazyMailboxState extends LazyMailboxState {
+  provider: EmailProvider;
+  status: 'connected';
+}
+
 export interface LazyProviderState {
   provider: EmailProvider | null;
   auth: LazyProviderAuth | null;
@@ -22,6 +39,8 @@ export interface LazyProviderState {
   status: 'pending' | 'connecting' | 'connected' | 'not_configured' | 'error';
   /** Human-readable display name of the connected mailbox, if any. */
   connectedMailbox: string | null;
+  connectedProvider: 'microsoft' | 'gmail' | null;
+  mailboxes: LazyMailboxState[];
 }
 
 /** Create a fresh lazy state. */
@@ -34,11 +53,18 @@ export function createLazyProviderState(): LazyProviderState {
     isDemo: false,
     status: 'pending',
     connectedMailbox: null,
+    connectedProvider: null,
+    mailboxes: [],
   };
 }
 
 const require = createRequire(import.meta.url);
 const { version: PACKAGE_VERSION } = require('../package.json') as { version: string };
+
+const MANUAL_GMAIL_SETUP_HINT =
+  'or add a Gmail mailbox JSON file under ~/.email-agent-mcp/tokens/. See packages/provider-gmail/README.md';
+const NO_MAILBOX_CONFIGURED_MESSAGE =
+  `No mailbox configured — run: email-agent-mcp configure --mailbox <name> --provider microsoft ${MANUAL_GMAIL_SETUP_HINT}`;
 
 // Re-export types for the action registry
 export interface McpTool {
@@ -257,12 +283,108 @@ export async function waitForInit(state: LazyProviderState): Promise<void> {
  */
 export async function ensureProvider(state: LazyProviderState): Promise<void> {
   await waitForInit(state);
-  if (!state.provider) {
+  if (!getDefaultMailbox(state)) {
+    throw new Error(state.error ?? NO_MAILBOX_CONFIGURED_MESSAGE);
+  }
+}
+
+interface ResolvedMailboxContext {
+  mailbox: ConnectedLazyMailboxState;
+  allMailboxes: Array<{
+    name: string;
+    emailAddress?: string;
+    provider: EmailProvider;
+    providerType: string;
+    isDefault: boolean;
+    status: 'connected';
+  }>;
+}
+
+function normalizeMailboxKey(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function fallbackConnectedMailbox(state: LazyProviderState): LazyMailboxState[] {
+  if (!state.provider) return [];
+  return [
+    {
+      name: state.connectedMailbox ?? 'default',
+      emailAddress: state.connectedMailbox ?? undefined,
+      displayName: state.connectedMailbox ?? 'default',
+      providerType: state.connectedProvider ?? 'microsoft',
+      provider: state.provider,
+      auth: state.auth,
+      isDefault: true,
+      status: 'connected',
+    },
+  ];
+}
+
+function getKnownMailboxes(state: LazyProviderState): LazyMailboxState[] {
+  return state.mailboxes.length > 0 ? state.mailboxes : fallbackConnectedMailbox(state);
+}
+
+function isConnectedMailbox(mailbox: LazyMailboxState): mailbox is ConnectedLazyMailboxState {
+  return mailbox.status === 'connected' && mailbox.provider !== null;
+}
+
+function getConnectedMailboxes(state: LazyProviderState): ConnectedLazyMailboxState[] {
+  return getKnownMailboxes(state).filter(isConnectedMailbox);
+}
+
+function getDefaultMailbox(state: LazyProviderState): ConnectedLazyMailboxState | null {
+  const connected = getConnectedMailboxes(state);
+  return connected.find(mailbox => mailbox.isDefault) ?? connected[0] ?? null;
+}
+
+function findKnownMailbox(state: LazyProviderState, mailboxName: string): LazyMailboxState | null {
+  const target = normalizeMailboxKey(mailboxName);
+  return (
+    getKnownMailboxes(state).find(mailbox =>
+      normalizeMailboxKey(mailbox.name) === target ||
+      normalizeMailboxKey(mailbox.displayName) === target ||
+      (mailbox.emailAddress ? normalizeMailboxKey(mailbox.emailAddress) === target : false),
+    ) ?? null
+  );
+}
+
+function describeConfiguredMailboxes(state: LazyProviderState): string {
+  const names = getKnownMailboxes(state).map(mailbox => mailbox.emailAddress ?? mailbox.name);
+  return names.length > 0 ? names.join(', ') : 'none';
+}
+
+function resolveMailboxContext(
+  state: LazyProviderState,
+  requestedMailbox?: string,
+): ResolvedMailboxContext {
+  const connectedMailboxes = getConnectedMailboxes(state);
+  if (connectedMailboxes.length === 0) {
+    throw new Error(state.error ?? NO_MAILBOX_CONFIGURED_MESSAGE);
+  }
+
+  const mailbox = requestedMailbox ? findKnownMailbox(state, requestedMailbox) : getDefaultMailbox(state);
+
+  if (!mailbox) {
     throw new Error(
-      state.error ??
-        'No mailbox configured — run: email-agent-mcp configure --mailbox <name> --provider microsoft',
+      `Mailbox "${requestedMailbox}" is not configured. Available mailboxes: ${describeConfiguredMailboxes(state)}`,
     );
   }
+
+  if (!isConnectedMailbox(mailbox)) {
+    throw new Error(mailbox.error ?? `Mailbox "${requestedMailbox ?? mailbox.name}" is not connected`);
+  }
+
+  return {
+    mailbox,
+    allMailboxes: connectedMailboxes.map(connected => ({
+      name: connected.name,
+      emailAddress: connected.emailAddress,
+      provider: connected.provider,
+      providerType: connected.providerType,
+      isDefault: connected.isDefault,
+      status: 'connected' as const,
+    })),
+  };
 }
 
 /**
@@ -272,19 +394,29 @@ export async function ensureProvider(state: LazyProviderState): Promise<void> {
  */
 export async function initProvider(state: LazyProviderState): Promise<void> {
   try {
-    const { listConfiguredMailboxesWithMetadata, DelegatedAuthManager, RealGraphApiClient, GraphEmailProvider } =
-      await import('@usejunior/provider-microsoft');
-    const allMailboxes = await listConfiguredMailboxesWithMetadata();
+    const [
+      { listConfiguredMailboxesWithMetadata, DelegatedAuthManager, RealGraphApiClient, GraphEmailProvider },
+      { listConfiguredGmailMailboxes, GmailAuthManager, GmailEmailProvider, GoogleapisGmailClient },
+    ] = await Promise.all([
+      import('@usejunior/provider-microsoft'),
+      import('@usejunior/provider-gmail'),
+    ]);
+    const microsoftMailboxes = await listConfiguredMailboxesWithMetadata();
+    const gmailMailboxes = await listConfiguredGmailMailboxes();
 
-    if (allMailboxes.length === 0) {
+    if (microsoftMailboxes.length === 0 && gmailMailboxes.length === 0) {
       state.isDemo = true;
       state.status = 'not_configured';
+      state.mailboxes = [];
       console.error('[email-agent-mcp] No configured mailboxes — running in demo mode');
-      console.error('[email-agent-mcp] Run: email-agent-mcp configure --mailbox <name> --provider microsoft');
+      console.error(`[email-agent-mcp] ${NO_MAILBOX_CONFIGURED_MESSAGE}`);
       return;
     }
 
-    for (const metadata of allMailboxes) {
+    const connectedMailboxes: LazyMailboxState[] = [];
+    const failedMailboxes: LazyMailboxState[] = [];
+
+    for (const metadata of microsoftMailboxes) {
       const displayName = metadata.emailAddress ?? metadata.mailboxName;
       try {
         const auth = new DelegatedAuthManager(
@@ -295,23 +427,99 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
         const client = new RealGraphApiClient(() => auth.getAccessToken(), () => auth.tryReconnect());
         const provider = new GraphEmailProvider(client);
 
-        state.provider = provider;
-        state.auth = {
+        const mailboxAuth = {
           getTokenHealthWarning: () => auth.getTokenHealthWarning(),
           tryReconnect: () => auth.tryReconnect(),
         };
-        state.connectedMailbox = displayName;
-        state.status = 'connected';
+
+        connectedMailboxes.push({
+          name: metadata.mailboxName,
+          emailAddress: metadata.emailAddress,
+          displayName,
+          providerType: 'microsoft',
+          provider,
+          auth: mailboxAuth,
+          isDefault: false,
+          status: 'connected',
+        });
+
         console.error(`[email-agent-mcp] Connected to mailbox "${displayName}" (${metadata.clientId})`);
-        return;
       } catch (err) {
+        failedMailboxes.push({
+          name: metadata.mailboxName,
+          emailAddress: metadata.emailAddress,
+          displayName,
+          providerType: 'microsoft',
+          provider: null,
+          auth: null,
+          isDefault: false,
+          status: 'error',
+          error: err instanceof Error ? err.message : String(err),
+        });
         console.error(
           `[email-agent-mcp] Skipping mailbox "${displayName}": ${err instanceof Error ? err.message : err}`,
         );
       }
     }
 
+    for (const metadata of gmailMailboxes) {
+      const displayName = metadata.emailAddress ?? metadata.mailboxName;
+      try {
+        const auth = new GmailAuthManager({
+          clientId: metadata.clientId,
+          clientSecret: metadata.clientSecret,
+          redirectUri: metadata.redirectUri,
+        });
+        await auth.connect({ refresh_token: metadata.refreshToken });
+        await auth.refresh();
+
+        const client = new GoogleapisGmailClient(auth);
+        const provider = new GmailEmailProvider(client);
+
+        connectedMailboxes.push({
+          name: metadata.mailboxName,
+          emailAddress: metadata.emailAddress,
+          displayName,
+          providerType: 'gmail',
+          provider,
+          auth: null,
+          isDefault: false,
+          status: 'connected',
+        });
+
+        console.error(`[email-agent-mcp] Connected to Gmail mailbox "${displayName}" (${metadata.clientId})`);
+      } catch (err) {
+        failedMailboxes.push({
+          name: metadata.mailboxName,
+          emailAddress: metadata.emailAddress,
+          displayName,
+          providerType: 'gmail',
+          provider: null,
+          auth: null,
+          isDefault: false,
+          status: 'error',
+          error: err instanceof Error ? err.message : String(err),
+        });
+        console.error(
+          `[email-agent-mcp] Skipping Gmail mailbox "${displayName}": ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    if (connectedMailboxes.length > 0) {
+      connectedMailboxes[0]!.isDefault = true;
+      state.mailboxes = [...connectedMailboxes, ...failedMailboxes];
+      state.provider = connectedMailboxes[0]!.provider;
+      state.auth = connectedMailboxes[0]!.auth;
+      state.connectedMailbox = connectedMailboxes[0]!.displayName;
+      state.connectedProvider = connectedMailboxes[0]!.providerType;
+      state.isDemo = false;
+      state.status = 'connected';
+      return;
+    }
+
     // All configured mailboxes failed to authenticate.
+    state.mailboxes = failedMailboxes;
     state.isDemo = true;
     state.status = 'error';
     state.error = 'All configured mailboxes failed to authenticate';
@@ -343,18 +551,13 @@ export async function buildLazyActions(
     sendDraftAction,
     updateDraftAction,
     getThreadAction,
+    listAttachmentsAction,
     labelEmailAction,
     flagEmailAction,
     markReadAction,
     moveToFolderAction,
     deleteEmailAction,
   } = await import('@usejunior/email-core');
-
-  // Shared context for email-core actions — provider is resolved at call time.
-  const actionCtx = {
-    get provider() { return state.provider as never; },
-    get sendAllowlist() { return getSendAllowlist(); },
-  };
 
   // Structured "provider unavailable" error — matches the shape of email-core errors.
   const providerUnavailableError = (err: unknown) => ({
@@ -376,10 +579,22 @@ export async function buildLazyActions(
     run: async (_ctx, input) => {
       try {
         await ensureProvider(state);
+        const requestedMailbox =
+          input && typeof input === 'object' && 'mailbox' in input &&
+          typeof (input as { mailbox?: unknown }).mailbox === 'string'
+            ? (input as { mailbox?: string }).mailbox
+            : undefined;
+        const resolved = resolveMailboxContext(state, requestedMailbox);
+        const actionCtx = {
+          provider: resolved.mailbox.provider,
+          mailboxName: resolved.mailbox.name,
+          allMailboxes: resolved.allMailboxes,
+          sendAllowlist: getSendAllowlist(),
+        };
+        return action.run(actionCtx as never, input as never);
       } catch (err) {
         return providerUnavailableError(err);
       }
-      return action.run(actionCtx as never, input as never);
     },
   });
 
@@ -401,7 +616,7 @@ export async function buildLazyActions(
     subject: 'Demo mode',
     from: 'system@email-agent-mcp.dev',
     to: ['user@example.com'],
-    body: 'No mailbox configured. Run: email-agent-mcp configure --mailbox <name> --provider microsoft',
+    body: NO_MAILBOX_CONFIGURED_MESSAGE,
     receivedAt: new Date().toISOString(),
   });
 
@@ -414,9 +629,15 @@ export async function buildLazyActions(
       annotations: { readOnlyHint: true, destructiveHint: false },
       run: async (_ctx, input) => {
         await waitForInit(state);
-        if (!state.provider) return demoListEmails();
-        const inp = input as { unread?: boolean; limit?: number; offset?: number; folder?: string };
-        const messages = await state.provider.listMessages({ unread: inp.unread, limit: inp.limit ?? 25, offset: inp.offset, folder: inp.folder ?? 'inbox' });
+        if (!getDefaultMailbox(state)) return demoListEmails();
+        const inp = input as { mailbox?: string; unread?: boolean; limit?: number; offset?: number; folder?: string };
+        const { mailbox } = resolveMailboxContext(state, inp.mailbox);
+        const messages = await mailbox.provider.listMessages({
+          unread: inp.unread,
+          limit: inp.limit ?? 25,
+          offset: inp.offset,
+          folder: inp.folder ?? 'inbox',
+        });
         return {
           emails: (messages as Array<{ id: string; subject: string; from: { email: string; name?: string }; receivedAt: string; isRead: boolean; hasAttachments: boolean }>).map(m => ({
             id: m.id,
@@ -433,24 +654,52 @@ export async function buildLazyActions(
       name: 'read_email',
       description: 'Read the full content of an email by ID, transformed to token-efficient markdown',
       input: z.object({ id: z.string(), mailbox: z.string().optional() }),
-      output: z.object({ id: z.string(), subject: z.string(), from: z.string(), to: z.array(z.string()), body: z.string(), receivedAt: z.string() }),
+      output: z.object({
+        id: z.string(),
+        subject: z.string(),
+        from: z.string(),
+        to: z.array(z.string()),
+        body: z.string(),
+        receivedAt: z.string(),
+        attachments: z.array(z.object({
+          id: z.string(),
+          filename: z.string(),
+          mimeType: z.string(),
+          size: z.number(),
+          contentId: z.string().optional(),
+          isInline: z.boolean(),
+        })).optional(),
+      }),
       annotations: { readOnlyHint: true, destructiveHint: false },
       run: async (_ctx, input) => {
         await waitForInit(state);
-        const inp = input as { id: string };
-        if (!state.provider) return demoReadEmail(inp.id);
-        const msg = await state.provider.getMessage(inp.id) as { id: string; subject: string; from: { email: string; name?: string }; to: Array<{ email: string; name?: string }>; receivedAt: string; body?: string; bodyHtml?: string };
+        const inp = input as { id: string; mailbox?: string };
+        if (!getDefaultMailbox(state)) return demoReadEmail(inp.id);
+        const { mailbox } = resolveMailboxContext(state, inp.mailbox);
+        const msg = await mailbox.provider.getMessage(inp.id) as {
+          id: string;
+          subject: string;
+          from: { email: string; name?: string };
+          to: Array<{ email: string; name?: string }>;
+          receivedAt: string;
+          body?: string;
+          bodyHtml?: string;
+          attachments?: Array<{
+            id: string;
+            filename: string;
+            mimeType: string;
+            size: number;
+            contentId?: string;
+            isInline: boolean;
+          }>;
+        };
 
         let emailBody = '';
-        if (msg.bodyHtml) {
-          try {
-            const { htmlToMarkdown } = await import('@usejunior/email-core');
-            emailBody = htmlToMarkdown(msg.bodyHtml);
-          } catch {
-            emailBody = msg.bodyHtml;
-          }
-        } else if (msg.body) {
-          emailBody = msg.body;
+        try {
+          const { transformEmailContent } = await import('@usejunior/email-core');
+          emailBody = transformEmailContent(msg.body, msg.bodyHtml, msg.attachments);
+        } catch {
+          emailBody = msg.bodyHtml ?? msg.body ?? '';
         }
 
         return {
@@ -460,20 +709,51 @@ export async function buildLazyActions(
           to: msg.to.map(a => a.name ? `${a.name} <${a.email}>` : a.email),
           body: emailBody,
           receivedAt: msg.receivedAt,
+          attachments: msg.attachments?.map(attachment => ({
+            id: attachment.id,
+            filename: attachment.filename,
+            mimeType: attachment.mimeType,
+            size: attachment.size,
+            contentId: attachment.contentId,
+            isInline: attachment.isInline,
+          })),
         };
       },
     },
     {
       name: 'search_emails',
       description: 'Search emails using full-text query across one or all mailboxes. Use offset for pagination.',
-      input: z.object({ query: z.string(), mailbox: z.string().optional(), limit: z.number().optional(), offset: z.number().optional() }),
-      output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean() })) }),
+      input: z.object({ query: z.string(), mailbox: z.string().nullable().optional(), limit: z.number().optional(), offset: z.number().optional() }),
+      output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean(), mailbox: z.string().optional() })) }),
       annotations: { readOnlyHint: true, destructiveHint: false },
       run: async (_ctx, input) => {
         await waitForInit(state);
-        if (!state.provider) return { emails: [] };
-        const inp = input as { query: string; limit?: number; offset?: number };
-        const results = await state.provider.searchMessages(inp.query, undefined, inp.limit, inp.offset) as Array<{ id: string; subject: string; from: { email: string; name?: string }; receivedAt: string; isRead: boolean; hasAttachments: boolean }>;
+        if (!getDefaultMailbox(state)) return { emails: [] };
+        const inp = input as { query: string; mailbox?: string | null; limit?: number; offset?: number };
+        const resolved = inp.mailbox === null ? null : resolveMailboxContext(state, inp.mailbox);
+        const results = resolved
+          ? (await resolved.mailbox.provider.searchMessages(
+            inp.query,
+            undefined,
+            inp.limit ?? 25,
+            inp.offset,
+          ) as Array<{
+            id: string;
+            subject: string;
+            from: { email: string; name?: string };
+            receivedAt: string;
+            isRead: boolean;
+            hasAttachments: boolean;
+          }>).map(result => ({ ...result, mailbox: resolved.mailbox.name }))
+          : (await Promise.all(
+            getConnectedMailboxes(state).map(async mailbox => {
+              const mailboxResults = await mailbox.provider.searchMessages(inp.query, undefined);
+              return mailboxResults.map(result => ({ ...result, mailbox: mailbox.name }));
+            }),
+          ))
+            .flat()
+            .sort((a, b) => new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime())
+            .slice(inp.offset ?? 0, (inp.offset ?? 0) + (inp.limit ?? 25));
         return {
           emails: results.map(m => ({
             id: m.id,
@@ -482,6 +762,7 @@ export async function buildLazyActions(
             receivedAt: m.receivedAt,
             isRead: m.isRead,
             hasAttachments: m.hasAttachments,
+            mailbox: m.mailbox,
           })),
         };
       },
@@ -494,24 +775,54 @@ export async function buildLazyActions(
       annotations: { readOnlyHint: true, destructiveHint: false },
       // NON-BLOCKING — reports state directly without awaiting ensureProvider.
       // This is how callers check whether the server is still warming up.
-      run: async () => {
+      run: async (_ctx, input) => {
+        const inp = (input ?? {}) as { mailbox?: string };
         const warnings: string[] = [];
         switch (state.status) {
           case 'pending':
           case 'connecting':
             return { name: 'pending', provider: 'pending', status: 'connecting', isDefault: false, warnings: ['Authenticating — provider is warming up'] };
           case 'not_configured':
-            return { name: 'none', provider: 'none', status: 'not configured', isDefault: false, warnings: ['No mailbox configured. Run: email-agent-mcp configure --mailbox <name> --provider microsoft'] };
+            return { name: 'none', provider: 'none', status: 'not configured', isDefault: false, warnings: [NO_MAILBOX_CONFIGURED_MESSAGE] };
           case 'error':
             return { name: 'none', provider: 'none', status: 'error', isDefault: false, warnings: [state.error ?? 'Provider init failed'] };
           case 'connected': {
-            const healthWarning = state.auth?.getTokenHealthWarning();
+            const mailbox = inp.mailbox ? findKnownMailbox(state, inp.mailbox) : getDefaultMailbox(state);
+            if (!mailbox) {
+              return {
+                name: inp.mailbox ?? 'unknown',
+                provider: 'unknown',
+                status: 'error',
+                isDefault: false,
+                warnings: [
+                  `Mailbox "${inp.mailbox}" is not configured. Available mailboxes: ${describeConfiguredMailboxes(state)}`,
+                ],
+              };
+            }
+
+            if (mailbox.status !== 'connected') {
+              return {
+                name: mailbox.displayName,
+                provider: mailbox.providerType,
+                status: 'error',
+                isDefault: mailbox.isDefault,
+                warnings: [mailbox.error ?? `Mailbox "${mailbox.displayName}" is not connected`],
+              };
+            }
+
+            const healthWarning = mailbox.auth?.getTokenHealthWarning();
             if (healthWarning) warnings.push(healthWarning);
             const currentAllowlist = getSendAllowlist();
             if (!currentAllowlist || currentAllowlist.entries.length === 0) {
               warnings.push('Send allowlist not configured — all outbound email is disabled. Run: email-agent-mcp configure');
             }
-            return { name: state.connectedMailbox ?? 'default', provider: 'microsoft', status: 'connected', isDefault: true, warnings };
+            return {
+              name: mailbox.displayName,
+              provider: mailbox.providerType,
+              status: 'connected',
+              isDefault: mailbox.isDefault,
+              warnings,
+            };
           }
         }
       },
@@ -522,6 +833,7 @@ export async function buildLazyActions(
     wrapAction(sendDraftAction),
     wrapAction(updateDraftAction),
     wrapAction(getThreadAction),
+    wrapAction(listAttachmentsAction),
     wrapAction(labelEmailAction),
     wrapAction(flagEmailAction),
     wrapAction(markReadAction),

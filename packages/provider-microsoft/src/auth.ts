@@ -39,6 +39,7 @@ export interface MicrosoftAuthConfig {
 }
 
 export interface MailboxMetadata {
+  provider?: string;
   authenticationRecord: AuthenticationRecord;
   cacheName?: string;
   lastInteractiveAuthAt: string;
@@ -290,6 +291,7 @@ export class DelegatedAuthManager implements AuthManager {
     const path = this.getMetadataPath();
     await mkdir(dirname(path), { recursive: true });
     const metadata: MailboxMetadata = {
+      provider: 'microsoft',
       authenticationRecord: this.authRecord!,
       cacheName: this.cacheName ?? undefined,
       lastInteractiveAuthAt: this._lastInteractiveAuthAt!,
@@ -437,7 +439,10 @@ export async function listConfiguredMailboxesWithMetadata(): Promise<MailboxMeta
   for (const file of files) {
     try {
       const content = await readFile(join(getConfigDir(), file), 'utf-8');
-      const metadata = JSON.parse(content) as MailboxMetadata;
+      const metadata = JSON.parse(content) as MailboxMetadata & { provider?: string };
+      if (metadata.provider === 'gmail') {
+        continue;
+      }
       entries.push({ filename: file, metadata });
     } catch {
       // Skip unreadable files
@@ -515,7 +520,10 @@ export async function loadMailboxMetadata(identifier: string): Promise<MailboxMe
   // Try direct filename match first (e.g., "work" → "work.json", or safe key → safe key.json)
   try {
     const content = await readFile(join(getConfigDir(), `${identifier}.json`), 'utf-8');
-    return JSON.parse(content) as MailboxMetadata;
+    const metadata = JSON.parse(content) as MailboxMetadata & { provider?: string };
+    if (metadata.provider !== 'gmail') {
+      return metadata;
+    }
   } catch {
     // Not found by direct name
   }
@@ -525,7 +533,10 @@ export async function loadMailboxMetadata(identifier: string): Promise<MailboxMe
     try {
       const safeKey = toFilesystemSafeKey(identifier);
       const content = await readFile(join(getConfigDir(), `${safeKey}.json`), 'utf-8');
-      return JSON.parse(content) as MailboxMetadata;
+      const metadata = JSON.parse(content) as MailboxMetadata & { provider?: string };
+      if (metadata.provider !== 'gmail') {
+        return metadata;
+      }
     } catch {
       // Not found
     }
@@ -538,8 +549,11 @@ export async function loadMailboxMetadata(identifier: string): Promise<MailboxMe
     for (const file of files.filter(f => f.endsWith('.json'))) {
       try {
         const content = await readFile(join(getConfigDir(), file), 'utf-8');
-        const metadata = JSON.parse(content) as MailboxMetadata;
-        if (metadata.mailboxName === identifier || metadata.emailAddress === identifier) {
+        const metadata = JSON.parse(content) as MailboxMetadata & { provider?: string };
+        if (
+          metadata.provider !== 'gmail' &&
+          (metadata.mailboxName === identifier || metadata.emailAddress === identifier)
+        ) {
           return metadata;
         }
       } catch {

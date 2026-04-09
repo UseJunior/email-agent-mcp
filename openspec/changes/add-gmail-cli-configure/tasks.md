@@ -1,0 +1,8 @@
+- [x] Update OpenSpec deltas for CLI, mailbox config, and Gmail provider
+- [x] Implement Gmail CLI configure flow with local OAuth callback and PKCE
+- [x] Persist Gmail mailbox metadata using canonical email-based filenames
+- [x] Auto-add configured Gmail addresses to the send allowlist
+- [x] Update wizard and docs to present Gmail interactive configure as available
+- [x] Add or update tests for Gmail configure, auth helpers, and wizard behavior
+- [x] Run `openspec validate add-gmail-cli-configure --strict`
+- [x] Run targeted package tests and project validation

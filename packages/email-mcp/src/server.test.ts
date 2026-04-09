@@ -170,8 +170,8 @@ describe('mcp-transport/Lazy Provider State', () => {
     // No init has been triggered — state is still 'pending'.
     const actions = await buildLazyActions(state, noAllowlist);
 
-    // 4 custom tools + 11 email-core actions = 15 tools, no auth performed.
-    expect(actions.length).toBe(15);
+    // 4 custom tools + 12 email-core actions = 16 tools, no auth performed.
+    expect(actions.length).toBe(16);
     expect(state.status).toBe('pending');
     expect(state.initPromise).toBeNull();
     expect(state.provider).toBeNull();
@@ -179,6 +179,7 @@ describe('mcp-transport/Lazy Provider State', () => {
     const tools = actionsToMcpTools(actions);
     expect(tools.map(t => t.name)).toContain('list_emails');
     expect(tools.map(t => t.name)).toContain('get_mailbox_status');
+    expect(tools.map(t => t.name)).toContain('list_attachments');
     expect(tools.map(t => t.name)).toContain('send_email');
   });
 
@@ -305,6 +306,501 @@ describe('mcp-transport/Lazy Provider State', () => {
 
     expect(result.status).toBe('error');
     expect(result.warnings[0]).toMatch(/missing credentials/);
+  });
+
+  it('Scenario: get_mailbox_status reports the connected Gmail provider', async () => {
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.provider = {} as never;
+    state.connectedMailbox = 'steven.obiajulu@gmail.com';
+    state.connectedProvider = 'gmail';
+    state.initPromise = Promise.resolve();
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const status = actions.find(a => a.name === 'get_mailbox_status')!;
+    const result = await status.run({}, {}) as { provider: string; name: string; status: string };
+
+    expect(result.provider).toBe('gmail');
+    expect(result.name).toBe('steven.obiajulu@gmail.com');
+    expect(result.status).toBe('connected');
+  });
+
+  it('Scenario: custom search_emails routes to the requested mailbox provider', async () => {
+    const workSearch = vi.fn().mockResolvedValue([
+      {
+        id: 'work-1',
+        subject: 'Work result',
+        from: { email: 'boss@example.com' },
+        receivedAt: '2026-04-09T10:00:00.000Z',
+        isRead: false,
+        hasAttachments: false,
+      },
+    ]);
+    const personalSearch = vi.fn().mockResolvedValue([
+      {
+        id: 'personal-1',
+        subject: 'Personal result',
+        from: { email: 'friend@example.com' },
+        receivedAt: '2026-04-09T11:00:00.000Z',
+        isRead: true,
+        hasAttachments: true,
+      },
+    ]);
+
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { searchMessages: workSearch } as never;
+    state.connectedMailbox = 'work@example.com';
+    state.connectedProvider = 'microsoft';
+    state.mailboxes = [
+      {
+        name: 'work',
+        emailAddress: 'work@example.com',
+        displayName: 'work@example.com',
+        providerType: 'microsoft',
+        provider: { searchMessages: workSearch } as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+      {
+        name: 'personal',
+        emailAddress: 'personal@example.com',
+        displayName: 'personal@example.com',
+        providerType: 'gmail',
+        provider: { searchMessages: personalSearch } as never,
+        auth: null,
+        isDefault: false,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const search = actions.find(a => a.name === 'search_emails')!;
+    const result = await search.run({}, { query: 'license', mailbox: 'personal' }) as {
+      emails: Array<{ id: string; subject: string; mailbox?: string }>;
+    };
+
+    expect(personalSearch).toHaveBeenCalledWith('license', undefined, 25, undefined);
+    expect(workSearch).not.toHaveBeenCalled();
+    expect(result.emails).toEqual([
+      {
+        id: 'personal-1',
+        subject: 'Personal result',
+        from: 'friend@example.com',
+        receivedAt: '2026-04-09T11:00:00.000Z',
+        isRead: true,
+        hasAttachments: true,
+        mailbox: 'personal',
+      },
+    ]);
+  });
+
+  it('Scenario: custom search_emails can fan out across all connected mailboxes', async () => {
+    const workSearch = vi.fn().mockResolvedValue([
+      {
+        id: 'work-1',
+        subject: 'Work result',
+        from: { email: 'boss@example.com' },
+        receivedAt: '2026-04-09T10:00:00.000Z',
+        isRead: false,
+        hasAttachments: false,
+      },
+    ]);
+    const personalSearch = vi.fn().mockResolvedValue([
+      {
+        id: 'personal-1',
+        subject: 'Personal result',
+        from: { email: 'friend@example.com' },
+        receivedAt: '2026-04-09T11:00:00.000Z',
+        isRead: true,
+        hasAttachments: true,
+      },
+    ]);
+
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { searchMessages: workSearch } as never;
+    state.connectedMailbox = 'work@example.com';
+    state.connectedProvider = 'microsoft';
+    state.mailboxes = [
+      {
+        name: 'work',
+        emailAddress: 'work@example.com',
+        displayName: 'work@example.com',
+        providerType: 'microsoft',
+        provider: { searchMessages: workSearch } as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+      {
+        name: 'personal',
+        emailAddress: 'personal@example.com',
+        displayName: 'personal@example.com',
+        providerType: 'gmail',
+        provider: { searchMessages: personalSearch } as never,
+        auth: null,
+        isDefault: false,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const search = actions.find(a => a.name === 'search_emails')!;
+    const result = await search.run({}, { query: 'license', mailbox: null, limit: 10 }) as {
+      emails: Array<{ id: string; mailbox?: string }>;
+    };
+
+    expect(workSearch).toHaveBeenCalledWith('license', undefined);
+    expect(personalSearch).toHaveBeenCalledWith('license', undefined);
+    expect(result.emails).toEqual([
+      {
+        id: 'personal-1',
+        subject: 'Personal result',
+        from: 'friend@example.com',
+        receivedAt: '2026-04-09T11:00:00.000Z',
+        isRead: true,
+        hasAttachments: true,
+        mailbox: 'personal',
+      },
+      {
+        id: 'work-1',
+        subject: 'Work result',
+        from: 'boss@example.com',
+        receivedAt: '2026-04-09T10:00:00.000Z',
+        isRead: false,
+        hasAttachments: false,
+        mailbox: 'work',
+      },
+    ]);
+  });
+
+  it('Scenario: custom read_email surfaces attachment metadata from the provider', async () => {
+    const getMessage = vi.fn().mockResolvedValue({
+      id: 'msg-attachment',
+      subject: 'Attachment message',
+      from: { email: 'sender@example.com', name: 'Sender' },
+      to: [{ email: 'recipient@example.com', name: 'Recipient' }],
+      receivedAt: '2026-04-09T12:00:00.000Z',
+      bodyHtml: '<p>See attached</p>',
+      attachments: [
+        {
+          id: 'att-1',
+          filename: 'license.jpeg',
+          mimeType: 'image/jpeg',
+          size: 692702,
+          isInline: false,
+        },
+      ],
+    });
+
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { getMessage } as never;
+    state.connectedMailbox = 'personal@example.com';
+    state.connectedProvider = 'gmail';
+    state.mailboxes = [
+      {
+        name: 'personal',
+        emailAddress: 'personal@example.com',
+        displayName: 'personal@example.com',
+        providerType: 'gmail',
+        provider: { getMessage } as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const readEmail = actions.find(a => a.name === 'read_email')!;
+    const result = await readEmail.run({}, { id: 'msg-attachment' }) as {
+      body: string;
+      attachments?: Array<{ filename: string; mimeType: string; size: number }>;
+    };
+
+    expect(result.body).toContain('See attached');
+    expect(result.attachments).toEqual([
+      {
+        id: 'att-1',
+        filename: 'license.jpeg',
+        mimeType: 'image/jpeg',
+        size: 692702,
+        contentId: undefined,
+        isInline: false,
+      },
+    ]);
+  });
+
+  it('Scenario: get_mailbox_status resolves the requested mailbox instead of the default', async () => {
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = {} as never;
+    state.connectedMailbox = 'work@example.com';
+    state.connectedProvider = 'microsoft';
+    state.mailboxes = [
+      {
+        name: 'work',
+        emailAddress: 'work@example.com',
+        displayName: 'work@example.com',
+        providerType: 'microsoft',
+        provider: {} as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+      {
+        name: 'personal',
+        emailAddress: 'personal@example.com',
+        displayName: 'personal@example.com',
+        providerType: 'gmail',
+        provider: {} as never,
+        auth: null,
+        isDefault: false,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const status = actions.find(a => a.name === 'get_mailbox_status')!;
+    const result = await status.run({}, { mailbox: 'personal@example.com' }) as {
+      provider: string;
+      name: string;
+      status: string;
+      isDefault: boolean;
+    };
+
+    expect(result.provider).toBe('gmail');
+    expect(result.name).toBe('personal@example.com');
+    expect(result.status).toBe('connected');
+    expect(result.isDefault).toBe(false);
+  });
+
+  it('Scenario: get_mailbox_status reports a useful error for unknown requested mailboxes', async () => {
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = {} as never;
+    state.connectedMailbox = 'work@example.com';
+    state.connectedProvider = 'microsoft';
+    state.mailboxes = [
+      {
+        name: 'work',
+        emailAddress: 'work@example.com',
+        displayName: 'work@example.com',
+        providerType: 'microsoft',
+        provider: {} as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+      {
+        name: 'personal',
+        emailAddress: 'personal@example.com',
+        displayName: 'personal@example.com',
+        providerType: 'gmail',
+        provider: {} as never,
+        auth: null,
+        isDefault: false,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const status = actions.find(a => a.name === 'get_mailbox_status')!;
+    const result = await status.run({}, { mailbox: 'unknown@example.com' }) as {
+      name: string;
+      status: string;
+      warnings: string[];
+    };
+
+    expect(result.name).toBe('unknown@example.com');
+    expect(result.status).toBe('error');
+    expect(result.warnings[0]).toContain('Available mailboxes: work@example.com, personal@example.com');
+  });
+
+  it('Scenario: custom list_emails routes to the requested mailbox provider', async () => {
+    const workList = vi.fn().mockResolvedValue([]);
+    const personalList = vi.fn().mockResolvedValue([
+      {
+        id: 'personal-1',
+        subject: 'Personal result',
+        from: { email: 'friend@example.com' },
+        receivedAt: '2026-04-09T11:00:00.000Z',
+        isRead: true,
+        hasAttachments: true,
+      },
+    ]);
+
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { listMessages: workList } as never;
+    state.connectedMailbox = 'work@example.com';
+    state.connectedProvider = 'microsoft';
+    state.mailboxes = [
+      {
+        name: 'work',
+        emailAddress: 'work@example.com',
+        displayName: 'work@example.com',
+        providerType: 'microsoft',
+        provider: { listMessages: workList } as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+      {
+        name: 'personal',
+        emailAddress: 'personal@example.com',
+        displayName: 'personal@example.com',
+        providerType: 'gmail',
+        provider: { listMessages: personalList } as never,
+        auth: null,
+        isDefault: false,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const listEmails = actions.find(a => a.name === 'list_emails')!;
+    const result = await listEmails.run({}, { mailbox: 'personal', limit: 10, unread: true, folder: 'inbox' }) as {
+      emails: Array<{ id: string; subject: string }>;
+    };
+
+    expect(personalList).toHaveBeenCalledWith({
+      unread: true,
+      limit: 10,
+      offset: undefined,
+      folder: 'inbox',
+    });
+    expect(workList).not.toHaveBeenCalled();
+    expect(result.emails).toEqual([
+      {
+        id: 'personal-1',
+        subject: 'Personal result',
+        from: 'friend@example.com',
+        receivedAt: '2026-04-09T11:00:00.000Z',
+        isRead: true,
+        hasAttachments: true,
+      },
+    ]);
+  });
+
+  it('Scenario: wrapped send_email uses the requested mailbox provider', async () => {
+    const workCreateDraft = vi.fn().mockResolvedValue({ success: true, draftId: 'draft-work' });
+    const personalCreateDraft = vi.fn().mockResolvedValue({ success: true, draftId: 'draft-personal' });
+
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { createDraft: workCreateDraft } as never;
+    state.connectedMailbox = 'work@example.com';
+    state.connectedProvider = 'microsoft';
+    state.mailboxes = [
+      {
+        name: 'work',
+        emailAddress: 'work@example.com',
+        displayName: 'work@example.com',
+        providerType: 'microsoft',
+        provider: { createDraft: workCreateDraft } as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+      {
+        name: 'personal',
+        emailAddress: 'personal@example.com',
+        displayName: 'personal@example.com',
+        providerType: 'gmail',
+        provider: { createDraft: personalCreateDraft } as never,
+        auth: null,
+        isDefault: false,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const sendEmail = actions.find(a => a.name === 'send_email')!;
+    const result = await sendEmail.run({}, {
+      mailbox: 'personal',
+      to: ['friend@example.com'],
+      subject: 'hello',
+      body: 'test body',
+      draft: true,
+    }) as { success: boolean; draftId?: string };
+
+    expect(result).toEqual({ success: true, draftId: 'draft-personal', error: undefined });
+    expect(personalCreateDraft).toHaveBeenCalledOnce();
+    expect(workCreateDraft).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: list_attachments uses the requested mailbox provider context', async () => {
+    const workGetMessage = vi.fn().mockResolvedValue({ attachments: [] });
+    const personalGetMessage = vi.fn().mockResolvedValue({
+      attachments: [
+        {
+          id: 'att-1',
+          filename: 'license.jpeg',
+          mimeType: 'image/jpeg',
+          size: 692702,
+          isInline: false,
+        },
+      ],
+    });
+
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { getMessage: workGetMessage } as never;
+    state.connectedMailbox = 'work@example.com';
+    state.connectedProvider = 'microsoft';
+    state.mailboxes = [
+      {
+        name: 'work',
+        emailAddress: 'work@example.com',
+        displayName: 'work@example.com',
+        providerType: 'microsoft',
+        provider: { getMessage: workGetMessage } as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+      {
+        name: 'personal',
+        emailAddress: 'personal@example.com',
+        displayName: 'personal@example.com',
+        providerType: 'gmail',
+        provider: { getMessage: personalGetMessage } as never,
+        auth: null,
+        isDefault: false,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const listAttachments = actions.find(a => a.name === 'list_attachments')!;
+    const result = await listAttachments.run({}, {
+      mailbox: 'personal',
+      message_id: 'msg-attachment',
+    }) as { attachments: Array<{ filename: string }> };
+
+    expect(personalGetMessage).toHaveBeenCalledWith('msg-attachment');
+    expect(workGetMessage).not.toHaveBeenCalled();
+    expect(result.attachments).toEqual([
+      {
+        id: 'att-1',
+        filename: 'license.jpeg',
+        mimeType: 'image/jpeg',
+        size: 692702,
+        contentId: undefined,
+        isInline: false,
+      },
+    ]);
   });
 
   it('Scenario: waitForInit returns immediately once a terminal state is reached', async () => {

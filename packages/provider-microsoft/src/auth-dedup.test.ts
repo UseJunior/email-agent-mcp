@@ -193,6 +193,23 @@ describe('provider-microsoft/Mailbox Deduplication', () => {
     expect(remainingFiles[0]).toBe('test-user-at-example-com.json');
   });
 
+  it('Scenario: Gmail metadata files are ignored by Microsoft mailbox discovery', async () => {
+    await writeFile(
+      join(tokensDir, 'steven-obiajulu-at-gmail-com.json'),
+      JSON.stringify({
+        provider: 'gmail',
+        mailboxName: 'personal',
+        emailAddress: 'steven.obiajulu@gmail.com',
+        clientId: 'gmail-client',
+        clientSecret: 'gmail-secret',
+        refreshToken: 'gmail-refresh',
+      }),
+    );
+
+    const results = await listConfiguredMailboxesWithMetadata();
+    expect(results).toEqual([]);
+  });
+
   it('Scenario: Empty tokens directory returns empty array', async () => {
     const results = await listConfiguredMailboxesWithMetadata();
     expect(results).toEqual([]);

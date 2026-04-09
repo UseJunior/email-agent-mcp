@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { WatchedAllowlist } from './watched-allowlist.js';
 import { writeFile, rm, mkdtemp, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -187,5 +187,55 @@ describe('security/WatchedAllowlist', () => {
     await waitFor(() => watcher!.config !== undefined);
 
     expect(watcher.config!.entries).toEqual(['new@test.com']);
+  });
+
+  it('Scenario: Startup watch failure falls back to static config load', async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'watched-allowlist-'));
+    const filePath = join(tmpDir, 'allowlist.json');
+    await writeFile(filePath, JSON.stringify({ entries: ['fallback@test.com'] }));
+
+    watcher = new WatchedAllowlist(
+      filePath,
+      testLoader,
+      50,
+      () => {
+        const err = Object.assign(new Error('EMFILE: too many open files, watch'), { code: 'EMFILE' });
+        throw err;
+      },
+    );
+    await watcher.start();
+
+    expect(watcher.config).toEqual({ entries: ['fallback@test.com'] });
+  });
+
+  it('Scenario: Runtime watcher error disables hot reload cleanly', async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'watched-allowlist-'));
+    const filePath = join(tmpDir, 'allowlist.json');
+    await writeFile(filePath, JSON.stringify({ entries: ['initial@test.com'] }));
+
+    const close = vi.fn();
+    let onError: ((err: Error) => void) | undefined;
+    const fakeWatcher = {
+      on: vi.fn((event: string, handler: (err: Error) => void) => {
+        if (event === 'error') onError = handler;
+        return fakeWatcher;
+      }),
+      unref: vi.fn(),
+      close,
+    };
+
+    watcher = new WatchedAllowlist(
+      filePath,
+      testLoader,
+      50,
+      () => fakeWatcher as never,
+    );
+    await watcher.start();
+
+    expect(onError).toBeDefined();
+    onError!(new Error('EMFILE: too many open files, watch'));
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(watcher.config).toEqual({ entries: ['initial@test.com'] });
   });
 });

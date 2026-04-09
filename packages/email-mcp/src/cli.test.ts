@@ -1,5 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { runCli, parseCliArgs, getNemoClawEgressDomains, getAgentEmailHome, loadConfig, saveConfig } from './cli.js';
+import {
+  runCli,
+  parseCliArgs,
+  getNemoClawEgressDomains,
+  getAgentEmailHome,
+  ensureGmailProfileMatchesIntent,
+  getEffectiveSendAllowlistPath,
+  loadConfig,
+  saveConfig,
+} from './cli.js';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -35,6 +44,102 @@ const watcherMockState = vi.hoisted(() => ({
   pollCountBeforeShutdown: 1,
   /** Track poll calls. */
   pollCount: 0,
+}));
+
+const gmailMockState = vi.hoisted(() => ({
+  enableConfigureMock: false,
+  authUrlOptions: null as null | Record<string, unknown>,
+  exchangeCodeArgs: null as null | Record<string, unknown>,
+  savedMetadata: null as null | Record<string, unknown>,
+  profileEmail: 'steven.obiajulu@gmail.com',
+  refreshToken: 'mock-refresh-token' as string | undefined,
+}));
+
+const promptMockState = vi.hoisted(() => ({
+  confirmResult: true as boolean,
+  textResult: '' as string,
+  passwordResult: '' as string,
+}));
+
+const httpMockState = vi.hoisted(() => ({
+  listenError: null as Error | null,
+  callbackQueryFactory: null as null | (() => string),
+  triggerCallback: true as boolean,
+  lastResponseStatus: null as number | null,
+  lastResponseBody: null as string | null,
+}));
+
+const originalStdoutIsTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
+
+vi.mock('@clack/prompts', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    confirm: vi.fn(async () => promptMockState.confirmResult),
+    text: vi.fn(async () => promptMockState.textResult),
+    password: vi.fn(async () => promptMockState.passwordResult),
+    isCancel: vi.fn(() => false),
+  };
+});
+
+vi.mock('node:http', () => ({
+  createServer: vi.fn((handler: (req: { url?: string }, res: {
+    statusCode: number;
+    setHeader: (name: string, value: string) => void;
+    end: (body?: string) => void;
+  }) => void) => {
+    let errorHandler: ((err: Error) => void) | undefined;
+    let onceErrorHandler: ((err: Error) => void) | undefined;
+
+    const server = {
+      on: vi.fn((event: string, callback: (err: Error) => void) => {
+        if (event === 'error') errorHandler = callback;
+        return server;
+      }),
+      once: vi.fn((event: string, callback: (err: Error) => void) => {
+        if (event === 'error') onceErrorHandler = callback;
+        return server;
+      }),
+      listen: vi.fn((_port: number, _host: string, callback?: () => void) => {
+        if (httpMockState.listenError) {
+          queueMicrotask(() => {
+            onceErrorHandler?.(httpMockState.listenError!);
+            errorHandler?.(httpMockState.listenError!);
+          });
+          return server;
+        }
+
+        callback?.();
+
+        if (httpMockState.triggerCallback) {
+          setTimeout(() => {
+            const query = httpMockState.callbackQueryFactory?.();
+            if (!query) return;
+
+            const response = {
+              statusCode: 0,
+              setHeader: vi.fn(),
+              end: (body?: string) => {
+                httpMockState.lastResponseStatus = response.statusCode;
+                httpMockState.lastResponseBody = body ?? null;
+              },
+            };
+
+            handler({ url: `/oauth2callback?${query}` }, response);
+          }, 0);
+        }
+
+        return server;
+      }),
+      close: vi.fn((callback?: () => void) => {
+        callback?.();
+        return server;
+      }),
+      address: vi.fn(() => ({ port: 62018, family: 'IPv4', address: '127.0.0.1' })),
+    };
+
+    return server;
+  }),
 }));
 
 // Mock @usejunior/provider-microsoft for watcher poll-loop tests.
@@ -107,11 +212,75 @@ vi.mock('@usejunior/provider-microsoft', async (importOriginal) => {
   };
 });
 
+vi.mock('@usejunior/provider-gmail', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+
+  class MockGmailAuthManager {
+    constructor(_config: Record<string, unknown>) {}
+    async generateCodeVerifierAsync() {
+      return { codeVerifier: 'mock-code-verifier', codeChallenge: 'mock-code-challenge' };
+    }
+    generateAuthUrl(options: Record<string, unknown>) {
+      gmailMockState.authUrlOptions = options;
+      return 'https://accounts.google.com/o/oauth2/v2/auth?mock=1';
+    }
+    async exchangeCode(code: string, options: Record<string, unknown>) {
+      gmailMockState.exchangeCodeArgs = { code, options };
+    }
+    getRefreshToken() {
+      return gmailMockState.refreshToken;
+    }
+    async fetchProfile() {
+      return { emailAddress: gmailMockState.profileEmail };
+    }
+  }
+
+  const actualSave = actual.saveGmailMailboxMetadata as (metadata: Record<string, unknown>) => Promise<void>;
+  const actualToSafeKey = actual.toFilesystemSafeKey as (email: string) => string;
+
+  return {
+    ...actual,
+    GmailAuthManager: new Proxy(MockGmailAuthManager, {
+      construct(target, args) {
+        if (gmailMockState.enableConfigureMock) return new target(...args);
+        const RealAuth = actual.GmailAuthManager as new (...realArgs: unknown[]) => unknown;
+        return new RealAuth(...args);
+      },
+    }),
+    saveGmailMailboxMetadata: vi.fn(async (metadata: Record<string, unknown>) => {
+      if (gmailMockState.enableConfigureMock) {
+        gmailMockState.savedMetadata = metadata;
+        return;
+      }
+      await actualSave(metadata);
+    }),
+    toFilesystemSafeKey: vi.fn((email: string) => actualToSafeKey(email)),
+  };
+});
+
 beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
+  gmailMockState.enableConfigureMock = false;
+  gmailMockState.authUrlOptions = null;
+  gmailMockState.exchangeCodeArgs = null;
+  gmailMockState.savedMetadata = null;
+  gmailMockState.profileEmail = 'steven.obiajulu@gmail.com';
+  gmailMockState.refreshToken = 'mock-refresh-token';
+  promptMockState.confirmResult = true;
+  promptMockState.textResult = '';
+  promptMockState.passwordResult = '';
+  httpMockState.listenError = null;
+  httpMockState.callbackQueryFactory = null;
+  httpMockState.triggerCallback = true;
+  httpMockState.lastResponseStatus = null;
+  httpMockState.lastResponseBody = null;
+  Object.defineProperty(process.stdout, 'isTTY', { value: false, configurable: true });
 });
 
 afterEach(() => {
+  if (originalStdoutIsTTYDescriptor) {
+    Object.defineProperty(process.stdout, 'isTTY', originalStdoutIsTTYDescriptor);
+  }
   vi.restoreAllMocks();
 });
 
@@ -157,12 +326,268 @@ describe('cli/Configure Subcommand', () => {
     expect(opts.clientId).toBe('test-id');
   });
 
+  it('parseCliArgs accepts --client-secret', () => {
+    const opts = parseCliArgs(['configure', '--provider', 'gmail', '--client-secret', 'secret-value']);
+    expect(opts.clientSecret).toBe('secret-value');
+  });
+
   it('Scenario: Setup alias', () => {
     // WHEN email-agent-mcp setup is run
     // THEN the system behaves identically to email-agent-mcp configure
     const opts = parseCliArgs(['setup', '--provider', 'microsoft']);
     expect(opts.command).toBe('setup');
     expect(opts.provider).toBe('microsoft');
+  });
+
+  it('Gmail configure returns an error when credentials are missing', async () => {
+    const exitCode = await runCli(['configure', '--provider', 'gmail']);
+    expect(exitCode).toBe(1);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Missing Gmail OAuth client ID'),
+    );
+  });
+});
+
+describe('cli/Gmail Account Intent Checks', () => {
+  let tmpHome: string;
+  let originalHome: string | undefined;
+
+  beforeEach(async () => {
+    tmpHome = await mkdtemp(join(tmpdir(), 'email-agent-mcp-gmail-intent-'));
+    originalHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    process.env['EMAIL_AGENT_MCP_HOME'] = tmpHome;
+  });
+
+  afterEach(async () => {
+    if (originalHome === undefined) {
+      delete process.env['EMAIL_AGENT_MCP_HOME'];
+    } else {
+      process.env['EMAIL_AGENT_MCP_HOME'] = originalHome;
+    }
+    await rm(tmpHome, { recursive: true, force: true });
+  });
+
+  it('Scenario: Explicit Gmail mailbox email must match the authenticated Google profile', async () => {
+    await expect(
+      ensureGmailProfileMatchesIntent('expected@gmail.com', 'other@gmail.com'),
+    ).rejects.toThrow(/configure was asked to link expected@gmail.com/i);
+  });
+
+  it('Scenario: Alias-based Gmail configure fails closed in non-TTY sessions', async () => {
+    await expect(
+      ensureGmailProfileMatchesIntent('personal', 'steven.obiajulu@gmail.com'),
+    ).rejects.toThrow(/Re-run in a TTY|pass --mailbox steven\.obiajulu@gmail\.com/i);
+  });
+
+  it('Scenario: Alias-based Gmail configure can proceed after explicit TTY confirmation', async () => {
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+    promptMockState.confirmResult = true;
+
+    try {
+      await expect(
+        ensureGmailProfileMatchesIntent('personal', 'steven.obiajulu@gmail.com'),
+      ).resolves.toBeUndefined();
+    } finally {
+      Object.defineProperty(process.stdout, 'isTTY', { value: false, configurable: true });
+    }
+  });
+
+  it('Scenario: Alias-based Gmail configure rejects when an existing alias maps to another account', async () => {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    const tokensDir = join(tmpHome, 'tokens');
+    await mkdir(tokensDir, { recursive: true });
+    await writeFile(join(tokensDir, 'personal.json'), JSON.stringify({
+      provider: 'gmail',
+      mailboxName: 'personal',
+      emailAddress: 'existing@gmail.com',
+      clientId: 'gmail-client-id',
+      clientSecret: 'gmail-client-secret',
+      refreshToken: 'gmail-refresh-token',
+      lastInteractiveAuthAt: '2026-04-08T12:00:00.000Z',
+    }, null, 2) + '\n');
+
+    await expect(
+      ensureGmailProfileMatchesIntent('personal', 'other@gmail.com'),
+    ).rejects.toThrow(/already linked to existing@gmail.com/i);
+  });
+});
+
+describe('cli/Gmail Configure', () => {
+  let tmpHome: string;
+  let originalHome: string | undefined;
+  let originalClientId: string | undefined;
+  let originalClientSecret: string | undefined;
+  let originalAllowlistPath: string | undefined;
+
+  beforeEach(async () => {
+    tmpHome = await mkdtemp(join(tmpdir(), 'email-agent-mcp-gmail-configure-'));
+    originalHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    originalClientId = process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'];
+    originalClientSecret = process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'];
+    originalAllowlistPath = process.env['AGENT_EMAIL_SEND_ALLOWLIST'];
+    process.env['EMAIL_AGENT_MCP_HOME'] = tmpHome;
+    delete process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'];
+    delete process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'];
+    delete process.env['AGENT_EMAIL_SEND_ALLOWLIST'];
+
+    gmailMockState.enableConfigureMock = true;
+    httpMockState.callbackQueryFactory = () => {
+      const state = (gmailMockState.authUrlOptions?.['state'] as string | undefined) ?? 'missing-state';
+      return `code=oauth-code&state=${encodeURIComponent(state)}`;
+    };
+  });
+
+  afterEach(async () => {
+    if (originalHome === undefined) {
+      delete process.env['EMAIL_AGENT_MCP_HOME'];
+    } else {
+      process.env['EMAIL_AGENT_MCP_HOME'] = originalHome;
+    }
+
+    if (originalClientId === undefined) {
+      delete process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'];
+    } else {
+      process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'] = originalClientId;
+    }
+
+    if (originalClientSecret === undefined) {
+      delete process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'];
+    } else {
+      process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'] = originalClientSecret;
+    }
+
+    if (originalAllowlistPath === undefined) {
+      delete process.env['AGENT_EMAIL_SEND_ALLOWLIST'];
+    } else {
+      process.env['AGENT_EMAIL_SEND_ALLOWLIST'] = originalAllowlistPath;
+    }
+
+    await rm(tmpHome, { recursive: true, force: true });
+  });
+
+  it('Scenario: Gmail configure saves metadata and updates the send allowlist', async () => {
+    const exitCode = await runCli([
+      'configure',
+      '--provider',
+      'gmail',
+      '--mailbox',
+      'steven.obiajulu@gmail.com',
+      '--client-id',
+      'cli-client-id',
+      '--client-secret',
+      'cli-client-secret',
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      provider: 'gmail',
+      mailboxName: 'steven.obiajulu@gmail.com',
+      emailAddress: 'steven.obiajulu@gmail.com',
+      clientId: 'cli-client-id',
+      clientSecret: 'cli-client-secret',
+      refreshToken: 'mock-refresh-token',
+    });
+    expect(gmailMockState.exchangeCodeArgs).toEqual({
+      code: 'oauth-code',
+      options: {
+        codeVerifier: 'mock-code-verifier',
+        redirectUri: 'http://127.0.0.1:62018/oauth2callback',
+      },
+    });
+    expect(gmailMockState.authUrlOptions).toMatchObject({
+      redirectUri: 'http://127.0.0.1:62018/oauth2callback',
+      codeChallenge: 'mock-code-challenge',
+      loginHint: 'steven.obiajulu@gmail.com',
+      scopes: ['https://mail.google.com/'],
+    });
+
+    const allowlistPath = await getEffectiveSendAllowlistPath();
+    const allowlist = JSON.parse(await readFile(allowlistPath, 'utf-8')) as { entries: string[] };
+    expect(allowlist.entries).toEqual(['steven.obiajulu@gmail.com']);
+    expect(httpMockState.lastResponseStatus).toBe(200);
+    expect(httpMockState.lastResponseBody).toContain('Authentication complete');
+  });
+
+  it('Scenario: Gmail configure can prompt for missing OAuth credentials in TTY mode', async () => {
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+    promptMockState.textResult = 'prompt-client-id';
+    promptMockState.passwordResult = 'prompt-client-secret';
+
+    try {
+      const exitCode = await runCli(['configure', '--provider', 'gmail', '--mailbox', 'personal']);
+
+      expect(exitCode).toBe(0);
+      expect(gmailMockState.savedMetadata).toMatchObject({
+        mailboxName: 'personal',
+        emailAddress: 'steven.obiajulu@gmail.com',
+        clientId: 'prompt-client-id',
+        clientSecret: 'prompt-client-secret',
+      });
+      expect(gmailMockState.authUrlOptions?.['loginHint']).toBeUndefined();
+    } finally {
+      Object.defineProperty(process.stdout, 'isTTY', { value: false, configurable: true });
+    }
+  });
+
+  it('Scenario: Gmail configure fails when the OAuth callback state does not match', async () => {
+    httpMockState.callbackQueryFactory = () => 'code=oauth-code&state=wrong-state';
+
+    const exitCode = await runCli([
+      'configure',
+      '--provider',
+      'gmail',
+      '--mailbox',
+      'steven.obiajulu@gmail.com',
+      '--client-id',
+      'cli-client-id',
+      '--client-secret',
+      'cli-client-secret',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Google OAuth state mismatch'),
+    );
+  });
+
+  it('Scenario: Gmail configure fails closed when Google returns no refresh token', async () => {
+    gmailMockState.refreshToken = undefined as unknown as string;
+
+    const exitCode = await runCli([
+      'configure',
+      '--provider',
+      'gmail',
+      '--mailbox',
+      'steven.obiajulu@gmail.com',
+      '--client-id',
+      'cli-client-id',
+      '--client-secret',
+      'cli-client-secret',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('did not return a refresh token'),
+    );
+  });
+
+  it('Scenario: Gmail configure uses environment credentials when flags are omitted', async () => {
+    process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'] = 'env-client-id';
+    process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'] = 'env-client-secret';
+
+    const exitCode = await runCli([
+      'configure',
+      '--provider',
+      'gmail',
+      '--mailbox',
+      'steven.obiajulu@gmail.com',
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      clientId: 'env-client-id',
+      clientSecret: 'env-client-secret',
+    });
   });
 });
 
@@ -315,6 +740,40 @@ describe('cli/Status Subcommand', () => {
     );
   });
 
+  it('Status includes Gmail-only mailboxes', async () => {
+    const tmpHome = await mkdtemp(join(tmpdir(), 'email-agent-mcp-gmail-status-test-'));
+    const savedHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    process.env['EMAIL_AGENT_MCP_HOME'] = tmpHome;
+
+    try {
+      const { mkdir, writeFile } = await import('node:fs/promises');
+      const tokensDir = join(tmpHome, 'tokens');
+      await mkdir(tokensDir, { recursive: true });
+      await writeFile(join(tokensDir, 'steven-obiajulu-at-gmail-com.json'), JSON.stringify({
+        provider: 'gmail',
+        mailboxName: 'personal',
+        emailAddress: 'steven.obiajulu@gmail.com',
+        clientId: 'gmail-client-id',
+        clientSecret: 'gmail-client-secret',
+        refreshToken: 'gmail-refresh-token',
+        lastInteractiveAuthAt: '2026-04-08T12:00:00.000Z',
+      }, null, 2) + '\n');
+
+      const exitCode = await runCli(['status']);
+      expect(exitCode).toBe(0);
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('Provider: gmail'),
+      );
+    } finally {
+      if (savedHome === undefined) {
+        delete process.env['EMAIL_AGENT_MCP_HOME'];
+      } else {
+        process.env['EMAIL_AGENT_MCP_HOME'] = savedHome;
+      }
+      await rm(tmpHome, { recursive: true, force: true });
+    }
+  });
+
   it('Scenario: Status with no config', async () => {
     // WHEN email-agent-mcp status is run with no configuration
     // THEN the system prints a message indicating no accounts are configured
@@ -446,6 +905,27 @@ describe('cli/EMAIL_AGENT_MCP_HOME', () => {
     } finally {
       if (original !== undefined) {
         process.env['EMAIL_AGENT_MCP_HOME'] = original;
+      }
+    }
+  });
+
+  it('Scenario: CLI send allowlist path follows runtime env precedence', async () => {
+    const originalAllowlist = process.env['AGENT_EMAIL_SEND_ALLOWLIST'];
+    const originalHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    try {
+      process.env['EMAIL_AGENT_MCP_HOME'] = '/tmp/email-agent-home';
+      process.env['AGENT_EMAIL_SEND_ALLOWLIST'] = '/tmp/runtime/send-allowlist.json';
+      await expect(getEffectiveSendAllowlistPath()).resolves.toBe('/tmp/runtime/send-allowlist.json');
+    } finally {
+      if (originalAllowlist === undefined) {
+        delete process.env['AGENT_EMAIL_SEND_ALLOWLIST'];
+      } else {
+        process.env['AGENT_EMAIL_SEND_ALLOWLIST'] = originalAllowlist;
+      }
+      if (originalHome === undefined) {
+        delete process.env['EMAIL_AGENT_MCP_HOME'];
+      } else {
+        process.env['EMAIL_AGENT_MCP_HOME'] = originalHome;
       }
     }
   });
