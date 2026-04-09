@@ -6,6 +6,7 @@ import { checkReplyThreading } from '../security/reply-validation.js';
 import { withRetry } from '../providers/provider.js';
 import { truncateBody, BODY_SIZE_LIMIT } from '../content/body-loader.js';
 import { renderEmailBody } from '../content/body-renderer.js';
+import { resolveAttachments } from '../content/attachment-loader.js';
 import {
   checkMailboxRequired,
   resolveComposeFields,
@@ -37,6 +38,8 @@ const CreateDraftInput = z.object({
   reply_to: z.string().optional(),
   reply_all: z.boolean().optional().default(true)
     .describe('For reply drafts (reply_to set): reply to all original recipients (default) or only the sender. Ignored for non-reply drafts.'),
+  attachments: z.array(z.string()).optional()
+    .describe('File paths to attach. Paths are resolved against EMAIL_AGENT_MCP_ATTACHMENT_DIR (must be set). 3 MiB max per file. Merged additively with any attachments listed in body_file frontmatter.'),
   mailbox: z.string().optional(),
   format: z.enum(['markdown', 'html', 'text']).optional()
     .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
@@ -66,8 +69,10 @@ export const createDraftAction: EmailAction<
       return { success: false, error: fields.error };
     }
 
-    const { to, cc, subject, replyTo, format, forceBlack } = fields;
+    const { to, cc, subject, replyTo, format, forceBlack, attachments: attachmentPaths, replyAll: fmReplyAll } = fields;
     let { body } = fields;
+    // Frontmatter-sourced reply_all overrides the param (matches "frontmatter wins" convention)
+    const effectiveReplyAll = fmReplyAll !== undefined ? fmReplyAll : input.reply_all;
 
     // Validate required fields.
     //
@@ -81,7 +86,7 @@ export const createDraftAction: EmailAction<
       if (requiredError) {
         return { success: false, error: requiredError };
       }
-    } else if (input.reply_all === false && !to) {
+    } else if (effectiveReplyAll === false && !to) {
       return {
         success: false,
         error: {
@@ -102,6 +107,18 @@ export const createDraftAction: EmailAction<
       if (threadingError) {
         return { success: false, error: threadingError };
       }
+    }
+
+    // Resolve attachments (frontmatter + param, unioned, dedup by realpath).
+    // Fail closed if the env var is misconfigured or any file is invalid —
+    // we never want to create a partial draft.
+    let resolvedAttachments;
+    if (attachmentPaths?.length) {
+      const res = await resolveAttachments(attachmentPaths);
+      if (res.error) {
+        return { success: false, error: res.error };
+      }
+      resolvedAttachments = res.attachments;
     }
 
     // Render body: markdown → HTML by default
@@ -129,7 +146,8 @@ export const createDraftAction: EmailAction<
         const result = await ctx.provider.createReplyDraft(replyTo, body, {
           cc: cc?.map(email => ({ email })),
           bodyHtml: outBodyHtml,
-          replyAll: input.reply_all,
+          replyAll: effectiveReplyAll,
+          attachments: resolvedAttachments,
         });
         return {
           success: result.success,
@@ -149,6 +167,7 @@ export const createDraftAction: EmailAction<
         subject: subject!,
         body,
         bodyHtml: outBodyHtml,
+        attachments: resolvedAttachments,
       });
       return {
         success: result.success,

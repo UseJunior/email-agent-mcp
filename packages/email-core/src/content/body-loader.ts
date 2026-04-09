@@ -2,6 +2,7 @@
 import { readFile, realpath, lstat } from 'node:fs/promises';
 import { resolve, relative, isAbsolute, extname } from 'node:path';
 import { parseFrontmatter, type FrontmatterFields } from './frontmatter.js';
+import { isPathInsideDir } from './safe-path.js';
 
 export const BODY_SIZE_LIMIT = 3.5 * 1024 * 1024; // 3.5MB
 export const TEXT_EXTENSIONS = new Set(['.md', '.html', '.htm', '.txt', '.text']);
@@ -47,7 +48,8 @@ export async function resolveBodyFile(
     const stat = await lstat(resolved);
     if (stat.isSymbolicLink()) {
       const realPath = await realpath(resolved);
-      if (!realPath.startsWith(baseDir)) {
+      const realBase = await realpath(baseDir);
+      if (!isPathInsideDir(realPath, realBase)) {
         return {
           error: {
             code: 'SYMLINK_ESCAPE',

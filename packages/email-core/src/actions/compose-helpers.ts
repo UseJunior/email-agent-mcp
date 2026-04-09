@@ -39,6 +39,13 @@ export interface ComposeFields {
   draft?: boolean;
   format?: BodyFormat;
   forceBlack?: boolean;
+  /**
+   * Merged attachments list: frontmatter values followed by parameter values,
+   * preserving order. Dedup by resolved realpath happens later in
+   * resolveAttachments.
+   */
+  attachments?: string[];
+  replyAll?: boolean;
   error?: ActionError;
 }
 
@@ -46,6 +53,12 @@ export interface ComposeFields {
  * Resolve body content from body/body_file and merge frontmatter.
  * Stays narrow: body resolution + frontmatter merge only.
  * Does NOT do required-field validation or mode branching.
+ *
+ * Precedence: frontmatter is authoritative for all scalar fields. The one
+ * exception is `attachments`, which is ADDITIVE — frontmatter attachments
+ * plus parameter attachments are unioned (dedup happens later in
+ * attachment-loader). This lets users set defaults in the body_file and
+ * still add one-off attachments from the tool call.
  *
  * For update_draft where body is optional, pass `bodyOptional: true`.
  */
@@ -60,6 +73,8 @@ export async function resolveComposeFields(
     draft?: boolean;
     format?: BodyFormat;
     force_black?: boolean;
+    attachments?: string[];
+    reply_all?: boolean;
   },
   safeDir?: string,
   opts?: { bodyOptional?: boolean },
@@ -72,6 +87,8 @@ export async function resolveComposeFields(
   let draft = input.draft;
   let format = input.format;
   let forceBlack = input.force_black;
+  let replyAll = input.reply_all;
+  const attachmentPaths: string[] = [];
 
   if (input.body_file) {
     const bodyResult = await resolveBodyFile(input.body_file, safeDir);
@@ -80,7 +97,7 @@ export async function resolveComposeFields(
     }
     body = bodyResult.content!;
 
-    // Frontmatter is authoritative
+    // Frontmatter is authoritative for scalars; attachments union below.
     if (bodyResult.frontmatter) {
       const fm = bodyResult.frontmatter;
       if (fm.to !== undefined) to = fm.to;
@@ -90,6 +107,8 @@ export async function resolveComposeFields(
       if (fm.draft !== undefined) draft = fm.draft;
       if (fm.format !== undefined) format = fm.format;
       if (fm.force_black !== undefined) forceBlack = fm.force_black;
+      if (fm.reply_all !== undefined) replyAll = fm.reply_all;
+      if (fm.attachments) attachmentPaths.push(...fm.attachments);
     }
   } else if (input.body) {
     body = input.body;
@@ -100,7 +119,22 @@ export async function resolveComposeFields(
     };
   }
 
-  return { body: body ?? '', to, cc, subject, replyTo, draft, format, forceBlack };
+  if (input.attachments?.length) {
+    attachmentPaths.push(...input.attachments);
+  }
+
+  return {
+    body: body ?? '',
+    to,
+    cc,
+    subject,
+    replyTo,
+    draft,
+    format,
+    forceBlack,
+    attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined,
+    replyAll,
+  };
 }
 
 // --- validateRequiredFields ---

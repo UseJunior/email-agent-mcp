@@ -10,6 +10,7 @@ import type { EmailAction } from './registry.js';
 import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { isPlausibleMessageId } from '../security/reply-validation.js';
 import { renderEmailBody } from '../content/body-renderer.js';
+import { resolveAttachments } from '../content/attachment-loader.js';
 import {
   checkMailboxRequired,
   checkRateLimit,
@@ -24,6 +25,8 @@ const ReplyToEmailInput = z.object({
   draft: z.boolean().optional(),
   reply_all: z.boolean().optional().default(true)
     .describe('Reply to all recipients (to + cc) when true (default), or only the sender when false.'),
+  attachments: z.array(z.string()).optional()
+    .describe('File paths to attach. Paths are resolved against EMAIL_AGENT_MCP_ATTACHMENT_DIR (must be set). 3 MiB max per file.'),
   format: z.enum(['markdown', 'html', 'text']).optional()
     .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
   force_black: z.boolean().optional()
@@ -74,6 +77,17 @@ export const replyToEmailAction: EmailAction<
     const bodyPlain = rendered.body;
     const bodyHtml = rendered.bodyHtml;
 
+    // Resolve attachments. reply_to_email doesn't parse frontmatter (no
+    // body_file input), so attachments come from the param only.
+    let resolvedAttachments;
+    if (input.attachments?.length) {
+      const res = await resolveAttachments(input.attachments);
+      if (res.error) {
+        return { success: false, error: res.error };
+      }
+      resolvedAttachments = res.attachments;
+    }
+
     // Every code path below goes through createReplyDraft — draft and send.
     // This keeps the allowlist gate on the *actual* populated recipients and
     // lets attachment upload share one code path with create_draft.
@@ -95,6 +109,7 @@ export const replyToEmailAction: EmailAction<
           cc: input.cc?.map(email => ({ email })),
           bodyHtml,
           replyAll: input.reply_all,
+          attachments: resolvedAttachments,
         });
         return {
           success: draftResult.success,
@@ -120,6 +135,7 @@ export const replyToEmailAction: EmailAction<
         cc: input.cc?.map(email => ({ email })),
         bodyHtml,
         replyAll: input.reply_all,
+        attachments: resolvedAttachments,
       });
       if (!draftResult.success || !draftResult.draftId) {
         return {

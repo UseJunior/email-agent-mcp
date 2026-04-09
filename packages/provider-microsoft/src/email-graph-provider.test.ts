@@ -117,6 +117,108 @@ describe('provider-microsoft/Draft-Then-Send via createReplyAll', () => {
   });
 });
 
+describe('provider-microsoft/Attachments (plan §2.1)', () => {
+  it('Scenario: createDraft uploads each attachment via follow-up POST', async () => {
+    const postCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const client = createMockClient({
+      post: vi.fn().mockImplementation(async (url: string, body: Record<string, unknown>) => {
+        postCalls.push({ url, body });
+        // First call returns the draft, subsequent calls are /attachments POSTs
+        if (postCalls.length === 1) return { id: 'draft-with-att' };
+        return { id: `att-${postCalls.length}` };
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.createDraft({
+      to: [{ email: 'alice@corp.com' }],
+      subject: 'With attachments',
+      body: 'See attached',
+      attachments: [
+        { filename: 'one.pdf', content: Buffer.from('first'), mimeType: 'application/pdf' },
+        { filename: 'two.txt', content: Buffer.from('second'), mimeType: 'text/plain' },
+      ],
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.draftId).toBe('draft-with-att');
+    // First call is the draft creation; next two are attachment POSTs
+    expect(postCalls).toHaveLength(3);
+    expect(postCalls[0]!.url).toMatch(/\/messages$/);
+    expect(postCalls[1]!.url).toMatch(/\/messages\/draft-with-att\/attachments$/);
+    expect(postCalls[1]!.body).toMatchObject({
+      '@odata.type': '#microsoft.graph.fileAttachment',
+      name: 'one.pdf',
+      contentType: 'application/pdf',
+      contentBytes: Buffer.from('first').toString('base64'),
+    });
+    expect(postCalls[2]!.url).toMatch(/\/messages\/draft-with-att\/attachments$/);
+    expect(postCalls[2]!.body).toMatchObject({
+      name: 'two.txt',
+      contentBytes: Buffer.from('second').toString('base64'),
+    });
+  });
+
+  it('Scenario: createDraft rolls back draft when attachment upload fails', async () => {
+    let postCallCount = 0;
+    const client = createMockClient({
+      post: vi.fn().mockImplementation(async () => {
+        postCallCount++;
+        if (postCallCount === 1) return { id: 'orphan-draft' }; // initial draft
+        throw new Error('Graph attachment endpoint exploded'); // attachment upload fails
+      }),
+      delete: vi.fn().mockResolvedValue(undefined),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    let caught: unknown;
+    try {
+      await provider.createDraft({
+        to: [{ email: 'alice@corp.com' }],
+        subject: 'Rollback test',
+        body: 'body',
+        attachments: [
+          { filename: 'x.pdf', content: Buffer.from('x'), mimeType: 'application/pdf' },
+        ],
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeDefined();
+    expect((caught as { code: string }).code).toBe('ATTACHMENT_UPLOAD_FAILED');
+
+    // Verify cleanup delete was issued
+    expect(client.delete).toHaveBeenCalledWith(
+      expect.stringContaining('/messages/orphan-draft'),
+    );
+  });
+
+  it('Scenario: createReplyDraft(replyAll=false) attaches files and hits /createReply endpoint', async () => {
+    const postCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const client = createMockClient({
+      post: vi.fn().mockImplementation(async (url: string, body: Record<string, unknown>) => {
+        postCalls.push({ url, body });
+        if (postCalls.length === 1) return { id: 'reply-draft-1' };
+        return {};
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.createReplyDraft('msg-1', 'Body', {
+      replyAll: false,
+      attachments: [
+        { filename: 'doc.pdf', content: Buffer.from('d'), mimeType: 'application/pdf' },
+      ],
+    });
+
+    expect(result.success).toBe(true);
+    expect(postCalls[0]!.url).toContain('/createReply');
+    expect(postCalls[0]!.url).not.toContain('createReplyAll');
+    expect(postCalls[1]!.url).toMatch(/\/messages\/reply-draft-1\/attachments$/);
+    expect(postCalls[1]!.body).toMatchObject({ name: 'doc.pdf' });
+  });
+});
+
 describe('provider-microsoft/Size Limits', () => {
   it('Scenario: Body size enforcement', async () => {
     const client = createMockClient();

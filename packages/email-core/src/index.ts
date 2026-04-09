@@ -46,6 +46,12 @@ export { parseFrontmatter } from './content/frontmatter.js';
 export type { FrontmatterFields } from './content/frontmatter.js';
 export { resolveBodyFile, truncateBody, BODY_SIZE_LIMIT } from './content/body-loader.js';
 export {
+  resolveAttachments,
+  ATTACHMENT_MAX_SIZE,
+  ATTACHMENT_DIR_ENV,
+} from './content/attachment-loader.js';
+export type { AttachmentLoaderError, AttachmentLoaderResult } from './content/attachment-loader.js';
+export {
   checkMailboxRequired,
   resolveComposeFields,
   validateRequiredFields,

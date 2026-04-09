@@ -10,6 +10,7 @@ import type {
   ListOptions,
   ReplyOptions,
 } from '@usejunior/email-core';
+import { ProviderError } from '@usejunior/email-core';
 
 // Gmail label mapping
 const FOLDER_TO_LABEL: Record<string, string> = {
@@ -129,18 +130,35 @@ export class GmailEmailProvider {
   }
 
   async sendMessage(msg: ComposeMessage): Promise<SendResult> {
+    if (msg.attachments?.length) {
+      throw new ProviderError(
+        'NOT_SUPPORTED',
+        'Outbound attachments are not yet supported on Gmail — buildRawMessage does not emit multipart/mixed',
+        'gmail',
+        false,
+      );
+    }
     const raw = buildRawMessage(msg);
     const result = await this.client.sendMessage(raw, msg.threadId);
     return { success: true, messageId: result.id };
   }
 
   async replyToMessage(messageId: string, body: string, opts?: ReplyOptions): Promise<SendResult> {
-    // Match Microsoft's createReplyAll semantics: reply to sender and cc
-    // everyone else on the original message. Caller-supplied opts.cc/bcc
-    // layer on top. Shipping without self-exclusion — an agent that replies
-    // to its own sent mail may cc itself; documented caveat.
+    if (opts?.attachments?.length) {
+      throw new ProviderError(
+        'NOT_SUPPORTED',
+        'Outbound attachments are not yet supported on Gmail',
+        'gmail',
+        false,
+      );
+    }
+    // Reply-all is the default (matches Microsoft's createReplyAll semantics
+    // and pre-existing Gmail behavior). When opts.replyAll === false, narrow
+    // to sender only and skip the original.to/original.cc merge.
     const original = await this.getMessage(messageId);
-    const replyAllCc = mergeAddressLists(original.to, original.cc, opts?.cc);
+    const replyAllCc = opts?.replyAll === false
+      ? (opts?.cc ?? [])
+      : mergeAddressLists(original.to, original.cc, opts?.cc);
     const subject = prefixReSubject(original.subject);
     const references = buildReferences(original.references, original.messageId);
 
@@ -164,6 +182,14 @@ export class GmailEmailProvider {
   }
 
   async createDraft(msg: ComposeMessage): Promise<DraftResult> {
+    if (msg.attachments?.length) {
+      throw new ProviderError(
+        'NOT_SUPPORTED',
+        'Outbound attachments are not yet supported on Gmail',
+        'gmail',
+        false,
+      );
+    }
     const raw = buildRawMessage(msg);
     const result = await this.client.createDraft(raw, msg.threadId);
     return { success: true, draftId: result.id };
@@ -175,9 +201,22 @@ export class GmailEmailProvider {
   }
 
   async createReplyDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {
+    if (opts?.attachments?.length) {
+      return {
+        success: false,
+        error: {
+          code: 'NOT_SUPPORTED',
+          message: 'Outbound attachments are not yet supported on Gmail',
+          recoverable: false,
+        },
+      };
+    }
     try {
       const original = await this.getMessage(messageId);
-      const replyAllCc = mergeAddressLists(original.to, original.cc, opts?.cc);
+      // Reply-all by default; opts.replyAll === false narrows to sender only.
+      const replyAllCc = opts?.replyAll === false
+        ? (opts?.cc ?? [])
+        : mergeAddressLists(original.to, original.cc, opts?.cc);
       const subject = prefixReSubject(original.subject);
       const references = buildReferences(original.references, original.messageId);
 

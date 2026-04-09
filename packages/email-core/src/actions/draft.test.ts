@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { writeFile, mkdir } from 'node:fs/promises';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { writeFile, mkdir, rm, mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MockEmailProvider } from '../testing/mock-provider.js';
 import { createDraftAction, sendDraftAction, updateDraftAction } from './draft.js';
+import { ATTACHMENT_DIR_ENV } from '../content/attachment-loader.js';
 import type { ActionContext } from './registry.js';
 
 let provider: MockEmailProvider;
@@ -366,5 +367,134 @@ describe('email-write/Body Rendering', () => {
     const draft = [...provider.getDrafts().values()][0]!;
     expect(draft.body).toBe('### Not a header');
     expect(draft.bodyHtml).toBeUndefined();
+  });
+});
+
+describe('email-write/Create Draft — attachments (plan §2.1)', () => {
+  let attachDir: string;
+  const savedEnv = process.env[ATTACHMENT_DIR_ENV];
+
+  beforeEach(async () => {
+    attachDir = await mkdtemp(join(tmpdir(), 'draft-attach-test-'));
+    process.env[ATTACHMENT_DIR_ENV] = attachDir;
+  });
+
+  afterEach(async () => {
+    if (savedEnv === undefined) {
+      delete process.env[ATTACHMENT_DIR_ENV];
+    } else {
+      process.env[ATTACHMENT_DIR_ENV] = savedEnv;
+    }
+    await rm(attachDir, { recursive: true, force: true });
+  });
+
+  it('Scenario: create_draft with one attachment stores it on the mock draft', async () => {
+    await writeFile(join(attachDir, 'report.pdf'), 'pdf bytes');
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'With attachment',
+      body: 'See attached',
+      attachments: ['report.pdf'],
+    });
+
+    expect(result.success).toBe(true);
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.attachments).toHaveLength(1);
+    expect(draft.attachments![0]!.filename).toBe('report.pdf');
+    expect(draft.attachments![0]!.content.toString('utf-8')).toBe('pdf bytes');
+  });
+
+  it('Scenario: create_draft with oversized attachment fails', async () => {
+    await writeFile(join(attachDir, 'big.bin'), Buffer.alloc(3 * 1024 * 1024 + 1, 0x41));
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Too big',
+      body: 'nope',
+      attachments: ['big.bin'],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('ATTACHMENT_TOO_LARGE');
+    expect(provider.getDrafts().size).toBe(0);
+  });
+
+  it('Scenario: create_draft with attachment but env var unset fails', async () => {
+    delete process.env[ATTACHMENT_DIR_ENV];
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'No dir',
+      body: 'nope',
+      attachments: ['report.pdf'],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('ATTACHMENT_DIR_NOT_CONFIGURED');
+  });
+
+  it('Scenario: create_draft with frontmatter + param attachments merges both', async () => {
+    await writeFile(join(attachDir, 'from-fm.txt'), 'fm');
+    await writeFile(join(attachDir, 'from-param.txt'), 'param');
+    // Frontmatter attachments are a comma-separated list
+    await writeFile(join(testDir, 'draft.md'), `---
+to: alice@allowed.com
+subject: Merged
+attachments: from-fm.txt
+---
+Body`);
+
+    const result = await createDraftAction.run(ctx, {
+      body_file: 'draft.md',
+      attachments: ['from-param.txt'],
+    });
+
+    expect(result.success).toBe(true);
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.attachments).toHaveLength(2);
+    expect(draft.attachments!.map(a => a.filename)).toEqual(['from-fm.txt', 'from-param.txt']);
+  });
+
+  it('Scenario: two same-basename attachments get disambiguated filenames', async () => {
+    await mkdir(join(attachDir, 'a'));
+    await mkdir(join(attachDir, 'b'));
+    await writeFile(join(attachDir, 'a', 'report.pdf'), 'first');
+    await writeFile(join(attachDir, 'b', 'report.pdf'), 'second');
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Two reports',
+      body: 'See attached',
+      attachments: ['a/report.pdf', 'b/report.pdf'],
+    });
+
+    expect(result.success).toBe(true);
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.attachments!.map(a => a.filename)).toEqual(['report.pdf', 'report (2).pdf']);
+  });
+
+  it('Scenario: reply draft attachments flow through to mock (via opts.attachments)', async () => {
+    provider.addMessage({
+      id: 'thread-att',
+      subject: 'Thread',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+    await writeFile(join(attachDir, 'doc.pdf'), 'bytes');
+
+    const result = await createDraftAction.run(ctx, {
+      reply_to: 'thread-att',
+      body: 'Response',
+      attachments: ['doc.pdf'],
+    });
+
+    expect(result.success).toBe(true);
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.attachments).toHaveLength(1);
+    expect(draft.attachments![0]!.filename).toBe('doc.pdf');
   });
 });
