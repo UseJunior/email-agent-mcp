@@ -57,6 +57,24 @@ export interface ComposeMessage {
   bodyHtml?: string;
   attachments?: OutboundAttachment[];
   trackingId?: string;
+  /**
+   * RFC 2822 `In-Reply-To` header — the Message-ID of the message this is
+   * replying to. Providers that construct MIME themselves (Gmail) use this
+   * to emit the header; Graph handles threading server-side via
+   * `createReplyAll` and ignores this field.
+   */
+  inReplyTo?: string;
+  /**
+   * RFC 2822 `References` header list — the thread's Message-ID history.
+   * Same provider semantics as `inReplyTo`.
+   */
+  references?: string[];
+  /**
+   * Provider-specific thread handle (Gmail `threadId`, Graph
+   * `conversationId`). When set, providers route the send/create to the
+   * matching thread. Graph ignores this (threading is server-side).
+   */
+  threadId?: string;
 }
 
 export interface OutboundAttachment {
