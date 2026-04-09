@@ -219,9 +219,19 @@ export async function handleToolCall(
  * `ZodUnion`, which is why `send_email.to` (a `string | string[]` union)
  * previously emitted `{}` in `tools/list` and some MCP clients couldn't
  * validate calls to it. Fixed by calling the real API directly.
+ *
+ * Compatibility note: Zod v4 annotates schemas with
+ * `$schema: "https://json-schema.org/draft/2020-12/schema"`. OpenClaw's
+ * current MCP validator rejects that draft header during tool-call
+ * validation, even though the emitted keywords we rely on (`type`, `anyOf`,
+ * `default`, `properties`) are otherwise compatible. Strip the root
+ * `$schema` marker so OpenClaw can compile the tool schema while we keep the
+ * richer generated shape.
  */
 function zodToJsonSchema(schema: z.ZodType): Record<string, unknown> {
-  return z.toJSONSchema(schema, { io: 'input' }) as Record<string, unknown>;
+  const jsonSchema = z.toJSONSchema(schema, { io: 'input' }) as Record<string, unknown>;
+  delete jsonSchema.$schema;
+  return jsonSchema;
 }
 
 /**
