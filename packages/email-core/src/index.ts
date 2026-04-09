@@ -51,6 +51,8 @@ export {
   ATTACHMENT_DIR_ENV,
 } from './content/attachment-loader.js';
 export type { AttachmentLoaderError, AttachmentLoaderResult } from './content/attachment-loader.js';
+export { patchFrontmatter } from './content/frontmatter-writer.js';
+export type { PatchResult } from './content/frontmatter-writer.js';
 export {
   checkMailboxRequired,
   resolveComposeFields,

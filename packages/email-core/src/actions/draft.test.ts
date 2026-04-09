@@ -163,6 +163,35 @@ Body from file.`);
     expect(result.draftId).toBeDefined();
   });
 
+  it('Scenario: frontmatter reply_all=false overrides default', async () => {
+    provider.addMessage({
+      id: 'orig-fm-replyall',
+      subject: 'Original',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }],
+      cc: [{ email: 'other@allowed.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+    await writeFile(join(testDir, 'fm-reply.md'), `---
+reply_to: orig-fm-replyall
+reply_all: false
+to: partner@allowed.com
+---
+Private response`);
+
+    const result = await createDraftAction.run(ctx, {
+      body_file: 'fm-reply.md',
+    });
+
+    expect(result.success).toBe(true);
+    // Mock's createReplyDraft gets replyAll=false and should NOT populate
+    // cc from original.to + original.cc
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.cc ?? []).toHaveLength(0);
+  });
+
   it('Scenario: reply_to with reply_all=false and no to fails with MISSING_FIELD', async () => {
     provider.addMessage({
       id: 'orig-narrow',
@@ -496,5 +525,101 @@ Body`);
     const draft = [...provider.getDrafts().values()][0]!;
     expect(draft.attachments).toHaveLength(1);
     expect(draft.attachments![0]!.filename).toBe('doc.pdf');
+  });
+});
+
+describe('email-write/Create Draft — update_source_frontmatter (plan §2.3)', () => {
+  it('Scenario: standard draft with update_source_frontmatter=true writes draft_id + draft_link', async () => {
+    const src = join(testDir, 'source.md');
+    await writeFile(src, `---
+to: alice@allowed.com
+subject: Write back
+---
+Body`);
+
+    const result = await createDraftAction.run(ctx, {
+      body_file: 'source.md',
+      update_source_frontmatter: true,
+    });
+
+    expect(result.success).toBe(true);
+    const updated = await import('node:fs/promises').then(m => m.readFile(src, 'utf-8'));
+    expect(updated).toContain(`draft_id: ${result.draftId}`);
+    expect(updated).toContain(`draft_link: https://outlook.office.com/mail/deeplink/compose?ItemID=${encodeURIComponent(result.draftId!)}`);
+    // Existing keys preserved
+    expect(updated).toContain('to: alice@allowed.com');
+    expect(updated).toContain('Body');
+  });
+
+  it('Scenario: reply draft writes draft_reply_id + draft_reply_link (reply-specific keys)', async () => {
+    provider.addMessage({
+      id: 'thread-writeback',
+      subject: 'Original',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+
+    const src = join(testDir, 'reply.md');
+    await writeFile(src, `---
+reply_to: thread-writeback
+---
+Reply body`);
+
+    const result = await createDraftAction.run(ctx, {
+      body_file: 'reply.md',
+      update_source_frontmatter: true,
+    });
+
+    expect(result.success).toBe(true);
+    const updated = await import('node:fs/promises').then(m => m.readFile(src, 'utf-8'));
+    expect(updated).toContain(`draft_reply_id: ${result.draftId}`);
+    expect(updated).toContain('draft_reply_link: https://outlook.office.com');
+    expect(updated).not.toContain('draft_id:');
+  });
+
+  it('Scenario: default (update_source_frontmatter=false) leaves source byte-exact', async () => {
+    const src = join(testDir, 'unchanged.md');
+    const original = `---
+to: alice@allowed.com
+subject: Leave me alone
+---
+Body here
+`;
+    await writeFile(src, original);
+
+    const result = await createDraftAction.run(ctx, {
+      body_file: 'unchanged.md',
+    });
+
+    expect(result.success).toBe(true);
+    const { readFile: rf } = await import('node:fs/promises');
+    const after = await rf(src, 'utf-8');
+    expect(after).toBe(original);
+  });
+
+  it('Scenario: write failure does not abort the draft (silent fail)', async () => {
+    const src = join(testDir, 'readonly.md');
+    await writeFile(src, `---
+to: alice@allowed.com
+subject: Silent fail
+---
+Body`);
+    const { chmod } = await import('node:fs/promises');
+    await chmod(src, 0o444);
+
+    try {
+      const result = await createDraftAction.run(ctx, {
+        body_file: 'readonly.md',
+        update_source_frontmatter: true,
+      });
+      // Draft still succeeds even though the frontmatter patch failed
+      expect(result.success).toBe(true);
+      expect(result.draftId).toBeDefined();
+    } finally {
+      await chmod(src, 0o644).catch(() => {});
+    }
   });
 });

@@ -7,6 +7,8 @@ import { withRetry } from '../providers/provider.js';
 import { truncateBody, BODY_SIZE_LIMIT } from '../content/body-loader.js';
 import { renderEmailBody } from '../content/body-renderer.js';
 import { resolveAttachments } from '../content/attachment-loader.js';
+import { patchFrontmatter } from '../content/frontmatter-writer.js';
+import { resolve as resolvePath } from 'node:path';
 import {
   checkMailboxRequired,
   resolveComposeFields,
@@ -40,6 +42,8 @@ const CreateDraftInput = z.object({
     .describe('For reply drafts (reply_to set): reply to all original recipients (default) or only the sender. Ignored for non-reply drafts.'),
   attachments: z.array(z.string()).optional()
     .describe('File paths to attach. Paths are resolved against EMAIL_AGENT_MCP_ATTACHMENT_DIR (must be set). 3 MiB max per file. Merged additively with any attachments listed in body_file frontmatter.'),
+  update_source_frontmatter: z.boolean().optional().default(false)
+    .describe('When true AND body_file is set AND draft creation succeeds, patch the source .md file frontmatter with draft_id + draft_link (or draft_reply_id + draft_reply_link for reply drafts). Silent-fail: does not abort the draft if the write fails.'),
   mailbox: z.string().optional(),
   format: z.enum(['markdown', 'html', 'text']).optional()
     .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
@@ -149,6 +153,9 @@ export const createDraftAction: EmailAction<
           replyAll: effectiveReplyAll,
           attachments: resolvedAttachments,
         });
+        if (result.success && result.draftId && input.update_source_frontmatter && input.body_file) {
+          await writeDraftBackLink(input.body_file, result.draftId, true, ctx.safeDir);
+        }
         return {
           success: result.success,
           draftId: result.draftId,
@@ -169,6 +176,9 @@ export const createDraftAction: EmailAction<
         bodyHtml: outBodyHtml,
         attachments: resolvedAttachments,
       });
+      if (result.success && result.draftId && input.update_source_frontmatter && input.body_file) {
+        await writeDraftBackLink(input.body_file, result.draftId, false, ctx.safeDir);
+      }
       return {
         success: result.success,
         draftId: result.draftId,
@@ -179,6 +189,33 @@ export const createDraftAction: EmailAction<
     }
   },
 };
+
+/**
+ * Patch the source body_file with draft_id + draft_link (or draft_reply_*)
+ * so the human author can navigate from their markdown back to the created
+ * draft in Outlook. Silent-fails: on any error, logs to stderr and returns.
+ * Never throws — the draft was already created successfully.
+ */
+async function writeDraftBackLink(
+  bodyFile: string,
+  draftId: string,
+  isReply: boolean,
+  safeDir: string | undefined,
+): Promise<void> {
+  const baseDir = safeDir ?? process.cwd();
+  const absolute = resolvePath(baseDir, bodyFile);
+  const outlookLink = `https://outlook.office.com/mail/deeplink/compose?ItemID=${encodeURIComponent(draftId)}`;
+  const updates: Record<string, string> = isReply
+    ? { draft_reply_id: draftId, draft_reply_link: outlookLink }
+    : { draft_id: draftId, draft_link: outlookLink };
+
+  const result = await patchFrontmatter(absolute, updates);
+  if (!result.ok) {
+    process.stderr.write(
+      `[email-agent-mcp] create_draft: update_source_frontmatter failed for ${bodyFile}: ${result.reason ?? 'unknown'}\n`,
+    );
+  }
+}
 
 // --- send_draft ---
 
