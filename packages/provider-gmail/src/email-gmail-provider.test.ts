@@ -19,6 +19,10 @@ function createMockGmailClient(overrides: Partial<GmailApiClient> = {}): GmailAp
       },
       internalDate: String(new Date('2024-03-15T10:00:00Z').getTime()),
     }),
+    getAttachment: vi.fn().mockResolvedValue({
+      data: Buffer.from('attachment bytes').toString('base64url'),
+      size: 16,
+    }),
     sendMessage: vi.fn().mockResolvedValue({ id: 'sent-1', threadId: 'thread-1' }),
     modifyMessage: vi.fn().mockResolvedValue(undefined),
     getThread: vi.fn().mockResolvedValue({ id: 'thread-1', messages: [] }),
@@ -43,6 +47,119 @@ describe('provider-gmail/Message Mapping', () => {
     expect(msg.from.name).toBe('Alice');
     expect(msg.labels).toContain('INBOX');
     expect(msg.isRead).toBe(false); // Has UNREAD label
+  });
+
+  it('Scenario: multipart Gmail messages expose attachment metadata and inline content ids', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue({
+        id: 'msg-attachments',
+        threadId: 'thread-attachments',
+        labelIds: ['INBOX'],
+        payload: {
+          headers: [
+            { name: 'From', value: 'sender@example.com' },
+            { name: 'To', value: 'recipient@example.com' },
+            { name: 'Subject', value: 'Attachments' },
+            { name: 'Date', value: '2026-04-09T12:00:00Z' },
+          ],
+          mimeType: 'multipart/mixed',
+          parts: [
+            {
+              mimeType: 'multipart/alternative',
+              parts: [
+                {
+                  mimeType: 'text/plain',
+                  body: { data: Buffer.from('Plain body').toString('base64url') },
+                },
+                {
+                  mimeType: 'text/html',
+                  body: { data: Buffer.from('<p>HTML body</p>').toString('base64url') },
+                },
+              ],
+            },
+            {
+              mimeType: 'application/pdf',
+              filename: 'contract.pdf',
+              body: { attachmentId: 'att-pdf', size: 245000 },
+              headers: [{ name: 'Content-Disposition', value: 'attachment; filename="contract.pdf"' }],
+            },
+            {
+              mimeType: 'image/png',
+              filename: 'inline.png',
+              body: { attachmentId: 'att-inline', size: 1024 },
+              headers: [
+                { name: 'Content-Disposition', value: 'inline; filename="inline.png"' },
+                { name: 'Content-ID', value: '<image001>' },
+              ],
+            },
+          ],
+        },
+        internalDate: String(new Date('2026-04-09T12:00:00Z').getTime()),
+      }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const msg = await provider.getMessage('msg-attachments');
+
+    expect(msg.body).toBe('Plain body');
+    expect(msg.bodyHtml).toBe('<p>HTML body</p>');
+    expect(msg.hasAttachments).toBe(true);
+    expect(msg.attachments).toEqual([
+      {
+        id: 'att-pdf',
+        filename: 'contract.pdf',
+        mimeType: 'application/pdf',
+        size: 245000,
+        contentId: undefined,
+        isInline: false,
+      },
+      {
+        id: 'att-inline',
+        filename: 'inline.png',
+        mimeType: 'image/png',
+        size: 1024,
+        contentId: 'image001',
+        isInline: true,
+      },
+    ]);
+  });
+
+  it('Scenario: inline body-only attachment parts get synthetic ids for later download', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue({
+        id: 'msg-inline-body',
+        threadId: 'thread-inline-body',
+        labelIds: ['INBOX'],
+        payload: {
+          headers: [
+            { name: 'From', value: 'sender@example.com' },
+            { name: 'To', value: 'recipient@example.com' },
+            { name: 'Subject', value: 'Inline image' },
+          ],
+          parts: [
+            {
+              mimeType: 'image/png',
+              body: { data: Buffer.from('tiny-image').toString('base64url') },
+              headers: [{ name: 'Content-ID', value: '<image002>' }],
+            },
+          ],
+        },
+      }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const msg = await provider.getMessage('msg-inline-body');
+
+    expect(msg.attachments).toEqual([
+      {
+        id: 'part:0',
+        filename: 'image002',
+        mimeType: 'image/png',
+        size: Buffer.from('tiny-image').byteLength,
+        contentId: 'image002',
+        isInline: true,
+      },
+    ]);
   });
 });
 
@@ -113,6 +230,47 @@ describe('provider-gmail/NemoClaw Compatibility', () => {
     expect(domains).toContain('gmail.googleapis.com');
     expect(domains).toContain('oauth2.googleapis.com');
     expect(domains).toContain('pubsub.googleapis.com');
+  });
+});
+
+describe('provider-gmail/Attachment Retrieval', () => {
+  it('Scenario: downloadAttachment fetches Gmail attachment bytes by attachment id', async () => {
+    const client = createMockGmailClient();
+    const provider = new GmailEmailProvider(client);
+
+    const bytes = await provider.downloadAttachment('msg-1', 'att-1');
+
+    expect(client.getAttachment).toHaveBeenCalledWith('msg-1', 'att-1');
+    expect(bytes.toString('utf-8')).toBe('attachment bytes');
+  });
+
+  it('Scenario: downloadAttachment falls back to inline part data for synthetic ids', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue({
+        id: 'msg-inline-body',
+        threadId: 'thread-inline-body',
+        payload: {
+          headers: [
+            { name: 'From', value: 'sender@example.com' },
+            { name: 'To', value: 'recipient@example.com' },
+            { name: 'Subject', value: 'Inline image' },
+          ],
+          parts: [
+            {
+              mimeType: 'image/png',
+              body: { data: Buffer.from('tiny-image').toString('base64url') },
+              headers: [{ name: 'Content-ID', value: '<image002>' }],
+            },
+          ],
+        },
+      }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const bytes = await provider.downloadAttachment('msg-inline-body', 'part:0');
+
+    expect(client.getAttachment).not.toHaveBeenCalled();
+    expect(bytes.toString('utf-8')).toBe('tiny-image');
   });
 });
 

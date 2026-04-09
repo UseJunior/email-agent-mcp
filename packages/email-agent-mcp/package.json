@@ -1,7 +1,7 @@
 {
   "name": "email-agent-mcp",
   "version": "0.1.5",
-  "description": "Local email connectivity for AI agents — MCP server for Microsoft 365 / Outlook with Gmail wiring in progress",
+  "description": "Local email connectivity for AI agents — MCP server for Microsoft 365 / Outlook and manual-token Gmail setup",
   "type": "module",
   "main": "./index.js",
   "types": "./index.d.ts",

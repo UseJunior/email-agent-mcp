@@ -2,6 +2,7 @@
 import { randomBytes } from 'node:crypto';
 import type {
   EmailAddress,
+  EmailAttachment,
   EmailMessage,
   EmailThread,
   ComposeMessage,
@@ -29,6 +30,7 @@ const SUBJECT_MAX_LENGTH = 255;
 export interface GmailApiClient {
   listMessages(opts: { labelIds?: string[]; maxResults?: number; q?: string }): Promise<{ messages?: Array<{ id: string; threadId: string }>; resultSizeEstimate?: number }>;
   getMessage(id: string): Promise<GmailMessage>;
+  getAttachment(messageId: string, attachmentId: string): Promise<{ data?: string; size?: number }>;
   /**
    * Send a raw RFC 2822 message. Optional `threadId` routes the send into
    * an existing thread (used by reply flows). Existing implementations can
@@ -53,6 +55,14 @@ export interface GmailApiClient {
   updateDraft?(draftId: string, raw: string, threadId?: string): Promise<{ id: string; message: { id: string; threadId: string } }>;
 }
 
+interface GmailMessagePart {
+  mimeType?: string;
+  body?: { data?: string; attachmentId?: string; size?: number };
+  filename?: string;
+  headers?: Array<{ name: string; value: string }>;
+  parts?: GmailMessagePart[];
+}
+
 export interface GmailMessage {
   id: string;
   threadId: string;
@@ -61,12 +71,7 @@ export interface GmailMessage {
     headers?: Array<{ name: string; value: string }>;
     body?: { data?: string };
     mimeType?: string;
-    parts?: Array<{
-      mimeType?: string;
-      body?: { data?: string; attachmentId?: string; size?: number };
-      filename?: string;
-      headers?: Array<{ name: string; value: string }>;
-    }>;
+    parts?: GmailMessagePart[];
   };
   internalDate?: string;
 }
@@ -126,6 +131,28 @@ export class GmailEmailProvider {
       messageCount: thread.messages.length,
       isTruncated: thread.messages.length >= 100,
     };
+  }
+
+  async listAttachments(messageId: string): Promise<EmailAttachment[]> {
+    const message = await this.getMessage(messageId);
+    return message.attachments ?? [];
+  }
+
+  async downloadAttachment(messageId: string, attachmentId: string): Promise<Buffer> {
+    if (attachmentId.startsWith('part:')) {
+      const message = await this.client.getMessage(messageId);
+      const part = findPartByPath(message.payload?.parts, attachmentId.slice('part:'.length));
+      if (!part?.body?.data) {
+        throw new Error(`Gmail attachment ${attachmentId} is missing inline body data`);
+      }
+      return Buffer.from(part.body.data, 'base64url');
+    }
+
+    const attachment = await this.client.getAttachment(messageId, attachmentId);
+    if (!attachment.data) {
+      throw new Error(`Gmail attachment ${attachmentId} returned no data`);
+    }
+    return Buffer.from(attachment.data, 'base64url');
   }
 
   async sendMessage(msg: ComposeMessage): Promise<SendResult> {
@@ -266,6 +293,71 @@ function getHeader(msg: GmailMessage, name: string): string | undefined {
   return msg.payload?.headers?.find(h => h.name.toLowerCase() === name.toLowerCase())?.value;
 }
 
+function getPartHeader(part: GmailMessagePart, name: string): string | undefined {
+  return part.headers?.find(h => h.name.toLowerCase() === name.toLowerCase())?.value;
+}
+
+function decodeBase64Url(value: string): string {
+  return Buffer.from(value, 'base64url').toString('utf-8');
+}
+
+function stripAngleBrackets(value: string): string {
+  const match = value.trim().match(/^<(.+)>$/);
+  return match ? match[1]! : value.trim();
+}
+
+function collectPayloadContent(msg: GmailMessage): {
+  body?: string;
+  bodyHtml?: string;
+  attachments: EmailAttachment[];
+} {
+  let body =
+    msg.payload?.body?.data && msg.payload.mimeType !== 'text/html'
+      ? decodeBase64Url(msg.payload.body.data)
+      : undefined;
+  let bodyHtml =
+    msg.payload?.body?.data && msg.payload.mimeType === 'text/html'
+      ? decodeBase64Url(msg.payload.body.data)
+      : undefined;
+  const attachments: EmailAttachment[] = [];
+
+  const visitPart = (part: GmailMessagePart, path: string): void => {
+    const contentId = getPartHeader(part, 'Content-ID');
+    const contentDisposition = getPartHeader(part, 'Content-Disposition')?.toLowerCase();
+    const hasAttachmentIdentity = Boolean(part.filename) || Boolean(part.body?.attachmentId);
+    const isInline = Boolean(contentId) || Boolean(contentDisposition?.includes('inline'));
+
+    if (!hasAttachmentIdentity && !isInline) {
+      if (!body && part.mimeType === 'text/plain' && part.body?.data) {
+        body = decodeBase64Url(part.body.data);
+      } else if (!bodyHtml && part.mimeType === 'text/html' && part.body?.data) {
+        bodyHtml = decodeBase64Url(part.body.data);
+      }
+    } else if (part.body?.attachmentId || part.body?.data) {
+      const attachmentId = part.body?.attachmentId ?? `part:${path}`;
+      const decodedSize = part.body?.data ? Buffer.from(part.body.data, 'base64url').byteLength : 0;
+      attachments.push({
+        id: attachmentId,
+        filename: part.filename || stripAngleBrackets(contentId ?? '') || `attachment-${path.replace(/\./g, '-')}`,
+        mimeType: part.mimeType ?? 'application/octet-stream',
+        size: part.body?.size ?? decodedSize,
+        contentId: contentId ? stripAngleBrackets(contentId) : undefined,
+        isInline,
+      });
+    }
+
+    for (const [index, child] of (part.parts ?? []).entries()) {
+      visitPart(child, `${path}.${index}`);
+    }
+  };
+
+  for (const [index, part] of (msg.payload?.parts ?? []).entries()) {
+    visitPart(part, String(index));
+  }
+
+  return { body, bodyHtml, attachments };
+}
+
 function mapGmailMessage(msg: GmailMessage): EmailMessage {
   const from = parseEmailAddress(getHeader(msg, 'From') ?? '');
   const to = (getHeader(msg, 'To') ?? '').split(',').map(a => parseEmailAddress(a.trim())).filter(a => a.email);
@@ -284,21 +376,7 @@ function mapGmailMessage(msg: GmailMessage): EmailMessage {
     ? referencesRaw.split(/\s+/).filter(r => r.length > 0)
     : undefined;
 
-  // Get body content
-  let body: string | undefined;
-  let bodyHtml: string | undefined;
-  if (msg.payload?.body?.data) {
-    body = Buffer.from(msg.payload.body.data, 'base64url').toString('utf-8');
-  }
-  if (msg.payload?.parts) {
-    for (const part of msg.payload.parts) {
-      if (part.mimeType === 'text/plain' && part.body?.data) {
-        body = Buffer.from(part.body.data, 'base64url').toString('utf-8');
-      } else if (part.mimeType === 'text/html' && part.body?.data) {
-        bodyHtml = Buffer.from(part.body.data, 'base64url').toString('utf-8');
-      }
-    }
-  }
+  const { body, bodyHtml, attachments } = collectPayloadContent(msg);
 
   const labels = msg.labelIds ?? [];
 
@@ -310,7 +388,7 @@ function mapGmailMessage(msg: GmailMessage): EmailMessage {
     cc,
     receivedAt: date,
     isRead: !labels.includes('UNREAD'),
-    hasAttachments: msg.payload?.parts?.some(p => !!p.filename) ?? false,
+    hasAttachments: attachments.length > 0,
     body,
     bodyHtml,
     threadId: msg.threadId,
@@ -319,7 +397,21 @@ function mapGmailMessage(msg: GmailMessage): EmailMessage {
     references,
     labels,
     folder: labels.includes('INBOX') ? 'inbox' : labels.includes('SENT') ? 'sent' : undefined,
+    attachments: attachments.length > 0 ? attachments : undefined,
   };
+}
+
+function findPartByPath(parts: GmailMessagePart[] | undefined, path: string): GmailMessagePart | null {
+  if (!parts) return null;
+  const indices = path.split('.').map(segment => Number.parseInt(segment, 10));
+  let current: GmailMessagePart | undefined;
+  let currentParts = parts;
+  for (const index of indices) {
+    current = currentParts[index];
+    if (!current) return null;
+    currentParts = current.parts ?? [];
+  }
+  return current ?? null;
 }
 
 function parseEmailAddress(raw: string): { email: string; name?: string } {

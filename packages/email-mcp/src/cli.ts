@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // CLI entry point — serve, watch, configure, setup subcommands + TTY-aware default
 
+import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 
@@ -19,6 +21,7 @@ export interface CliOptions {
   mailbox?: string;
   provider?: string;
   clientId?: string;
+  clientSecret?: string;
   pollInterval?: number; // seconds
 }
 
@@ -43,6 +46,13 @@ export interface AgentEmailConfig {
   wakeUrl?: string;
   hooksToken?: string;
   pollIntervalSeconds?: number;
+}
+
+export interface ConfiguredMailboxSummary {
+  provider: 'microsoft' | 'gmail';
+  mailboxName: string;
+  emailAddress?: string;
+  lastInteractiveAuthAt?: string;
 }
 
 /**
@@ -75,6 +85,235 @@ export async function saveConfig(updates: Partial<AgentEmailConfig>): Promise<vo
   const dir = getAgentEmailHome();
   await mkdir(dir, { recursive: true });
   await writeFile(getConfigPath(), JSON.stringify(merged, null, 2) + '\n', 'utf-8');
+}
+
+function getAuthTimestamp(value?: string): number {
+  if (!value) return 0;
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+async function listConfiguredMailboxSummaries(): Promise<ConfiguredMailboxSummary[]> {
+  const summaries: ConfiguredMailboxSummary[] = [];
+
+  try {
+    const { listConfiguredMailboxesWithMetadata } = await import('@usejunior/provider-microsoft');
+    const mailboxes = await listConfiguredMailboxesWithMetadata();
+    summaries.push(
+      ...mailboxes.map(mailbox => ({
+        provider: 'microsoft' as const,
+        mailboxName: mailbox.mailboxName,
+        emailAddress: mailbox.emailAddress,
+        lastInteractiveAuthAt: mailbox.lastInteractiveAuthAt,
+      })),
+    );
+  } catch {
+    // Provider package may not be installed.
+  }
+
+  try {
+    const { listConfiguredGmailMailboxes } = await import('@usejunior/provider-gmail');
+    const mailboxes = await listConfiguredGmailMailboxes();
+    summaries.push(
+      ...mailboxes.map(mailbox => ({
+        provider: 'gmail' as const,
+        mailboxName: mailbox.mailboxName,
+        emailAddress: mailbox.emailAddress,
+        lastInteractiveAuthAt: mailbox.lastInteractiveAuthAt,
+      })),
+    );
+  } catch {
+    // Provider package may not be installed.
+  }
+
+  summaries.sort((a, b) => getAuthTimestamp(b.lastInteractiveAuthAt) - getAuthTimestamp(a.lastInteractiveAuthAt));
+  return summaries;
+}
+
+export async function getEffectiveSendAllowlistPath(): Promise<string> {
+  const { getSendAllowlistPath } = await import('@usejunior/email-core');
+  return getSendAllowlistPath();
+}
+
+function normalizeMailboxValue(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+export async function ensureGmailProfileMatchesIntent(
+  mailboxName: string,
+  emailAddress: string,
+): Promise<void> {
+  const normalizedMailboxName = normalizeMailboxValue(mailboxName);
+  const normalizedEmailAddress = normalizeMailboxValue(emailAddress);
+
+  if (mailboxName.includes('@')) {
+    if (normalizedMailboxName !== normalizedEmailAddress) {
+      throw new Error(
+        `Google authenticated ${emailAddress}, but configure was asked to link ${mailboxName}. Re-run configure and choose the intended Google account.`,
+      );
+    }
+    return;
+  }
+
+  const existingMailbox = (await listConfiguredMailboxSummaries()).find(summary =>
+    summary.provider === 'gmail' &&
+    normalizeMailboxValue(summary.mailboxName) === normalizedMailboxName &&
+    summary.emailAddress,
+  );
+
+  if (existingMailbox?.emailAddress) {
+    if (normalizeMailboxValue(existingMailbox.emailAddress) !== normalizedEmailAddress) {
+      throw new Error(
+        `Mailbox "${mailboxName}" is already linked to ${existingMailbox.emailAddress}, but Google authenticated ${emailAddress}. Use a different mailbox name or re-run configure with the intended Google account.`,
+      );
+    }
+    return;
+  }
+
+  if (!process.stdout.isTTY) {
+    throw new Error(
+      `Google authenticated ${emailAddress} for mailbox alias "${mailboxName}", but the alias does not prove which account you intended. Re-run in a TTY to confirm, or pass --mailbox ${emailAddress}.`,
+    );
+  }
+
+  const p = await import('@clack/prompts');
+  const confirmed = await p.confirm({
+    message: `Google authenticated ${emailAddress}. Save it as mailbox "${mailboxName}"?`,
+  });
+  if (p.isCancel(confirmed) || !confirmed) {
+    throw new Error('Gmail configuration cancelled because the authenticated account was not confirmed');
+  }
+}
+
+async function addEmailToSendAllowlist(emailAddress: string): Promise<void> {
+  // Keep CLI writes aligned with the runtime/server path resolution so
+  // configure-time edits land in the file the MCP server will actually watch.
+  const allowlistPath = await getEffectiveSendAllowlistPath();
+  const agentHome = dirname(allowlistPath);
+
+  await mkdir(agentHome, { recursive: true });
+
+  let entries: string[] = [];
+  try {
+    const raw = await readFile(allowlistPath, 'utf-8');
+    const data = JSON.parse(raw) as { entries?: string[] };
+    entries = data.entries ?? [];
+  } catch {
+    // Start with a new allowlist file.
+  }
+
+  const lowerEmail = emailAddress.toLowerCase();
+  if (!entries.some(entry => entry.toLowerCase() === lowerEmail)) {
+    entries.push(emailAddress);
+  }
+
+  await writeFile(allowlistPath, JSON.stringify({ entries }, null, 2) + '\n', 'utf-8');
+}
+
+interface OAuthCallbackResult {
+  code: string;
+  state?: string;
+}
+
+async function startLoopbackOAuthListener(timeoutMs = 5 * 60 * 1000): Promise<{
+  redirectUri: string;
+  waitForCallback: Promise<OAuthCallbackResult>;
+}> {
+  const callbackPath = '/oauth2callback';
+  let resolveCallback!: (value: OAuthCallbackResult) => void;
+  let rejectCallback!: (reason?: unknown) => void;
+  const waitForCallback = new Promise<OAuthCallbackResult>((resolve, reject) => {
+    resolveCallback = resolve;
+    rejectCallback = reject;
+  });
+
+  let settled = false;
+  let activePort = 0;
+
+  const settle = (handler: () => void) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeoutId);
+    server.close(() => {
+      handler();
+    });
+  };
+
+  const server = createServer((req, res) => {
+    const requestUrl = new URL(req.url ?? '/', `http://127.0.0.1:${activePort || 80}`);
+    if (requestUrl.pathname !== callbackPath) {
+      res.statusCode = 404;
+      res.end('Not found.');
+      return;
+    }
+
+    const error = requestUrl.searchParams.get('error');
+    if (error) {
+      res.statusCode = 400;
+      res.setHeader('content-type', 'text/html; charset=utf-8');
+      res.end('<html><body><h1>Authentication failed</h1><p>You can return to the terminal.</p></body></html>');
+      settle(() => {
+        rejectCallback(new Error(`Google OAuth returned ${error}`));
+      });
+      return;
+    }
+
+    const code = requestUrl.searchParams.get('code');
+    if (!code) {
+      res.statusCode = 400;
+      res.setHeader('content-type', 'text/html; charset=utf-8');
+      res.end('<html><body><h1>Missing authorization code</h1><p>You can return to the terminal.</p></body></html>');
+      settle(() => {
+        rejectCallback(new Error('Google OAuth callback did not include an authorization code'));
+      });
+      return;
+    }
+
+    res.statusCode = 200;
+    res.setHeader('content-type', 'text/html; charset=utf-8');
+    res.end('<html><body><h1>Authentication complete</h1><p>You can return to the terminal and close this tab.</p></body></html>');
+    settle(() => {
+      resolveCallback({
+        code,
+        state: requestUrl.searchParams.get('state') ?? undefined,
+      });
+    });
+  });
+
+  server.on('error', err => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeoutId);
+    rejectCallback(err);
+  });
+
+  const timeoutId = setTimeout(() => {
+    settle(() => {
+      rejectCallback(new Error('Timed out waiting for the Google OAuth callback'));
+    });
+  }, timeoutMs);
+  timeoutId.unref();
+
+  await new Promise<void>((resolve, reject) => {
+    server.listen(0, '127.0.0.1', () => {
+      resolve();
+    });
+    server.once('error', reject);
+  });
+
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    settle(() => {
+      rejectCallback(new Error('Could not determine the local OAuth callback port'));
+    });
+    throw new Error('Could not determine the local OAuth callback port');
+  }
+
+  activePort = address.port;
+  return {
+    redirectUri: `http://127.0.0.1:${address.port}${callbackPath}`,
+    waitForCallback,
+  };
 }
 
 export function parseCliArgs(args: string[]): CliOptions {
@@ -113,6 +352,10 @@ export function parseCliArgs(args: string[]): CliOptions {
     }
     if (arg === '--client-id' && i + 1 < args.length) {
       opts.clientId = args[++i];
+      continue;
+    }
+    if (arg === '--client-secret' && i + 1 < args.length) {
+      opts.clientSecret = args[++i];
       continue;
     }
     if (arg === '--poll-interval' && i + 1 < args.length) {
@@ -171,8 +414,7 @@ export async function runCli(args: string[]): Promise<number> {
         }
 
         // TTY: check if any mailboxes are configured
-        const { listConfiguredMailboxesWithMetadata } = await import('@usejunior/provider-microsoft');
-        const mailboxes = await listConfiguredMailboxesWithMetadata();
+        const mailboxes = await listConfiguredMailboxSummaries();
 
         if (mailboxes.length === 0) {
           // No config -> run guided setup wizard
@@ -465,6 +707,143 @@ export async function runWatch(opts: CliOptions): Promise<number> {
   });
 }
 
+async function resolveGmailOAuthClient(opts: CliOptions): Promise<{ clientId: string; clientSecret: string }> {
+  let clientId = opts.clientId
+    ?? process.env['AGENT_EMAIL_GMAIL_CLIENT_ID']
+    ?? process.env['GOOGLE_CLIENT_ID'];
+  let clientSecret = opts.clientSecret
+    ?? process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET']
+    ?? process.env['GOOGLE_CLIENT_SECRET']
+    ?? '';
+
+  if ((!clientId || !clientSecret) && process.stdout.isTTY) {
+    const p = await import('@clack/prompts');
+
+    if (!clientId) {
+      const input = await p.text({
+        message: 'Enter the Google OAuth client ID for Gmail',
+        placeholder: 'xxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.apps.googleusercontent.com',
+      });
+      if (p.isCancel(input)) {
+        throw new Error('Gmail configuration cancelled');
+      }
+      clientId = input.trim();
+    }
+
+    if (!clientSecret) {
+      const input = await p.password({
+        message: 'Enter the Google OAuth client secret for Gmail',
+        mask: '▪',
+      });
+      if (p.isCancel(input)) {
+        throw new Error('Gmail configuration cancelled');
+      }
+      clientSecret = input.trim();
+    }
+  }
+
+  if (!clientId) {
+    throw new Error(
+      'Missing Gmail OAuth client ID. Pass --client-id or set AGENT_EMAIL_GMAIL_CLIENT_ID.',
+    );
+  }
+
+  if (!clientSecret) {
+    throw new Error(
+      'Missing Gmail OAuth client secret. Pass --client-secret or set AGENT_EMAIL_GMAIL_CLIENT_SECRET.',
+    );
+  }
+
+  return {
+    clientId,
+    clientSecret,
+  };
+}
+
+async function runGmailConfigure(opts: CliOptions): Promise<number> {
+  const mailboxName = opts.mailbox ?? 'default';
+  const { clientId, clientSecret } = await resolveGmailOAuthClient(opts);
+
+  const {
+    GMAIL_OAUTH_SCOPES,
+    GmailAuthManager,
+    saveGmailMailboxMetadata,
+    toFilesystemSafeKey,
+  } = await import('@usejunior/provider-gmail');
+
+  console.error(`[email-agent-mcp] Configuring mailbox "${mailboxName}" with Gmail`);
+  console.error(`[email-agent-mcp] OAuth client ID: ${clientId}`);
+  console.error('');
+
+  const auth = new GmailAuthManager({ clientId, clientSecret });
+  const { redirectUri, waitForCallback } = await startLoopbackOAuthListener();
+  const { codeVerifier, codeChallenge } = await auth.generateCodeVerifierAsync();
+  const state = randomUUID();
+  const authUrl = auth.generateAuthUrl({
+    scopes: GMAIL_OAUTH_SCOPES,
+    redirectUri,
+    state,
+    codeChallenge,
+    loginHint: mailboxName.includes('@') ? mailboxName : undefined,
+  });
+
+  console.error('[email-agent-mcp] Open this URL in your browser to authorize Gmail access:');
+  console.error(`  ${authUrl}`);
+  console.error(`[email-agent-mcp] Waiting for Google OAuth callback on ${redirectUri}`);
+
+  const callback = await waitForCallback;
+  if (callback.state !== state) {
+    throw new Error('Google OAuth state mismatch');
+  }
+
+  await auth.exchangeCode(callback.code, { codeVerifier, redirectUri });
+
+  const refreshToken = auth.getRefreshToken();
+  if (!refreshToken) {
+    throw new Error(
+      'Google OAuth did not return a refresh token. Re-run configure after revoking the prior grant or forcing consent.',
+    );
+  }
+
+  const profile = await auth.fetchProfile();
+  const emailAddress = profile.emailAddress;
+  if (!emailAddress) {
+    throw new Error('Gmail profile did not include an email address');
+  }
+
+  await ensureGmailProfileMatchesIntent(mailboxName, emailAddress);
+
+  const lastInteractiveAuthAt = new Date().toISOString();
+  await saveGmailMailboxMetadata({
+    provider: 'gmail',
+    mailboxName,
+    emailAddress,
+    clientId,
+    clientSecret,
+    refreshToken,
+    lastInteractiveAuthAt,
+  });
+
+  try {
+    await addEmailToSendAllowlist(emailAddress);
+    console.error(`[email-agent-mcp] Send allowlist: ${emailAddress} (outbound email enabled to this address)`);
+  } catch (allowlistErr) {
+    console.error(`[email-agent-mcp] WARNING: Could not update send allowlist: ${allowlistErr instanceof Error ? allowlistErr.message : allowlistErr}`);
+  }
+
+  const safeKey = toFilesystemSafeKey(emailAddress);
+
+  console.error('');
+  console.error(`✅ Connected as: ${emailAddress}`);
+  console.error(`   Mailbox saved to ~/.email-agent-mcp/tokens/${safeKey}.json`);
+  console.error('');
+  console.error('To start the MCP server, run:');
+  console.error('   npx tsx packages/email-mcp/src/cli.ts serve   # from source');
+  console.error('   npx email-agent-mcp serve             # after npm publish');
+
+  return 0;
+}
+
 export async function runConfigure(opts: CliOptions): Promise<number> {
   if (opts.nemoclaw) {
     console.error('[email-agent-mcp] NemoClaw bootstrap — adding egress domains:');
@@ -477,8 +856,17 @@ export async function runConfigure(opts: CliOptions): Promise<number> {
   const mailboxName = opts.mailbox ?? 'default';
   const provider = opts.provider ?? 'microsoft';
 
+  if (provider === 'gmail') {
+    try {
+      return await runGmailConfigure(opts);
+    } catch (err) {
+      console.error(`\n❌ Configuration failed: ${err instanceof Error ? err.message : err}`);
+      return 1;
+    }
+  }
+
   if (provider !== 'microsoft') {
-    console.error(`[email-agent-mcp] Provider "${provider}" not yet supported for configure. Use --provider microsoft`);
+    console.error(`[email-agent-mcp] Provider "${provider}" not yet supported for configure. Use --provider microsoft or --provider gmail`);
     return 1;
   }
 
@@ -520,7 +908,7 @@ export async function runConfigure(opts: CliOptions): Promise<number> {
         // This handles: work.json -> test-user-at-example-com.json migration
         // and any other stale alias files
         {
-          const { unlink, readdir, readFile: readFileAsync, writeFile: writeFileAsync, mkdir } = await import('node:fs/promises');
+          const { unlink, readdir, readFile: readFileAsync } = await import('node:fs/promises');
           const agentHome = getAgentEmailHome();
           const tokensDir = join(agentHome, 'tokens');
           const newFilename = `${safeKey}.json`;
@@ -545,29 +933,8 @@ export async function runConfigure(opts: CliOptions): Promise<number> {
           }
 
           // Auto-add the authenticated email to the send allowlist
-          const allowlistPath = join(agentHome, 'send-allowlist.json');
           try {
-            // Ensure directory exists
-            await mkdir(agentHome, { recursive: true });
-
-            // Read existing allowlist or start empty
-            let entries: string[] = [];
-            try {
-              const raw = await readFileAsync(allowlistPath, 'utf-8');
-              const data = JSON.parse(raw) as { entries?: string[] };
-              entries = data.entries ?? [];
-            } catch {
-              // File doesn't exist yet — start fresh
-            }
-
-            // Dedupe-add (case-insensitive)
-            const lowerEmail = emailAddress.toLowerCase();
-            if (!entries.some(e => e.toLowerCase() === lowerEmail)) {
-              entries.push(emailAddress);
-            }
-
-            // Write back pretty-printed
-            await writeFileAsync(allowlistPath, JSON.stringify({ entries }, null, 2) + '\n', 'utf-8');
+            await addEmailToSendAllowlist(emailAddress);
             console.error(`[email-agent-mcp] Send allowlist: ${emailAddress} (outbound email enabled to this address)`);
           } catch (allowlistErr) {
             console.error(`[email-agent-mcp] WARNING: Could not update send allowlist: ${allowlistErr instanceof Error ? allowlistErr.message : allowlistErr}`);
@@ -603,8 +970,7 @@ export async function runConfigure(opts: CliOptions): Promise<number> {
  * Show detailed status of all configured mailboxes.
  */
 export async function runStatus(): Promise<number> {
-  const { listConfiguredMailboxesWithMetadata } = await import('@usejunior/provider-microsoft');
-  const mailboxes = await listConfiguredMailboxesWithMetadata();
+  const mailboxes = await listConfiguredMailboxSummaries();
 
   console.error('');
   console.error('  \uD83E\uDD9E email-agent-mcp status');
@@ -625,6 +991,7 @@ export async function runStatus(): Promise<number> {
       : null;
 
     console.error(`  Account: ${name}`);
+    console.error(`    Provider: ${mb.provider}`);
     console.error(`    Last authenticated: ${lastAuth}`);
     if (daysSinceAuth !== null) {
       if (daysSinceAuth > 80) {
@@ -743,6 +1110,7 @@ OPTIONS:
   --mailbox <name>       Mailbox alias or email address (required if multiple configured)
   --provider <name>      Auth provider (microsoft, gmail)
   --client-id <id>       OAuth client ID override
+  --client-secret <val>  OAuth client secret override (used for Gmail configure)
 `.trim());
 }
 

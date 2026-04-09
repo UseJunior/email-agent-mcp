@@ -101,9 +101,9 @@ Agent Email stellt 15 MCP-Tools bereit:
 | Anbieter | Status | Paket |
 |----------|--------|-------|
 | Microsoft 365 (Graph API) | Vollstaendig unterstuetzt | `@usejunior/provider-microsoft` |
-| Gmail | In Kuerze verfuegbar | `@usejunior/provider-gmail` |
+| Gmail | Unterstuetzt per manuellem Refresh-Token-Setup | `@usejunior/provider-gmail` |
 
-Das Gmail-Provider-Paket existiert mit vollstaendiger Testabdeckung. Die Anbindung an den MCP-Server ist in Arbeit.
+Gmail funktioniert jetzt im MCP-Server ueber eine manuelle Datei unter `~/.email-agent-mcp/tokens/`. Der interaktive Gmail-Assistent ist weiterhin ein Follow-up. Siehe `packages/provider-gmail/README.md`.
 
 ## Sicherheitsstandards
 

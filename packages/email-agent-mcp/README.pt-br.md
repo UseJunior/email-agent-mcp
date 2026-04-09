@@ -99,9 +99,9 @@ O Agent Email expoe 15 ferramentas MCP:
 | Provedor | Status | Pacote |
 |----------|--------|--------|
 | Microsoft 365 (Graph API) | Totalmente suportado | `@usejunior/provider-microsoft` |
-| Gmail | Em breve | `@usejunior/provider-gmail` |
+| Gmail | Suportado via OAuth interativo no CLI ou configuracao manual de refresh token | `@usejunior/provider-gmail` |
 
-O pacote do provedor Gmail ja existe com cobertura completa de testes. A integracao com o servidor MCP esta em andamento.
+Use `email-agent-mcp configure --provider gmail` para executar o fluxo OAuth local no navegador, ou adicione um arquivo manual em `~/.email-agent-mcp/tokens/`. Veja `packages/provider-gmail/README.md`.
 
 ## Configuracoes Padrao de Seguranca
 

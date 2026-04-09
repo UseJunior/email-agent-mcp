@@ -99,9 +99,9 @@ Agent Email 提供 15 个 MCP 工具：
 | 提供商 | 状态 | 包名 |
 |--------|------|------|
 | Microsoft 365 (Graph API) | 完全支持 | `@usejunior/provider-microsoft` |
-| Gmail | 即将推出 | `@usejunior/provider-gmail` |
+| Gmail | 支持通过手动 refresh token 配置接入 | `@usejunior/provider-gmail` |
 
-Gmail 提供商包已编写完成并具有完整的测试覆盖。接入 MCP 服务器的工作正在进行中。
+Gmail 现在可以通过写入 `~/.email-agent-mcp/tokens/` 下的手动配置文件接入 MCP 服务器。交互式 Gmail 配置向导仍是后续工作。参见 `packages/provider-gmail/README.md`。
 
 ## 安全默认值
 

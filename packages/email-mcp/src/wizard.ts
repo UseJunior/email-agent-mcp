@@ -3,8 +3,7 @@
 import * as p from '@clack/prompts';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
-import type { CliOptions } from './cli.js';
-import type { MailboxMetadata } from '@usejunior/provider-microsoft';
+import type { CliOptions, ConfiguredMailboxSummary } from './cli.js';
 
 /**
  * First-run wizard — guides user through email setup.
@@ -15,7 +14,7 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
   p.intro('🦞 email-agent-mcp — Email connectivity for AI agents');
 
   p.note(
-    'Outlook: not configured\nGmail:   coming soon',
+    'Outlook: interactive setup\nGmail:   interactive setup (Google OAuth client required)',
     'Email Accounts',
   );
 
@@ -23,7 +22,7 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
     message: 'Select a provider',
     options: [
       { value: 'microsoft', label: 'Outlook (Microsoft 365 / Office 365)' },
-      { value: 'gmail', label: 'Gmail (coming soon)', hint: 'Not yet available' },
+      { value: 'gmail', label: 'Gmail' },
     ],
   });
 
@@ -34,29 +33,30 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
 
   if (provider === 'gmail') {
     p.note(
-      'Gmail support is coming soon.\nFor now, use Outlook (Microsoft 365 / Office 365).\nFollow: github.com/UseJunior/email-agent-mcp for updates.',
-      'Coming Soon',
+      'Gmail setup uses a Google OAuth client and a local browser callback on 127.0.0.1.\n' +
+      'Provide the client via --client-id / --client-secret or the env vars\n' +
+      'AGENT_EMAIL_GMAIL_CLIENT_ID and AGENT_EMAIL_GMAIL_CLIENT_SECRET.\n' +
+      `Credentials stored at ${getAgentEmailHome()}/tokens/`,
+      'How Gmail auth works',
     );
-    p.outro('Setup cancelled — Gmail not yet available.');
-    return 0;
+  } else {
+    p.note(
+      "You'll see a code to enter at https://login.microsoft.com/device\n" +
+      'This links your Outlook mailbox to email-agent-mcp.\n' +
+      `Credentials stored at ${getAgentEmailHome()}/tokens/\n` +
+      'Token refreshes automatically for ~90 days.',
+      'How email auth works',
+    );
   }
 
-  p.note(
-    "You'll see a code to enter at https://login.microsoft.com/device\n" +
-    'This links your Outlook mailbox to email-agent-mcp.\n' +
-    `Credentials stored at ${getAgentEmailHome()}/tokens/\n` +
-    'Token refreshes automatically for ~90 days.',
-    'How email auth works',
-  );
-
-  const confirmLink = await p.confirm({ message: 'Link Outlook now?' });
+  const confirmLink = await p.confirm({ message: provider === 'gmail' ? 'Link Gmail now?' : 'Link Outlook now?' });
   if (p.isCancel(confirmLink) || !confirmLink) {
     p.outro('Setup cancelled.');
     return 0;
   }
 
-  // Run the actual configure — this prints the device code to stderr
-  const configOpts: CliOptions = { ...opts, command: 'configure', provider: 'microsoft' };
+  // Run the actual configure — Microsoft prints a device code; Gmail prints a browser URL.
+  const configOpts: CliOptions = { ...opts, command: 'configure', provider };
   const exitCode = await runConfigure(configOpts);
   if (exitCode !== 0) {
     p.outro('Setup failed. Try again with: email-agent-mcp setup');
@@ -115,8 +115,9 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
   }
 
   // Summary
+  const providerLabel = provider === 'gmail' ? 'Gmail' : 'Outlook (Microsoft 365)';
   p.note(
-    `Provider: Outlook (Microsoft 365)\n` +
+    `Provider: ${providerLabel}\n` +
     `Tokens: ${getAgentEmailHome()}/tokens/\n` +
     `Config: ${getAgentEmailHome()}/config.json\n` +
     `Hooks: ${existingToken ? 'configured' : 'not configured'}`,
@@ -137,7 +138,7 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
 /**
  * Returning user menu — show status and offer actions.
  */
-export async function runWizardMenu(opts: CliOptions, mailboxes: MailboxMetadata[]): Promise<number> {
+export async function runWizardMenu(opts: CliOptions, mailboxes: ConfiguredMailboxSummary[]): Promise<number> {
   const { runWatch, runStatus, runConfigure, loadConfig, saveConfig } = await import('./cli.js');
   const { getAgentEmailHome } = await import('./cli.js');
 
@@ -149,7 +150,7 @@ export async function runWizardMenu(opts: CliOptions, mailboxes: MailboxMetadata
     const lastAuth = mb.lastInteractiveAuthAt
       ? new Date(mb.lastInteractiveAuthAt).toLocaleDateString()
       : 'unknown';
-    return `• ${email} (last auth: ${lastAuth})`;
+    return `• ${email} (${mb.provider}, last auth: ${lastAuth})`;
   }).join('\n');
 
   p.note(statusLines, 'Connected accounts');
