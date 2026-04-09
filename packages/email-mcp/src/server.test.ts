@@ -71,6 +71,14 @@ describe('mcp-transport/Zod Schema Constraints', () => {
     }
   });
 
+  it('Scenario: root $schema is omitted for OpenClaw compatibility', () => {
+    const tools = actionsToMcpTools(testActions);
+
+    for (const tool of tools) {
+      expect(tool.inputSchema.$schema).toBeUndefined();
+    }
+  });
+
   it('Scenario: ZodUnion fields emit anyOf, not {}', () => {
     // Regression lock for the `z.toJsonSchema` casing bug: previously the
     // feature-detect fell through to a hand-rolled generator that returned
