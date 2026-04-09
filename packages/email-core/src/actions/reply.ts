@@ -1,9 +1,14 @@
-// reply_to_email action — reply within existing thread, gated by send allowlist
+// reply_to_email action — reply within existing thread, gated by send allowlist.
+//
+// Send-path design: we create a reply draft via the provider, fetch the draft
+// to see exactly which recipients Graph/Gmail auto-populated, allowlist-check
+// *those* recipients, and only then send. This closes the window where a
+// reply-all could send to a recipient that was never checked against the
+// allowlist (see CVE-style note in plan §2.0 / P0 fix).
 import { z } from 'zod';
 import type { EmailAction } from './registry.js';
 import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { isPlausibleMessageId } from '../security/reply-validation.js';
-import { withRetry } from '../providers/provider.js';
 import { renderEmailBody } from '../content/body-renderer.js';
 import {
   checkMailboxRequired,
@@ -17,6 +22,8 @@ const ReplyToEmailInput = z.object({
   mailbox: z.string().optional(),
   cc: z.array(z.string()).optional(),
   draft: z.boolean().optional(),
+  reply_all: z.boolean().optional().default(true)
+    .describe('Reply to all recipients (to + cc) when true (default), or only the sender when false.'),
   format: z.enum(['markdown', 'html', 'text']).optional()
     .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
   force_black: z.boolean().optional()
@@ -67,22 +74,27 @@ export const replyToEmailAction: EmailAction<
     const bodyPlain = rendered.body;
     const bodyHtml = rendered.bodyHtml;
 
-    // Draft branch — create reply draft, bypass allowlist
+    // Every code path below goes through createReplyDraft — draft and send.
+    // This keeps the allowlist gate on the *actual* populated recipients and
+    // lets attachment upload share one code path with create_draft.
+    if (!ctx.provider.createReplyDraft) {
+      return {
+        success: false,
+        error: {
+          code: 'NOT_SUPPORTED',
+          message: 'Reply drafts are not supported by this email provider',
+          recoverable: false,
+        },
+      };
+    }
+
+    // Draft branch — create reply draft, bypass allowlist (enforced at send time)
     if (input.draft) {
-      if (!ctx.provider.createReplyDraft) {
-        return {
-          success: false,
-          error: {
-            code: 'NOT_SUPPORTED',
-            message: 'Reply drafts are not supported by this email provider',
-            recoverable: false,
-          },
-        };
-      }
       try {
         const draftResult = await ctx.provider.createReplyDraft(input.message_id, bodyPlain, {
           cc: input.cc?.map(email => ({ email })),
           bodyHtml,
+          replyAll: input.reply_all,
         });
         return {
           success: draftResult.success,
@@ -98,20 +110,70 @@ export const replyToEmailAction: EmailAction<
       }
     }
 
-    // Send path — get the original message to check the recipient against allowlist
-    const originalMessage = await ctx.provider.getMessage(input.message_id);
-    const replyRecipient = originalMessage.from.email;
+    // Send path — create reply draft, then allowlist-check the actual recipients
+    // the provider populated (to + cc), then sendDraft. This closes the reply-all
+    // allowlist bypass: the old code only checked original.from.email, but Graph's
+    // createReplyAll auto-populates every original recipient.
+    let draftId: string | undefined;
+    try {
+      const draftResult = await ctx.provider.createReplyDraft(input.message_id, bodyPlain, {
+        cc: input.cc?.map(email => ({ email })),
+        bodyHtml,
+        replyAll: input.reply_all,
+      });
+      if (!draftResult.success || !draftResult.draftId) {
+        return {
+          success: false,
+          error: draftResult.error
+            ? { code: draftResult.error.code, message: draftResult.error.message, recoverable: draftResult.error.recoverable }
+            : { code: 'DRAFT_FAILED', message: 'createReplyDraft returned no draftId', recoverable: false },
+        };
+      }
+      draftId = draftResult.draftId;
+    } catch (err) {
+      return handleProviderError(err, 'DRAFT_FAILED');
+    }
 
-    // Check send allowlist — reply recipients must also be allowed
-    const allowlistError = checkSendAllowlist([replyRecipient], ctx.sendAllowlist);
+    // Fetch the draft to see the actual recipients the provider populated
+    let populatedRecipients: string[];
+    try {
+      const draftMessage = await ctx.provider.getMessage(draftId);
+      populatedRecipients = [
+        ...(draftMessage.to?.map(a => a.email) ?? []),
+        ...(draftMessage.cc?.map(a => a.email) ?? []),
+      ];
+    } catch (err) {
+      // If we can't verify recipients, fail closed and try to clean up the draft.
+      await safeDeleteDraft(ctx.provider, draftId);
+      return {
+        success: false,
+        error: {
+          code: 'DRAFT_LOOKUP_FAILED',
+          message: `Cannot verify reply recipients before sending: ${err instanceof Error ? err.message : String(err)}`,
+          recoverable: false,
+        },
+      };
+    }
+
+    if (populatedRecipients.length === 0) {
+      await safeDeleteDraft(ctx.provider, draftId);
+      return {
+        success: false,
+        error: { code: 'NO_RECIPIENTS', message: 'Reply draft has no recipients', recoverable: false },
+      };
+    }
+
+    // Allowlist-check the populated recipients
+    const allowlistError = checkSendAllowlist(populatedRecipients, ctx.sendAllowlist);
     if (allowlistError) {
+      await safeDeleteDraft(ctx.provider, draftId);
       return {
         success: false,
         error: {
           code: 'ALLOWLIST_BLOCKED',
           message: allowlistError.includes('not configured')
             ? allowlistError
-            : `Recipient not in send allowlist`,
+            : `One or more reply recipients not in send allowlist`,
           recoverable: false,
         },
       };
@@ -120,22 +182,15 @@ export const replyToEmailAction: EmailAction<
     // Check rate limit
     const rateLimitError = checkRateLimit(ctx.rateLimiter, 'reply_to_email');
     if (rateLimitError) {
+      await safeDeleteDraft(ctx.provider, draftId);
       return rateLimitError;
     }
 
     try {
-      const result = await withRetry(
-        () => ctx.provider.replyToMessage(input.message_id, bodyPlain, {
-          cc: input.cc?.map(email => ({ email })),
-          bodyHtml,
-        }),
-        { maxRetries: 3, baseDelay: 1000 },
-      );
-
+      const result = await ctx.provider.sendDraft(draftId);
       if (ctx.rateLimiter) {
         ctx.rateLimiter.recordUsage('reply_to_email');
       }
-
       return {
         success: result.success,
         messageId: result.messageId,
@@ -150,3 +205,19 @@ export const replyToEmailAction: EmailAction<
     }
   },
 };
+
+// Delete a draft, swallowing errors. Used on failure paths where the caller
+// already has a fatal error to return and just wants to clean up.
+async function safeDeleteDraft(
+  provider: { deleteMessage?: (id: string, hard?: boolean) => Promise<string | void> },
+  draftId: string,
+): Promise<void> {
+  if (!provider.deleteMessage) return;
+  try {
+    await provider.deleteMessage(draftId, true);
+  } catch (err) {
+    process.stderr.write(
+      `[email-agent-mcp] WARNING: failed to clean up reply draft ${draftId}: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
+}

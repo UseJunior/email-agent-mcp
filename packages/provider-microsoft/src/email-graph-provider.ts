@@ -10,7 +10,9 @@ import type {
   EmailReader,
   EmailSender,
   EmailCategorizer,
+  OutboundAttachment,
 } from '@usejunior/email-core';
+import { ProviderError } from '@usejunior/email-core';
 
 const BODY_SIZE_LIMIT = 3.5 * 1024 * 1024; // 3.5MB
 const SUBJECT_MAX_LENGTH = 255;
@@ -289,45 +291,53 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   }
 
   async replyToMessage(messageId: string, body: string, opts?: ReplyOptions): Promise<SendResult> {
-    // Use createReplyAll to preserve embedded images and CID references
-    try {
-      const draft = await this.client.post(
-        `${this.basePath}/messages/${messageId}/createReplyAll`,
-        {},
-      );
-
-      if (draft.id) {
-        // Update draft body — pick HTML if caller rendered it, else plain text
-        await this.client.patch(`${this.basePath}/messages/${draft.id}`, {
-          body: buildGraphBody(opts?.bodyHtml, body),
-        });
-
-        // Send the draft
-        await this.client.post(`${this.basePath}/messages/${draft.id}/send`, {});
-        return { success: true, messageId: draft.id };
-      }
-    } catch {
-      // Fallback to sendMail on 404 (original deleted)
+    // Thin delegate: create a reply draft and send it. The reply action in
+    // email-core now drives the draft-first flow directly (so it can
+    // allowlist-check the populated recipients), but we keep this method for
+    // backward compatibility with callers that used the flat send API.
+    const draftResult = await this.createReplyDraft(messageId, body, opts);
+    if (!draftResult.success || !draftResult.draftId) {
+      return {
+        success: false,
+        error: draftResult.error ?? { code: 'REPLY_FAILED', message: 'createReplyDraft returned no draftId', provider: 'microsoft', recoverable: false },
+      };
     }
-
-    // Fallback: construct reply manually via sendMail
-    return this.sendMessage({
-      to: opts?.cc ?? [],
-      subject: `Re: `,
-      body,
-      bodyHtml: opts?.bodyHtml,
-    });
+    try {
+      return await this.sendDraft(draftResult.draftId);
+    } catch (err) {
+      // If send fails, try to clean up the half-formed draft
+      try {
+        await this.client.delete(`${this.basePath}/messages/${draftResult.draftId}`);
+      } catch {
+        process.stderr.write(
+          `[email-agent-mcp] WARNING: failed to clean up reply draft ${draftResult.draftId} after send failure\n`,
+        );
+      }
+      throw err;
+    }
   }
 
   async createDraft(msg: ComposeMessage): Promise<DraftResult> {
-    const graphMsg = {
+    const graphMsg: Record<string, unknown> = {
       subject: msg.subject,
       body: buildGraphBody(msg.bodyHtml, msg.body),
       toRecipients: msg.to.map(r => ({ emailAddress: { address: r.email, name: r.name } })),
     };
+    if (msg.cc?.length) {
+      graphMsg.ccRecipients = msg.cc.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
+    }
+    if (msg.bcc?.length) {
+      graphMsg.bccRecipients = msg.bcc.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
+    }
 
     const response = await this.client.post(`${this.basePath}/messages`, graphMsg);
-    return { success: true, draftId: response.id };
+    const draftId = response.id as string;
+
+    if (msg.attachments?.length) {
+      await this.uploadAttachments(draftId, msg.attachments);
+    }
+
+    return { success: true, draftId };
   }
 
   async sendDraft(draftId: string): Promise<SendResult> {
@@ -336,25 +346,80 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   }
 
   async createReplyDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {
-    // Use createReplyAll to preserve embedded images and CID references
+    // Switch between createReply (sender only) and createReplyAll (to + cc)
+    // based on opts.replyAll. Default is reply-all to preserve embedded
+    // images / CID references and match historical behavior.
+    const replyEndpoint = opts?.replyAll === false ? 'createReply' : 'createReplyAll';
     const draft = await this.client.post(
-      `${this.basePath}/messages/${messageId}/createReplyAll`,
+      `${this.basePath}/messages/${messageId}/${replyEndpoint}`,
       {},
     );
 
-    if (draft.id) {
-      // Update draft body — HTML if caller rendered it, else plain text
-      const patch: Record<string, unknown> = {
-        body: buildGraphBody(opts?.bodyHtml, body),
-      };
-      if (opts?.cc?.length) {
-        patch.ccRecipients = opts.cc.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
-      }
-      await this.client.patch(`${this.basePath}/messages/${draft.id}`, patch);
-      return { success: true, draftId: draft.id };
+    if (!draft.id) {
+      return { success: false, error: { code: 'DRAFT_FAILED', message: 'Failed to create reply draft', provider: 'microsoft', recoverable: false } };
     }
 
-    return { success: false, error: { code: 'DRAFT_FAILED', message: 'Failed to create reply draft', recoverable: false } };
+    // Update draft body — HTML if caller rendered it, else plain text
+    const patch: Record<string, unknown> = {
+      body: buildGraphBody(opts?.bodyHtml, body),
+    };
+    if (opts?.cc?.length) {
+      patch.ccRecipients = opts.cc.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
+    }
+    await this.client.patch(`${this.basePath}/messages/${draft.id}`, patch);
+
+    if (opts?.attachments?.length) {
+      await this.uploadAttachments(draft.id, opts.attachments);
+    }
+
+    return { success: true, draftId: draft.id };
+  }
+
+  /**
+   * Upload outbound attachments to an already-created draft via
+   * `POST /messages/{draftId}/attachments`. On any failure, attempt to
+   * DELETE the draft so we don't leave a half-attached draft in the user's
+   * mailbox. If the cleanup DELETE also fails, log the orphaned draftId to
+   * stderr so the user can clean it up manually.
+   *
+   * Throws ProviderError with code ATTACHMENT_UPLOAD_FAILED on any failure.
+   */
+  private async uploadAttachments(
+    draftId: string,
+    attachments: readonly OutboundAttachment[],
+  ): Promise<void> {
+    for (const att of attachments) {
+      const payload = {
+        '@odata.type': '#microsoft.graph.fileAttachment',
+        name: att.filename,
+        contentType: att.mimeType,
+        contentBytes: att.content.toString('base64'),
+      };
+      try {
+        await this.client.post(
+          `${this.basePath}/messages/${draftId}/attachments`,
+          payload,
+        );
+      } catch (err) {
+        // Rollback: delete the draft. If delete also fails, orphan is logged.
+        try {
+          await this.client.delete(`${this.basePath}/messages/${draftId}`);
+        } catch (deleteErr) {
+          process.stderr.write(
+            `[email-agent-mcp] WARNING: attachment upload failed AND draft cleanup failed. ` +
+            `Orphaned draftId=${draftId}. ` +
+            `Upload error: ${err instanceof Error ? err.message : String(err)}. ` +
+            `Cleanup error: ${deleteErr instanceof Error ? deleteErr.message : String(deleteErr)}\n`,
+          );
+        }
+        throw new ProviderError(
+          'ATTACHMENT_UPLOAD_FAILED',
+          `Failed to upload attachment "${att.filename}": ${err instanceof Error ? err.message : String(err)}`,
+          'microsoft',
+          false,
+        );
+      }
+    }
   }
 
   async updateDraft(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult> {

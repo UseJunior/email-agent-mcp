@@ -1,5 +1,6 @@
 // Mock email provider for testing — implements all capability interfaces in-memory
 import type {
+  EmailAddress,
   EmailMessage,
   EmailThread,
   ComposeMessage,
@@ -26,6 +27,10 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
   private subscriptions: Map<string, (msg: EmailMessage) => void> = new Map();
   private attachmentData: Map<string, Buffer> = new Map();
   private nextId = 1;
+  // The "self" address — excluded from auto-populated cc in createReplyDraft
+  // so reply-all simulation doesn't cc yourself. Matches the default returned
+  // by getMessage() for drafts.
+  public selfAddress = 'me@company.com';
 
   // --- Setup helpers for tests ---
 
@@ -255,12 +260,37 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
       throw new Error(`Message not found: ${messageId}`);
     }
     const draftId = `draft-${this.nextId++}`;
+
+    // Simulate real provider reply-all behavior: when replyAll !== false,
+    // populate cc from the original thread's to + cc (excluding self). Tests
+    // can then assert that email-core allowlist-checks these auto-populated
+    // recipients.
+    const replyAll = opts?.replyAll !== false;
+    let cc: EmailAddress[] | undefined;
+    if (replyAll) {
+      const autoCc = [
+        ...(original.to ?? []),
+        ...(original.cc ?? []),
+      ].filter(a => a.email !== this.selfAddress);
+      const extraCc = opts?.cc ?? [];
+      const seen = new Set<string>();
+      const merged = [...autoCc, ...extraCc].filter(a => {
+        if (seen.has(a.email)) return false;
+        seen.add(a.email);
+        return true;
+      });
+      cc = merged.length > 0 ? merged : undefined;
+    } else {
+      cc = opts?.cc;
+    }
+
     this.drafts.set(draftId, {
       to: [original.from],
-      cc: opts?.cc,
+      cc,
       subject: `Re: ${original.subject}`,
       body,
       bodyHtml: opts?.bodyHtml,
+      attachments: opts?.attachments,
     });
     return { success: true, draftId };
   }
@@ -350,6 +380,12 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
 
   async deleteMessage(messageId: string, hard?: boolean): Promise<void> {
     this.maybeThrow();
+    // Drafts are stored separately — hard-delete removes them regardless of
+    // the `hard` flag (there's no trash concept for drafts).
+    if (this.drafts.has(messageId)) {
+      this.drafts.delete(messageId);
+      return;
+    }
     if (hard) {
       this.messages = this.messages.filter(m => m.id !== messageId);
     } else {

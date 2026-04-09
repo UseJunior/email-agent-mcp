@@ -7,6 +7,7 @@ export type {
   EmailThread,
   EmailAttachment,
   ComposeMessage,
+  OutboundAttachment,
   SendResult,
   DraftResult,
   ListOptions,
@@ -20,6 +21,7 @@ export type {
   EmailProvider,
   AuthManager,
 } from './providers/provider.js';
+export { ProviderError } from './providers/provider.js';
 export {
   isAllowedSender,
   loadReceiveAllowlist,

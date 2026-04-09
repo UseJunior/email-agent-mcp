@@ -46,11 +46,13 @@ describe('provider-microsoft/Draft-Then-Send via createReplyAll', () => {
     );
   });
 
-  it('Scenario: Fallback to sendMail on 404', async () => {
+  it('Scenario: replyToMessage throws when createReply endpoint fails', async () => {
+    // The old fallback-to-sendMail path was removed (it sent garbage with
+    // subject "Re: " and to: opts?.cc). replyToMessage now cleanly errors
+    // when the provider can't create the reply draft; the email-core
+    // reply action handles cleanup.
     const client = createMockClient({
-      post: vi.fn()
-        .mockRejectedValueOnce(new Error('404 Not Found')) // createReplyAll fails
-        .mockResolvedValueOnce({ id: 'sent-msg' }), // sendMail fallback
+      post: vi.fn().mockRejectedValueOnce(new Error('404 Not Found')),
       get: vi.fn().mockResolvedValue({
         id: 'deleted-msg',
         subject: 'Deleted',
@@ -60,14 +62,58 @@ describe('provider-microsoft/Draft-Then-Send via createReplyAll', () => {
     });
     const provider = new GraphEmailProvider(client);
 
-    const result = await provider.replyToMessage('deleted-msg', 'Response');
+    await expect(provider.replyToMessage('deleted-msg', 'Response')).rejects.toThrow('404 Not Found');
+  });
+
+  it('Scenario: createReplyDraft(replyAll=false) hits createReply endpoint', async () => {
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce({ id: 'draft-rp' }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.createReplyDraft('msg-1', 'Body', { replyAll: false });
 
     expect(result.success).toBe(true);
-    // Falls back to sendMail
-    expect(client.post).toHaveBeenCalledWith(
-      expect.stringContaining('sendMail'),
-      expect.anything(),
-    );
+    expect(result.draftId).toBe('draft-rp');
+    // Should hit /createReply (NOT /createReplyAll)
+    const firstCall = (client.post as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(firstCall[0]).toContain('/createReply');
+    expect(firstCall[0]).not.toContain('createReplyAll');
+  });
+
+  it('Scenario: createReplyDraft(replyAll=true) hits createReplyAll endpoint', async () => {
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce({ id: 'draft-ra' }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.createReplyDraft('msg-1', 'Body', { replyAll: true });
+
+    expect(result.success).toBe(true);
+    const firstCall = (client.post as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(firstCall[0]).toContain('/createReplyAll');
+  });
+
+  it('Scenario: createDraft emits ccRecipients (regression for dropped cc bug)', async () => {
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce({ id: 'draft-cc' }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createDraft({
+      to: [{ email: 'to@corp.com' }],
+      cc: [{ email: 'cc1@corp.com' }, { email: 'cc2@corp.com' }],
+      subject: 'Test',
+      body: 'Body',
+    });
+
+    const firstCall = (client.post as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(firstCall[1]).toMatchObject({
+      ccRecipients: [
+        { emailAddress: { address: 'cc1@corp.com' } },
+        { emailAddress: { address: 'cc2@corp.com' } },
+      ],
+    });
   });
 });
 

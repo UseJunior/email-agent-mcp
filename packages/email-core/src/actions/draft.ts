@@ -35,6 +35,8 @@ const CreateDraftInput = z.object({
   body: z.string().optional(),
   body_file: z.string().optional(),
   reply_to: z.string().optional(),
+  reply_all: z.boolean().optional().default(true)
+    .describe('For reply drafts (reply_to set): reply to all original recipients (default) or only the sender. Ignored for non-reply drafts.'),
   mailbox: z.string().optional(),
   format: z.enum(['markdown', 'html', 'text']).optional()
     .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
@@ -67,20 +69,39 @@ export const createDraftAction: EmailAction<
     const { to, cc, subject, replyTo, format, forceBlack } = fields;
     let { body } = fields;
 
-    // Validate required fields
-    const requiredError = validateRequiredFields(to, subject);
-    if (requiredError) {
-      return { success: false, error: requiredError };
+    // Validate required fields.
+    //
+    // Reply drafts are special: when reply_to is set, the provider auto-populates
+    // `to` (and `cc` if reply_all) from the original thread, so we don't require
+    // `to` or `subject` up front — matching foam-email-calendar's behavior. The
+    // exception is reply_all=false + no `to`, which is a real mistake (you'd
+    // want the narrowed recipient to be explicit).
+    if (!replyTo) {
+      const requiredError = validateRequiredFields(to, subject);
+      if (requiredError) {
+        return { success: false, error: requiredError };
+      }
+    } else if (input.reply_all === false && !to) {
+      return {
+        success: false,
+        error: {
+          code: 'MISSING_FIELD',
+          message: 'to is required when reply_all=false (reply narrows to a single recipient that must be explicit)',
+          recoverable: false,
+        },
+      };
     }
 
-    const recipients = Array.isArray(to) ? to : [to!];
+    const recipients = to ? (Array.isArray(to) ? to : [to]) : [];
 
     // Drafts bypass allowlist — enforcement happens at send_draft time
 
-    // Re: threading guardrail
-    const threadingError = checkReplyThreading(subject!, replyTo);
-    if (threadingError) {
-      return { success: false, error: threadingError };
+    // Re: threading guardrail (only when we have a subject to check)
+    if (subject) {
+      const threadingError = checkReplyThreading(subject, replyTo);
+      if (threadingError) {
+        return { success: false, error: threadingError };
+      }
     }
 
     // Render body: markdown → HTML by default
@@ -108,6 +129,7 @@ export const createDraftAction: EmailAction<
         const result = await ctx.provider.createReplyDraft(replyTo, body, {
           cc: cc?.map(email => ({ email })),
           bodyHtml: outBodyHtml,
+          replyAll: input.reply_all,
         });
         return {
           success: result.success,

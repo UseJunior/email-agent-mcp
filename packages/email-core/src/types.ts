@@ -124,6 +124,15 @@ export interface ReplyOptions {
    * send with plain-text content-type.
    */
   bodyHtml?: string;
+  /**
+   * When true (default), reply to all original recipients (to + cc).
+   * When false, reply only to the original sender.
+   * Providers that natively distinguish reply vs reply-all use this to
+   * select the correct endpoint (Graph: createReply vs createReplyAll);
+   * providers that construct MIME themselves use it to toggle whether
+   * to include the original to/cc as the reply's cc.
+   */
+  replyAll?: boolean;
 }
 
 export interface Subscription {

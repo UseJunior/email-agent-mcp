@@ -141,6 +141,61 @@ Body from file.`);
     expect(result.success).toBe(false);
     expect(result.error!.code).toBe('MAILBOX_REQUIRED');
   });
+
+  it('Scenario: reply_to with no to/subject succeeds (relaxed validation)', async () => {
+    provider.addMessage({
+      id: 'orig-no-fields',
+      subject: 'Original thread',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+
+    const result = await createDraftAction.run(ctx, {
+      reply_to: 'orig-no-fields',
+      body: 'Just the body',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.draftId).toBeDefined();
+  });
+
+  it('Scenario: reply_to with reply_all=false and no to fails with MISSING_FIELD', async () => {
+    provider.addMessage({
+      id: 'orig-narrow',
+      subject: 'Narrow me',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+
+    const result = await createDraftAction.run(ctx, {
+      reply_to: 'orig-narrow',
+      reply_all: false,
+      body: 'Private',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('MISSING_FIELD');
+    expect(result.error!.message).toContain('reply_all=false');
+  });
+
+  it('Scenario: createDraft preserves cc (regression for dropped cc bug)', async () => {
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      cc: ['bob@allowed.com', 'carol@allowed.com'],
+      subject: 'With CC',
+      body: 'Body',
+    });
+
+    expect(result.success).toBe(true);
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.cc?.map(a => a.email)).toEqual(['bob@allowed.com', 'carol@allowed.com']);
+  });
 });
 
 describe('email-write/Send Draft', () => {
