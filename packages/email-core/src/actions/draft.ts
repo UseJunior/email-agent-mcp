@@ -56,7 +56,7 @@ export const createDraftAction: EmailAction<
   z.infer<typeof DraftOutput>
 > = {
   name: 'create_draft',
-  description: 'Create an email draft. Supports body_file with YAML frontmatter. Use reply_to for threaded reply drafts.',
+  description: 'Create an email draft. Supports body_file with YAML frontmatter, attachments (in EMAIL_AGENT_MCP_ATTACHMENT_DIR, 3MB max), reply_to for threaded reply drafts with reply_all toggle, and update_source_frontmatter to write draft_id/draft_link back to the source .md.',
   input: CreateDraftInput,
   output: DraftOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },

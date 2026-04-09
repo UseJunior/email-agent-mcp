@@ -49,7 +49,7 @@ export const replyToEmailAction: EmailAction<
   z.infer<typeof ReplyToEmailOutput>
 > = {
   name: 'reply_to_email',
-  description: 'Reply to an email within an existing thread. Send path gated by send allowlist; draft path bypasses.',
+  description: 'Reply within an existing thread. reply_all (default true) chooses sender-only vs all recipients; attachments require EMAIL_AGENT_MCP_ATTACHMENT_DIR. Send path creates a draft, allowlist-checks populated recipients, then sends.',
   input: ReplyToEmailInput,
   output: ReplyToEmailOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
