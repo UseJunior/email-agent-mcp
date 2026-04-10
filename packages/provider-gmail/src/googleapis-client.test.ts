@@ -122,12 +122,64 @@ describe('provider-gmail/GoogleapisGmailClient', () => {
     expect(result.id).toBe('m-draft');
   });
 
+  it('Scenario: getMessage falls back to drafts.get for Gmail draft ids rejected as invalid message ids', async () => {
+    const api = createMockApi();
+    api.users.messages.get.mockRejectedValueOnce({
+      response: {
+        status: 400,
+        data: {
+          error: {
+            message: 'Invalid id value',
+          },
+        },
+      },
+    });
+    const client = createClient(api);
+
+    const result = await client.getMessage('r1234567890');
+
+    expect(api.users.messages.get).toHaveBeenCalledWith({
+      userId: 'me',
+      id: 'r1234567890',
+      format: 'full',
+    });
+    expect(api.users.drafts.get).toHaveBeenCalledWith({
+      userId: 'me',
+      id: 'r1234567890',
+      format: 'full',
+    });
+    expect(result.id).toBe('m-draft');
+    expect(result.threadId).toBe('t-draft');
+  });
+
   it('Scenario: getMessage rethrows non-404 Gmail API errors', async () => {
     const api = createMockApi();
     api.users.messages.get.mockRejectedValueOnce(new Error('boom'));
     const client = createClient(api);
 
     await expect(client.getMessage('m-1')).rejects.toThrow('boom');
+    expect(api.users.drafts.get).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: getMessage rethrows unrelated 400 errors instead of treating them as drafts', async () => {
+    const api = createMockApi();
+    api.users.messages.get.mockRejectedValueOnce({
+      response: {
+        status: 400,
+        data: {
+          error: {
+            message: 'Bad Request',
+          },
+        },
+      },
+    });
+    const client = createClient(api);
+
+    await expect(client.getMessage('m-1')).rejects.toMatchObject({
+      response: {
+        status: 400,
+      },
+    });
     expect(api.users.drafts.get).not.toHaveBeenCalled();
   });
 

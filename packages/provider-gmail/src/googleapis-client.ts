@@ -112,6 +112,26 @@ function getErrorStatus(err: unknown): number | undefined {
   return undefined;
 }
 
+function getErrorMessage(err: unknown): string | undefined {
+  const record = err as {
+    message?: unknown;
+    response?: { data?: { error?: { message?: unknown } } };
+  } | null;
+  if (!record || typeof record !== 'object') return undefined;
+  if (typeof record.response?.data?.error?.message === 'string') return record.response.data.error.message;
+  if (typeof record.message === 'string') return record.message;
+  return undefined;
+}
+
+function shouldFallbackToDraftLookup(err: unknown): boolean {
+  const status = getErrorStatus(err);
+  if (status === 404) return true;
+  if (status !== 400) return false;
+
+  const message = getErrorMessage(err);
+  return typeof message === 'string' && /invalid id value/i.test(message);
+}
+
 export class GoogleapisGmailClient implements GmailApiClient {
   private readonly api: GmailApiInstance;
 
@@ -159,7 +179,7 @@ export class GoogleapisGmailClient implements GmailApiClient {
 
       return response.data;
     } catch (err) {
-      if (getErrorStatus(err) !== 404) throw err;
+      if (!shouldFallbackToDraftLookup(err)) throw err;
 
       const draft = await this.api.users.drafts.get({
         userId: 'me',
