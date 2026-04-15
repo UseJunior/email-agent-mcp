@@ -48,11 +48,14 @@ const watcherMockState = vi.hoisted(() => ({
 
 const gmailMockState = vi.hoisted(() => ({
   enableConfigureMock: false,
+  enableAuthMock: false,
   authUrlOptions: null as null | Record<string, unknown>,
   exchangeCodeArgs: null as null | Record<string, unknown>,
   savedMetadata: null as null | Record<string, unknown>,
   profileEmail: 'steven.obiajulu@gmail.com',
   refreshToken: 'mock-refresh-token' as string | undefined,
+  refreshError: null as Error | Record<string, unknown> | null,
+  tokenHealthWarning: undefined as string | undefined,
 }));
 
 const promptMockState = vi.hoisted(() => ({
@@ -217,6 +220,7 @@ vi.mock('@usejunior/provider-gmail', async (importOriginal) => {
 
   class MockGmailAuthManager {
     constructor(_config: Record<string, unknown>) {}
+    async connect() {}
     async generateCodeVerifierAsync() {
       return { codeVerifier: 'mock-code-verifier', codeChallenge: 'mock-code-challenge' };
     }
@@ -230,6 +234,17 @@ vi.mock('@usejunior/provider-gmail', async (importOriginal) => {
     getRefreshToken() {
       return gmailMockState.refreshToken;
     }
+    async refresh() {
+      if (gmailMockState.refreshError) {
+        throw gmailMockState.refreshError;
+      }
+    }
+    getTokenHealthWarning() {
+      return gmailMockState.tokenHealthWarning;
+    }
+    async tryReconnect() {
+      return !gmailMockState.refreshError;
+    }
     async fetchProfile() {
       return { emailAddress: gmailMockState.profileEmail };
     }
@@ -237,12 +252,18 @@ vi.mock('@usejunior/provider-gmail', async (importOriginal) => {
 
   const actualSave = actual.saveGmailMailboxMetadata as (metadata: Record<string, unknown>) => Promise<void>;
   const actualToSafeKey = actual.toFilesystemSafeKey as (email: string) => string;
+  const mockIsGmailReauthError = (err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    return message.toLowerCase().includes('invalid_grant');
+  };
+  const mockFormatGmailAuthError = (_err: unknown, mailboxName: string) =>
+    `Authentication expired for Gmail mailbox "${mailboxName}". Run: email-agent-mcp configure --provider gmail --mailbox ${mailboxName}`;
 
   return {
     ...actual,
     GmailAuthManager: new Proxy(MockGmailAuthManager, {
       construct(target, args) {
-        if (gmailMockState.enableConfigureMock) return new target(...args);
+        if (gmailMockState.enableConfigureMock || gmailMockState.enableAuthMock) return new target(...args);
         const RealAuth = actual.GmailAuthManager as new (...realArgs: unknown[]) => unknown;
         return new RealAuth(...args);
       },
@@ -255,17 +276,22 @@ vi.mock('@usejunior/provider-gmail', async (importOriginal) => {
       await actualSave(metadata);
     }),
     toFilesystemSafeKey: vi.fn((email: string) => actualToSafeKey(email)),
+    isGmailReauthError: vi.fn((err: unknown) => mockIsGmailReauthError(err)),
+    formatGmailAuthError: vi.fn((err: unknown, mailboxName: string) => mockFormatGmailAuthError(err, mailboxName)),
   };
 });
 
 beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
   gmailMockState.enableConfigureMock = false;
+  gmailMockState.enableAuthMock = false;
   gmailMockState.authUrlOptions = null;
   gmailMockState.exchangeCodeArgs = null;
   gmailMockState.savedMetadata = null;
   gmailMockState.profileEmail = 'steven.obiajulu@gmail.com';
   gmailMockState.refreshToken = 'mock-refresh-token';
+  gmailMockState.refreshError = null;
+  gmailMockState.tokenHealthWarning = undefined;
   promptMockState.confirmResult = true;
   promptMockState.textResult = '';
   promptMockState.passwordResult = '';
@@ -731,19 +757,31 @@ describe('cli/Interactive Wizard', () => {
 
 describe('cli/Status Subcommand', () => {
   it('Scenario: Status output', async () => {
-    // WHEN email-agent-mcp status is run
-    // THEN the system displays account info, token age, and allowlist summary
-    const exitCode = await runCli(['status']);
-    expect(exitCode).toBe(0);
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('status'),
-    );
+    const tmpHome = await mkdtemp(join(tmpdir(), 'email-agent-mcp-status-header-'));
+    const savedHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    process.env['EMAIL_AGENT_MCP_HOME'] = tmpHome;
+
+    try {
+      const exitCode = await runCli(['status']);
+      expect(exitCode).toBe(0);
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('status'),
+      );
+    } finally {
+      if (savedHome === undefined) {
+        delete process.env['EMAIL_AGENT_MCP_HOME'];
+      } else {
+        process.env['EMAIL_AGENT_MCP_HOME'] = savedHome;
+      }
+      await rm(tmpHome, { recursive: true, force: true });
+    }
   });
 
   it('Status includes Gmail-only mailboxes', async () => {
     const tmpHome = await mkdtemp(join(tmpdir(), 'email-agent-mcp-gmail-status-test-'));
     const savedHome = process.env['EMAIL_AGENT_MCP_HOME'];
     process.env['EMAIL_AGENT_MCP_HOME'] = tmpHome;
+    gmailMockState.enableAuthMock = true;
 
     try {
       const { mkdir, writeFile } = await import('node:fs/promises');
@@ -763,6 +801,42 @@ describe('cli/Status Subcommand', () => {
       expect(exitCode).toBe(0);
       expect(console.error).toHaveBeenCalledWith(
         expect.stringContaining('Provider: gmail'),
+      );
+    } finally {
+      if (savedHome === undefined) {
+        delete process.env['EMAIL_AGENT_MCP_HOME'];
+      } else {
+        process.env['EMAIL_AGENT_MCP_HOME'] = savedHome;
+      }
+      await rm(tmpHome, { recursive: true, force: true });
+    }
+  });
+
+  it('Status surfaces Gmail reauth-required warnings', async () => {
+    const tmpHome = await mkdtemp(join(tmpdir(), 'email-agent-mcp-gmail-reauth-status-'));
+    const savedHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    process.env['EMAIL_AGENT_MCP_HOME'] = tmpHome;
+    gmailMockState.enableAuthMock = true;
+    gmailMockState.refreshError = new Error('invalid_grant');
+
+    try {
+      const { mkdir, writeFile } = await import('node:fs/promises');
+      const tokensDir = join(tmpHome, 'tokens');
+      await mkdir(tokensDir, { recursive: true });
+      await writeFile(join(tokensDir, 'steven-obiajulu-at-gmail-com.json'), JSON.stringify({
+        provider: 'gmail',
+        mailboxName: 'personal',
+        emailAddress: 'steven.obiajulu@gmail.com',
+        clientId: 'gmail-client-id',
+        clientSecret: 'gmail-client-secret',
+        refreshToken: 'gmail-refresh-token',
+        lastInteractiveAuthAt: '2026-04-08T12:00:00.000Z',
+      }, null, 2) + '\n');
+
+      const exitCode = await runCli(['status']);
+      expect(exitCode).toBe(0);
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('Authentication expired for Gmail mailbox "steven.obiajulu@gmail.com"'),
       );
     } finally {
       if (savedHome === undefined) {

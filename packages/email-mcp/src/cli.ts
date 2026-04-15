@@ -130,6 +130,36 @@ async function listConfiguredMailboxSummaries(): Promise<ConfiguredMailboxSummar
   return summaries;
 }
 
+async function getGmailReauthWarning(summary: ConfiguredMailboxSummary): Promise<string | undefined> {
+  if (summary.provider !== 'gmail') return undefined;
+
+  const gmail = await import('@usejunior/provider-gmail');
+
+  try {
+    const metadata = await gmail.loadGmailMailboxMetadata(summary.emailAddress ?? summary.mailboxName);
+    if (!metadata) return undefined;
+
+    const mailboxRef = metadata.emailAddress ?? metadata.mailboxName;
+    const auth = new gmail.GmailAuthManager({
+      clientId: metadata.clientId,
+      clientSecret: metadata.clientSecret,
+      redirectUri: metadata.redirectUri,
+      mailboxName: mailboxRef,
+      lastInteractiveAuthAt: metadata.lastInteractiveAuthAt,
+    });
+
+    await auth.connect({ refresh_token: metadata.refreshToken });
+    await auth.refresh();
+
+    return auth.getTokenHealthWarning();
+  } catch (err) {
+    if (!gmail.isGmailReauthError(err)) {
+      return undefined;
+    }
+    return gmail.formatGmailAuthError(err, summary.emailAddress ?? summary.mailboxName);
+  }
+}
+
 export async function getEffectiveSendAllowlistPath(): Promise<string> {
   const { getSendAllowlistPath } = await import('@usejunior/email-core');
   return getSendAllowlistPath();
@@ -1000,6 +1030,12 @@ export async function runStatus(): Promise<number> {
         console.error(`    Token age: ${daysSinceAuth} days (healthy)`);
       }
     }
+
+    const gmailWarning = await getGmailReauthWarning(mb);
+    if (gmailWarning) {
+      console.error(`    \u26A0\uFE0F  ${gmailWarning}`);
+    }
+
     console.error('');
   }
 

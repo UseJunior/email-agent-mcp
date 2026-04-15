@@ -6,6 +6,8 @@ export interface GmailAuthConfig {
   clientId: string;
   clientSecret?: string;
   redirectUri?: string;
+  mailboxName?: string;
+  lastInteractiveAuthAt?: string;
 }
 
 export interface GmailAuthUrlOptions {
@@ -31,11 +33,90 @@ export interface GmailProfile {
 
 export const GMAIL_OAUTH_SCOPES = ['https://mail.google.com/'];
 
+function collectAuthErrorStrings(err: unknown): string[] {
+  const values = new Set<string>();
+
+  const add = (value: unknown) => {
+    if (typeof value !== 'string') return;
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    values.add(trimmed);
+  };
+
+  if (err instanceof Error) {
+    add(err.message);
+  }
+
+  const record = err as {
+    message?: unknown;
+    error?: unknown;
+    error_description?: unknown;
+    response?: {
+      data?: {
+        error?: unknown;
+        error_description?: unknown;
+      };
+    };
+  } | null;
+
+  if (record && typeof record === 'object') {
+    add(record.message);
+    add(record.error_description);
+
+    if (typeof record.error === 'string') {
+      add(record.error);
+    } else if (record.error && typeof record.error === 'object') {
+      const nestedError = record.error as { message?: unknown; code?: unknown };
+      add(nestedError.message);
+      add(nestedError.code);
+    }
+
+    const responseData = record.response?.data;
+    if (responseData && typeof responseData === 'object') {
+      add(responseData.error_description);
+      if (typeof responseData.error === 'string') {
+        add(responseData.error);
+      } else if (responseData.error && typeof responseData.error === 'object') {
+        const nestedError = responseData.error as { message?: unknown; status?: unknown };
+        add(nestedError.message);
+        add(nestedError.status);
+      }
+    }
+  }
+
+  return [...values];
+}
+
+export function isGmailReauthError(err: unknown): boolean {
+  return collectAuthErrorStrings(err).some(value => {
+    const lower = value.toLowerCase();
+    return (
+      lower.includes('invalid_grant') ||
+      lower.includes('token has been expired or revoked') ||
+      lower.includes('token has been revoked') ||
+      lower.includes('invalid_rapt') ||
+      lower.includes('no refresh token')
+    );
+  });
+}
+
+export function formatGmailAuthError(err: unknown, mailboxName: string): string {
+  if (isGmailReauthError(err)) {
+    return `Authentication expired for Gmail mailbox "${mailboxName}". Run: email-agent-mcp configure --provider gmail --mailbox ${mailboxName}`;
+  }
+
+  return collectAuthErrorStrings(err)[0] ?? (err instanceof Error ? err.message : String(err));
+}
+
 export class GmailAuthManager implements AuthManager {
   private oauth2Client: OAuth2Client;
   private accessToken?: string;
   private refreshToken?: string;
   private expiresAt?: number;
+  private readonly mailboxName: string;
+  private readonly lastInteractiveAuthAt?: string;
+  private needsReauth = false;
+  private reconnectPromise: Promise<boolean> | null = null;
 
   constructor(private readonly _config: GmailAuthConfig) {
     this.oauth2Client = new OAuth2Client(
@@ -43,6 +124,8 @@ export class GmailAuthManager implements AuthManager {
       this._config.clientSecret,
       this._config.redirectUri ?? 'urn:ietf:wg:oauth:2.0:oob',
     );
+    this.mailboxName = this._config.mailboxName ?? 'gmail';
+    this.lastInteractiveAuthAt = this._config.lastInteractiveAuthAt;
   }
 
   get clientId(): string { return this._config.clientId; }
@@ -80,6 +163,7 @@ export class GmailAuthManager implements AuthManager {
     this.accessToken = accessToken;
     this.refreshToken = refreshTokenVal;
     this.expiresAt = Date.now() + 3600000; // 1 hour default
+    this.needsReauth = false;
   }
 
   /**
@@ -116,15 +200,27 @@ export class GmailAuthManager implements AuthManager {
     this.accessToken = tokens.access_token ?? undefined;
     this.refreshToken = tokens.refresh_token ?? this.refreshToken;
     this.expiresAt = tokens.expiry_date ?? Date.now() + 3600000;
+    this.needsReauth = false;
   }
 
   async refresh(): Promise<void> {
-    if (!this.refreshToken) throw new Error('No refresh token');
+    if (!this.refreshToken) {
+      this.needsReauth = true;
+      throw new Error('No refresh token');
+    }
 
-    // Use the OAuth2Client's built-in refresh mechanism
-    const { credentials } = await this.oauth2Client.refreshAccessToken();
-    this.accessToken = credentials.access_token ?? undefined;
-    this.expiresAt = credentials.expiry_date ?? Date.now() + 3600000;
+    try {
+      // Use the OAuth2Client's built-in refresh mechanism
+      const { credentials } = await this.oauth2Client.refreshAccessToken();
+      this.accessToken = credentials.access_token ?? undefined;
+      this.expiresAt = credentials.expiry_date ?? Date.now() + 3600000;
+      this.needsReauth = false;
+    } catch (err) {
+      if (isGmailReauthError(err)) {
+        this.needsReauth = true;
+      }
+      throw err;
+    }
   }
 
   async disconnect(): Promise<void> {
@@ -139,9 +235,12 @@ export class GmailAuthManager implements AuthManager {
     this.accessToken = undefined;
     this.refreshToken = undefined;
     this.expiresAt = undefined;
+    this.needsReauth = false;
+    this.reconnectPromise = null;
   }
 
   isTokenExpired(): boolean {
+    if (this.needsReauth) return true;
     if (!this.expiresAt) return true;
     return Date.now() >= this.expiresAt;
   }
@@ -152,6 +251,36 @@ export class GmailAuthManager implements AuthManager {
 
   getRefreshToken(): string | undefined {
     return this.refreshToken;
+  }
+
+  async tryReconnect(): Promise<boolean> {
+    if (this.reconnectPromise) return this.reconnectPromise;
+    this.reconnectPromise = (async () => {
+      try {
+        await this.refresh();
+        return true;
+      } catch {
+        return false;
+      } finally {
+        this.reconnectPromise = null;
+      }
+    })();
+    return this.reconnectPromise;
+  }
+
+  getTokenHealthWarning(): string | undefined {
+    if (this.needsReauth) {
+      return formatGmailAuthError(new Error('invalid_grant'), this.mailboxName);
+    }
+
+    if (this.lastInteractiveAuthAt) {
+      const daysSinceAuth = (Date.now() - new Date(this.lastInteractiveAuthAt).getTime()) / (1000 * 60 * 60 * 24);
+      if (daysSinceAuth > 5) {
+        return `If the Google OAuth app is still in Testing, Gmail may require reauthentication after 7 days. Last authenticated ${Math.round(daysSinceAuth)} days ago.`;
+      }
+    }
+
+    return undefined;
   }
 
   async fetchProfile(): Promise<GmailProfile> {

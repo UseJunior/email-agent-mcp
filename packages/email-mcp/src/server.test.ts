@@ -316,6 +316,76 @@ describe('mcp-transport/Lazy Provider State', () => {
     expect(result.warnings[0]).toMatch(/missing credentials/);
   });
 
+  it('Scenario: get_mailbox_status returns the requested failed Gmail mailbox when all auth attempts failed', async () => {
+    const state = createLazyProviderState();
+    state.status = 'error';
+    state.isDemo = true;
+    state.error = 'All configured mailboxes failed to authenticate';
+    state.initPromise = Promise.resolve();
+    state.mailboxes = [
+      {
+        name: 'personal',
+        emailAddress: 'steven.obiajulu@gmail.com',
+        displayName: 'steven.obiajulu@gmail.com',
+        providerType: 'gmail',
+        provider: null,
+        auth: null,
+        isDefault: false,
+        status: 'error',
+        error: 'Authentication expired for Gmail mailbox "steven.obiajulu@gmail.com". Run: email-agent-mcp configure --provider gmail --mailbox steven.obiajulu@gmail.com',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const status = actions.find(a => a.name === 'get_mailbox_status')!;
+    const result = await status.run({}, { mailbox: 'personal' }) as {
+      name: string;
+      provider: string;
+      status: string;
+      warnings: string[];
+    };
+
+    expect(result.name).toBe('steven.obiajulu@gmail.com');
+    expect(result.provider).toBe('gmail');
+    expect(result.status).toBe('error');
+    expect(result.warnings[0]).toContain('configure --provider gmail --mailbox steven.obiajulu@gmail.com');
+  });
+
+  it('Scenario: get_mailbox_status returns the only failed mailbox by default when all auth attempts failed', async () => {
+    const state = createLazyProviderState();
+    state.status = 'error';
+    state.isDemo = true;
+    state.error = 'Authentication expired for Gmail mailbox "steven.obiajulu@gmail.com". Run: email-agent-mcp configure --provider gmail --mailbox steven.obiajulu@gmail.com';
+    state.initPromise = Promise.resolve();
+    state.mailboxes = [
+      {
+        name: 'personal',
+        emailAddress: 'steven.obiajulu@gmail.com',
+        displayName: 'steven.obiajulu@gmail.com',
+        providerType: 'gmail',
+        provider: null,
+        auth: null,
+        isDefault: false,
+        status: 'error',
+        error: 'Authentication expired for Gmail mailbox "steven.obiajulu@gmail.com". Run: email-agent-mcp configure --provider gmail --mailbox steven.obiajulu@gmail.com',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const status = actions.find(a => a.name === 'get_mailbox_status')!;
+    const result = await status.run({}, {}) as {
+      name: string;
+      provider: string;
+      status: string;
+      warnings: string[];
+    };
+
+    expect(result.name).toBe('steven.obiajulu@gmail.com');
+    expect(result.provider).toBe('gmail');
+    expect(result.status).toBe('error');
+    expect(result.warnings[0]).toContain('configure --provider gmail --mailbox steven.obiajulu@gmail.com');
+  });
+
   it('Scenario: get_mailbox_status reports the connected Gmail provider', async () => {
     const state = createLazyProviderState();
     state.status = 'connected';

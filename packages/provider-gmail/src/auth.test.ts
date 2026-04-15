@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { GMAIL_OAUTH_SCOPES, GmailAuthManager } from './auth.js';
+import { GMAIL_OAUTH_SCOPES, GmailAuthManager, isGmailReauthError } from './auth.js';
 
 const oauthMocks = vi.hoisted(() => ({
   setCredentials: vi.fn(),
@@ -176,5 +176,61 @@ describe('provider-gmail/OAuth2 Authentication', () => {
 
     await auth.connect({ access_token: 'gmail-token' });
     await expect(auth.refresh()).rejects.toThrow('No refresh token');
+  });
+
+  it('Scenario: detects Gmail invalid_grant responses as reauth-required', () => {
+    expect(isGmailReauthError(new Error('invalid_grant'))).toBe(true);
+    expect(isGmailReauthError({
+      response: {
+        data: {
+          error: 'invalid_grant',
+          error_description: 'Token has been expired or revoked.',
+        },
+      },
+    })).toBe(true);
+    expect(isGmailReauthError(new Error('network timeout'))).toBe(false);
+  });
+
+  it('Scenario: refresh marks Gmail auth as expired when Google rejects the refresh token', async () => {
+    oauthMocks.refreshAccessToken.mockRejectedValueOnce({
+      response: {
+        data: {
+          error: 'invalid_grant',
+          error_description: 'Token has been expired or revoked.',
+        },
+      },
+    });
+
+    const auth = new GmailAuthManager({
+      clientId: 'test-client',
+      clientSecret: 'test-secret',
+      mailboxName: 'personal',
+    });
+
+    await auth.connect({ refresh_token: 'gmail-refresh' });
+    await expect(auth.refresh()).rejects.toMatchObject({
+      response: {
+        data: {
+          error: 'invalid_grant',
+        },
+      },
+    });
+    expect(auth.isTokenExpired()).toBe(true);
+    expect(auth.getTokenHealthWarning()).toContain('configure --provider gmail --mailbox personal');
+  });
+
+  it('Scenario: getTokenHealthWarning warns about 7-day Testing refresh-token expiry for older Gmail auth', async () => {
+    const sixDaysAgo = new Date(Date.now() - (6 * 24 * 60 * 60 * 1000)).toISOString();
+    const auth = new GmailAuthManager({
+      clientId: 'test-client',
+      clientSecret: 'test-secret',
+      mailboxName: 'personal',
+      lastInteractiveAuthAt: sixDaysAgo,
+    });
+
+    await auth.connect({ refresh_token: 'gmail-refresh' });
+
+    expect(auth.getTokenHealthWarning()).toContain('still in Testing');
+    expect(auth.getTokenHealthWarning()).toContain('Last authenticated');
   });
 });
