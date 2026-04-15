@@ -406,7 +406,13 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
   try {
     const [
       { listConfiguredMailboxesWithMetadata, DelegatedAuthManager, RealGraphApiClient, GraphEmailProvider },
-      { listConfiguredGmailMailboxes, GmailAuthManager, GmailEmailProvider, GoogleapisGmailClient },
+      {
+        listConfiguredGmailMailboxes,
+        GmailAuthManager,
+        GmailEmailProvider,
+        GoogleapisGmailClient,
+        formatGmailAuthError,
+      },
     ] = await Promise.all([
       import('@usejunior/provider-microsoft'),
       import('@usejunior/provider-gmail'),
@@ -474,17 +480,24 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
 
     for (const metadata of gmailMailboxes) {
       const displayName = metadata.emailAddress ?? metadata.mailboxName;
+      const mailboxRef = metadata.emailAddress ?? metadata.mailboxName;
       try {
         const auth = new GmailAuthManager({
           clientId: metadata.clientId,
           clientSecret: metadata.clientSecret,
           redirectUri: metadata.redirectUri,
+          mailboxName: mailboxRef,
+          lastInteractiveAuthAt: metadata.lastInteractiveAuthAt,
         });
         await auth.connect({ refresh_token: metadata.refreshToken });
         await auth.refresh();
 
         const client = new GoogleapisGmailClient(auth);
         const provider = new GmailEmailProvider(client);
+        const mailboxAuth = {
+          getTokenHealthWarning: () => auth.getTokenHealthWarning(),
+          tryReconnect: () => auth.tryReconnect(),
+        };
 
         connectedMailboxes.push({
           name: metadata.mailboxName,
@@ -492,7 +505,7 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
           displayName,
           providerType: 'gmail',
           provider,
-          auth: null,
+          auth: mailboxAuth,
           isDefault: false,
           status: 'connected',
         });
@@ -508,10 +521,10 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
           auth: null,
           isDefault: false,
           status: 'error',
-          error: err instanceof Error ? err.message : String(err),
+          error: formatGmailAuthError(err, mailboxRef),
         });
         console.error(
-          `[email-agent-mcp] Skipping Gmail mailbox "${displayName}": ${err instanceof Error ? err.message : err}`,
+          `[email-agent-mcp] Skipping Gmail mailbox "${displayName}": ${formatGmailAuthError(err, mailboxRef)}`,
         );
       }
     }
@@ -532,7 +545,9 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
     state.mailboxes = failedMailboxes;
     state.isDemo = true;
     state.status = 'error';
-    state.error = 'All configured mailboxes failed to authenticate';
+    state.error = failedMailboxes.length === 1
+      ? (failedMailboxes[0]!.error ?? 'Mailbox authentication failed')
+      : `All configured mailboxes failed to authenticate. Use get_mailbox_status with a mailbox name for details. Configured mailboxes: ${failedMailboxes.map(mailbox => mailbox.displayName).join(', ')}`;
     console.error(
       '[email-agent-mcp] WARNING: All configured mailboxes failed to authenticate — running in demo mode. Run: email-agent-mcp configure',
     );
@@ -794,8 +809,25 @@ export async function buildLazyActions(
             return { name: 'pending', provider: 'pending', status: 'connecting', isDefault: false, warnings: ['Authenticating — provider is warming up'] };
           case 'not_configured':
             return { name: 'none', provider: 'none', status: 'not configured', isDefault: false, warnings: [NO_MAILBOX_CONFIGURED_MESSAGE] };
-          case 'error':
+          case 'error': {
+            const mailbox = inp.mailbox
+              ? findKnownMailbox(state, inp.mailbox)
+              : state.mailboxes.length === 1
+                ? state.mailboxes[0] ?? null
+                : null;
+
+            if (mailbox) {
+              return {
+                name: mailbox.displayName,
+                provider: mailbox.providerType,
+                status: 'error',
+                isDefault: mailbox.isDefault,
+                warnings: [mailbox.error ?? state.error ?? 'Provider init failed'],
+              };
+            }
+
             return { name: 'none', provider: 'none', status: 'error', isDefault: false, warnings: [state.error ?? 'Provider init failed'] };
+          }
           case 'connected': {
             const mailbox = inp.mailbox ? findKnownMailbox(state, inp.mailbox) : getDefaultMailbox(state);
             if (!mailbox) {
