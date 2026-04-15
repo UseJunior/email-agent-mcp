@@ -56,7 +56,8 @@ describe('email-write/Reply to Email', () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error!.message).toContain('Recipient not in send allowlist');
+    expect(result.error!.code).toBe('ALLOWLIST_BLOCKED');
+    expect(result.error!.message).toContain('reply recipients not in send allowlist');
   });
 
   it('Scenario: Mailbox required with multiple accounts', async () => {
@@ -126,6 +127,67 @@ describe('email-write/Reply Draft', () => {
 
     expect(result.success).toBe(false);
     expect(result.error!.code).toBe('NOT_SUPPORTED');
+  });
+});
+
+describe('email-write/Reply Allowlist — P0 regression (plan §2.0)', () => {
+  it('Scenario: reply_all=true blocks on non-allowlisted auto-populated cc recipient', async () => {
+    // Original thread: allowed sender + allowed recipient, but cc'd a non-allowlisted
+    // outsider. Replying reply-all auto-populates all three into the reply draft.
+    // The old code only checked original.from.email, letting this silently leak.
+    const threadId = 'thread_with_evil_cc_123456';
+    provider.addMessage({
+      id: threadId,
+      subject: 'Project update',
+      from: { email: 'partner@lawfirm.com' },
+      to: [{ email: 'me@company.com' }],
+      cc: [{ email: 'outsider@evil.com' }],
+      receivedAt: '2024-03-15T10:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: threadId,
+      body: 'I agree!',
+      // reply_all defaults to true
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('ALLOWLIST_BLOCKED');
+    // The draft must have been created (provider populated recipients) and
+    // then deleted by our send-path guard.
+    expect(provider.getDrafts().size).toBe(0);
+    expect(provider.getSentMessages()).toHaveLength(0);
+  });
+
+  it('Scenario: reply_all=false skips auto-populated cc and succeeds for sender-only', async () => {
+    // Same thread as above — non-allowlisted outsider in cc — but reply_all=false
+    // narrows to sender only, which IS allowlisted.
+    const threadId = 'thread_with_evil_cc_222222';
+    provider.addMessage({
+      id: threadId,
+      subject: 'Project update',
+      from: { email: 'partner@lawfirm.com' },
+      to: [{ email: 'me@company.com' }],
+      cc: [{ email: 'outsider@evil.com' }],
+      receivedAt: '2024-03-15T10:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: threadId,
+      body: 'Private response',
+      reply_all: false,
+    });
+
+    expect(result.success).toBe(true);
+    expect(provider.getSentMessages()).toHaveLength(1);
+    const sent = provider.getSentMessages()[0];
+    expect(sent.to.map(a => a.email)).toEqual(['partner@lawfirm.com']);
+    // No cc should have been auto-populated
+    expect(sent.cc ?? []).toHaveLength(0);
   });
 });
 

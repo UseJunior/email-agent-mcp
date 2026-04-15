@@ -11,9 +11,21 @@ export interface FrontmatterFields {
   draft?: boolean;
   format?: BodyFormat;
   force_black?: boolean;
+  attachments?: string[];
+  reply_all?: boolean;
 }
 
-const KNOWN_KEYS = new Set(['to', 'cc', 'subject', 'reply_to', 'draft', 'format', 'force_black']);
+const KNOWN_KEYS = new Set([
+  'to',
+  'cc',
+  'subject',
+  'reply_to',
+  'draft',
+  'format',
+  'force_black',
+  'attachments',
+  'reply_all',
+]);
 
 export function parseFrontmatter(
   content: string,
@@ -73,6 +85,11 @@ export function parseFrontmatter(
       // unknown values silently ignored — action layer falls back to default
     } else if (key === 'force_black') {
       fields.force_black = value.toLowerCase() === 'true';
+    } else if (key === 'attachments') {
+      // Always a list (even single value)
+      fields.attachments = value.split(',').map(s => s.trim()).filter(Boolean);
+    } else if (key === 'reply_all') {
+      fields.reply_all = value.toLowerCase() === 'true';
     }
   }
 
