@@ -63,7 +63,7 @@ requires:
     - calendar_integration
 metadata:
   author: UseJunior
-  version: "0.1.6"
+  version: "0.1.7"
 ---
 
 # Outlook Email Management
@@ -93,6 +93,30 @@ Why this matters: a single wrong send — wrong recipient, wrong attachment, con
 - **`delete_email` disabled by default** unless the caller explicitly opts in with `user_explicitly_requested_deletion: true` ([label.ts](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/label.ts))
 
 **NemoClaw** can enforce it at the network policy level — see the [NemoClaw Email Policy skill](#related-skills).
+
+## Trust Boundary: What This Skill Can and Cannot Enforce
+
+Before you install or grant OAuth consent, understand where the safety boundary lies.
+
+**This skill is instruction-only.** It ships no code, executes nothing by itself, and cannot enforce any of the safety protections described in the Safety Model above or the Authentication section below. Everything is enforced (or not enforced) by whichever runtime actually executes the Microsoft Graph API calls. The skill file is a set of instructions; the runtime is the sandbox.
+
+### What that means in practice
+
+- The draft-first workflow, send allowlist, and inbox-rule action blocks are properties of the reference runtime [`email-agent-mcp`](https://github.com/UseJunior/email-agent-mcp), not of this skill. If you use a different runtime, those protections are not automatically present.
+- `Mail.Send` and `Mail.ReadWrite` are high-impact OAuth scopes. Granting them without a runtime that enforces draft-first and send-allowlist gives up the primary mitigations.
+- `MailboxSettings.ReadWrite` controls inbox rules, and inbox rules can forward or redirect mail externally. The reference runtime blocks dangerous rule actions at the action handler level, but that protection is runtime-specific.
+- Autonomous invocation (where the agent runs this skill without per-call approval) is a platform-level setting, not something the skill controls. Combined with write scopes, it increases the surface area of any runtime weakness.
+
+### Before installing or granting consent
+
+This skill requests high-impact Microsoft Graph scopes (`Mail.ReadWrite`, `MailboxSettings.ReadWrite`, optionally `Mail.Send`). Review the items below before you grant consent. They are the exact things to check; the skill cannot enforce any of them for you.
+
+1. **Only grant `Mail.Send` if you trust the runtime** to honor draft-first. The skill itself cannot enforce "draft first, send second" — that's a runtime property. Verify your runtime either (a) blocks direct send by default, or (b) is `email-agent-mcp` which ships with an empty send allowlist by default.
+2. **Only grant `MailboxSettings.ReadWrite` if you trust the runtime** to block dangerous rule actions (`forwardTo`, `forwardAsAttachmentTo`, `redirectTo`, `delete`, `permanentDelete`). The reference runtime does this at [`rules.ts:39`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts#L39) — inspect the code yourself. Alternatively, prefer `MailboxSettings.Read` if rule auditing is all you need.
+3. **Prefer least-privilege consent.** Start with `Mail.Read` + `offline_access` for read-only triage. Escalate to write scopes only as specific workflows require them. Skip `Mail.Send` entirely if draft-first (user sends manually from Outlook) is acceptable.
+4. **Review the client app identity.** Whatever `AGENT_EMAIL_CLIENT_ID` resolves to is the Azure AD application you are consenting to. Check the consent screen, verify the app name and publisher, and make sure the requested scopes match what you see in this document.
+5. **Test on a non-production account first.** Be prepared to revoke OAuth consent and invalidate refresh tokens at https://myaccount.microsoft.com/consent if anything looks wrong or misconfigured.
+6. **Avoid enabling autonomous invocation** for this skill unless you understand and trust the runtime's guardrails. Autonomous invocation combined with `Mail.Send` or `MailboxSettings.ReadWrite` gives the agent the ability to send mail or create inbox rules without per-call user approval — only safe if the runtime enforces the mitigations described above.
 
 ## Authentication & Required Scopes
 > 身份验证与所需权限

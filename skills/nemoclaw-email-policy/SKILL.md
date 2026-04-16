@@ -12,7 +12,7 @@ compatibility: >-
   including email-agent-mcp and direct Graph API clients.
 metadata:
   author: UseJunior
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # NemoClaw Email Policy
