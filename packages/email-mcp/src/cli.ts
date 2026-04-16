@@ -1065,8 +1065,8 @@ async function runToken(opts: CliOptions): Promise<number> {
     await auth.reconnect();
     const token = await auth.getAccessToken();
 
-    // Await stdout flush — the CLI wrapper calls process.exit() after runCli()
-    // resolves, which can truncate piped output if the write hasn't drained.
+    // Await stdout flush so short-lived invocations can exit naturally only
+    // after the token has fully reached stdout.
     await new Promise<void>((resolve, reject) => {
       process.stdout.write(token, (err) => err ? reject(err) : resolve());
     });
@@ -1118,13 +1118,25 @@ export function getNemoClawEgressDomains(): string[] {
   return [...NEMOCLAW_EGRESS_DOMAINS];
 }
 
+/**
+ * Direct entrypoint adapter used by `node dist/cli.js ...`.
+ *
+ * Important: successful runs must not force `process.exit()`. `serve` resolves
+ * once stdio transport is connected, but the MCP process must stay alive for
+ * the client handshake and subsequent tool calls.
+ */
+export async function runCliDirect(args: string[]): Promise<void> {
+  try {
+    const code = await runCli(args);
+    process.exitCode = code;
+  } catch (err) {
+    console.error('Fatal:', err);
+    process.exit(1);
+  }
+}
+
 // Auto-execute when run directly (not imported as a module in tests)
 const isDirectRun = process.argv[1]?.endsWith('cli.ts') || process.argv[1]?.endsWith('cli.js');
 if (isDirectRun) {
-  runCli(process.argv.slice(2)).then(code => {
-    process.exit(code);
-  }).catch(err => {
-    console.error('Fatal:', err);
-    process.exit(1);
-  });
+  void runCliDirect(process.argv.slice(2));
 }

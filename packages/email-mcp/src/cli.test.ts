@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   runCli,
+  runCliDirect,
   parseCliArgs,
   getNemoClawEgressDomains,
   getAgentEmailHome,
@@ -288,6 +289,31 @@ describe('cli/Serve Subcommand', () => {
   it('Scenario: Start MCP server', async () => {
     const exitCode = await runCli(['serve']);
     expect(exitCode).toBe(0);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('MCP server started'),
+    );
+  });
+});
+
+describe('cli/Direct entrypoint lifecycle', () => {
+  let originalExitCode: number | undefined;
+
+  beforeEach(() => {
+    originalExitCode = process.exitCode;
+    process.exitCode = undefined;
+  });
+
+  afterEach(() => {
+    process.exitCode = originalExitCode;
+  });
+
+  it('Scenario: Direct serve entrypoint does not force process exit after transport startup', async () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await runCliDirect(['serve']);
+
+    expect(process.exitCode).toBe(0);
+    expect(exitSpy).not.toHaveBeenCalled();
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('MCP server started'),
     );
