@@ -50,7 +50,7 @@ requires:
       - permanentDelete
 metadata:
   author: UseJunior
-  version: "0.1.3"
+  version: "0.1.4"
 ---
 
 # Inbox Cleanup & Rules (Outlook)
@@ -62,6 +62,28 @@ This skill covers both one-time inbox cleanup and ongoing rule automation for Mi
 Use when the user's inbox has become noisy — automated notifications drowning out human conversations, newsletters mixed with client emails, or hundreds of unread messages that make it hard to find what matters.
 
 **Real trigger example**: A user's partner email went unread for 9 days because it was buried under GitHub and npm notifications. This is the exact problem server-side rules solve.
+
+## Trust Boundary: What This Skill Can and Cannot Enforce
+
+Before you install or grant OAuth consent, understand where the safety boundary lies.
+
+**This skill is instruction-only.** It ships no code, executes nothing by itself, and cannot enforce any of the safety protections described below. Everything in the "Rule Security Model" and "Authentication & Required Scopes" sections is enforced (or not enforced) by whichever runtime actually executes the Microsoft Graph API calls. The skill file is a set of instructions, not a sandbox.
+
+### What that means in practice
+
+- The blocked-actions list (`forwardTo`, `redirectTo`, `delete`, etc.) describes what a trusted runtime SHOULD reject. Whether those actions are actually rejected depends on the runtime. If you use [`email-agent-mcp`](https://github.com/UseJunior/email-agent-mcp), rejection is built into the action handler ([`rules.ts:39`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts#L39)). If you use a raw Graph API client or a custom MCP without equivalent guards, the protections do not automatically apply.
+- `MailboxSettings.ReadWrite` is a high-risk scope because it controls inbox rules — and inbox rules can be configured to forward or redirect mail externally. Granting the scope without a runtime that enforces the blocked-actions list gives up the primary mitigation.
+- Autonomous invocation (where the agent runs this skill without per-call approval) is a platform-level setting, not something the skill controls. Combined with write scopes, it increases the surface area of any runtime weakness.
+
+### Before installing or granting consent
+
+This skill requests a high-risk mailbox-rule permission (`MailboxSettings.ReadWrite`). Review the five items below before you grant consent. They are the exact things to check; the skill cannot enforce any of them for you.
+
+1. **Only grant `MailboxSettings.ReadWrite` if you trust the runtime** that will execute these instructions. The skill itself cannot enforce the blocked-actions list (`forwardTo`, `forwardAsAttachmentTo`, `redirectTo`, `delete`, `permanentDelete`). Verify your runtime does.
+2. **Prefer audit-only scopes** (`MailboxSettings.Read`) — or omit rule creation entirely — if you do not need automated rule management. Folder operations and batch moves work with just `Mail.ReadWrite`.
+3. **If you must grant full scopes, use a vetted runtime** that enforces blocking of forward/redirect/delete actions at the action handler. The reference runtime `email-agent-mcp` does this at [`rules.ts:39`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts#L39) — inspect the code yourself. Alternatively, add network-level protections (for example, NemoClaw) to block Graph endpoints that create dangerous rules.
+4. **Test on a non-production account first.** Be prepared to revoke OAuth consent and invalidate refresh tokens at https://myaccount.microsoft.com/consent if anything looks wrong or misconfigured.
+5. **Avoid enabling autonomous invocation** for this skill unless you understand and trust the runtime's guardrails. Autonomous invocation combined with `MailboxSettings.ReadWrite` gives the agent the ability to create inbox rules without per-call user approval — only safe if the runtime enforces the blocked-actions list.
 
 ## Authentication & Required Scopes
 

@@ -13,7 +13,7 @@ compatibility: >-
   and thread detection.
 metadata:
   author: UseJunior
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # Email Response Drafting
