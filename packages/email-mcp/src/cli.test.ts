@@ -7,6 +7,7 @@ import {
   getAgentEmailHome,
   ensureGmailProfileMatchesIntent,
   getEffectiveSendAllowlistPath,
+  inferProviderFromMailbox,
   loadConfig,
   saveConfig,
   isDirectCliRun,
@@ -422,6 +423,47 @@ describe('cli/Configure Subcommand', () => {
   });
 });
 
+describe('cli/Provider Inference', () => {
+  it('infers gmail from gmail.com', () => {
+    expect(inferProviderFromMailbox('steven@gmail.com')).toBe('gmail');
+  });
+
+  it('infers gmail case-insensitively', () => {
+    expect(inferProviderFromMailbox('Steven@GMAIL.COM')).toBe('gmail');
+    expect(inferProviderFromMailbox('Steven@Gmail.com')).toBe('gmail');
+  });
+
+  it('infers gmail from googlemail.com (legacy variant)', () => {
+    expect(inferProviderFromMailbox('user@googlemail.com')).toBe('gmail');
+  });
+
+  it('infers gmail despite surrounding whitespace', () => {
+    expect(inferProviderFromMailbox('  steven@gmail.com  ')).toBe('gmail');
+  });
+
+  it('infers microsoft from each consumer domain', () => {
+    expect(inferProviderFromMailbox('user@outlook.com')).toBe('microsoft');
+    expect(inferProviderFromMailbox('user@hotmail.com')).toBe('microsoft');
+    expect(inferProviderFromMailbox('user@live.com')).toBe('microsoft');
+    expect(inferProviderFromMailbox('user@msn.com')).toBe('microsoft');
+  });
+
+  it('returns undefined for custom business domains', () => {
+    expect(inferProviderFromMailbox('steven@usejunior.com')).toBeUndefined();
+  });
+
+  it('returns undefined for inputs that are not an email address', () => {
+    expect(inferProviderFromMailbox('')).toBeUndefined();
+    expect(inferProviderFromMailbox('not-an-email')).toBeUndefined();
+    expect(inferProviderFromMailbox(undefined)).toBeUndefined();
+  });
+
+  it('does not pattern-match regional variants (hotmail.co.uk, outlook.fr) — exact match only', () => {
+    expect(inferProviderFromMailbox('user@hotmail.co.uk')).toBeUndefined();
+    expect(inferProviderFromMailbox('user@outlook.fr')).toBeUndefined();
+  });
+});
+
 describe('cli/Gmail Account Intent Checks', () => {
   let tmpHome: string;
   let originalHome: string | undefined;
@@ -662,6 +704,27 @@ describe('cli/Gmail Configure', () => {
       clientId: 'env-client-id',
       clientSecret: 'env-client-secret',
     });
+  });
+
+  it('Scenario: Configure without --provider infers gmail from a gmail.com mailbox', async () => {
+    process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'] = 'env-client-id';
+    process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'] = 'env-client-secret';
+
+    const exitCode = await runCli([
+      'configure',
+      '--mailbox',
+      'steven.obiajulu@gmail.com',
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      provider: 'gmail',
+      mailboxName: 'steven.obiajulu@gmail.com',
+      emailAddress: 'steven.obiajulu@gmail.com',
+    });
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Inferred provider "gmail" from mailbox domain "gmail.com"'),
+    );
   });
 });
 

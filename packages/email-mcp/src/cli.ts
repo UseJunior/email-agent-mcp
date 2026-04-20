@@ -876,6 +876,28 @@ async function runGmailConfigure(opts: CliOptions): Promise<number> {
   return 0;
 }
 
+export function inferProviderFromMailbox(
+  mailbox: string | undefined,
+): 'gmail' | 'microsoft' | undefined {
+  if (!mailbox) return undefined;
+  const normalized = normalizeMailboxValue(mailbox);
+  if (!normalized.includes('@')) return undefined;
+  const domain = normalized.split('@').pop();
+  if (!domain) return undefined;
+
+  const GMAIL_DOMAINS = new Set(['gmail.com', 'googlemail.com']);
+  const MICROSOFT_CONSUMER_DOMAINS = new Set([
+    'outlook.com',
+    'hotmail.com',
+    'live.com',
+    'msn.com',
+  ]);
+
+  if (GMAIL_DOMAINS.has(domain)) return 'gmail';
+  if (MICROSOFT_CONSUMER_DOMAINS.has(domain)) return 'microsoft';
+  return undefined;
+}
+
 export async function runConfigure(opts: CliOptions): Promise<number> {
   if (opts.nemoclaw) {
     console.error('[email-agent-mcp] NemoClaw bootstrap — adding egress domains:');
@@ -886,7 +908,15 @@ export async function runConfigure(opts: CliOptions): Promise<number> {
   }
 
   const mailboxName = opts.mailbox ?? 'default';
-  const provider = opts.provider ?? 'microsoft';
+  const inferredProvider = opts.provider ? undefined : inferProviderFromMailbox(opts.mailbox);
+  const provider = opts.provider ?? inferredProvider ?? 'microsoft';
+
+  if (inferredProvider && !opts.provider) {
+    const domain = normalizeMailboxValue(opts.mailbox ?? '').split('@').pop();
+    console.error(
+      `[email-agent-mcp] Inferred provider "${inferredProvider}" from mailbox domain "${domain}". Pass --provider to override.`,
+    );
+  }
 
   if (provider === 'gmail') {
     try {
