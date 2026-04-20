@@ -1,6 +1,6 @@
 {
   "name": "email-agent-mcp-suite",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": true,
   "description": "Local email connectivity for AI agents — MCP server for Microsoft 365 and manual-token Gmail setup",
   "type": "module",

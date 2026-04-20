@@ -1,6 +1,6 @@
 {
   "name": "@usejunior/provider-gmail",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Gmail API email provider for email-agent-mcp",
   "type": "module",
   "main": "dist/index.js",
@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "@googleapis/gmail": "^4.0.0",
-    "@usejunior/email-core": "^0.1.5"
+    "@usejunior/email-core": "^0.1.6"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
