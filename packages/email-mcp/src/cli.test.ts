@@ -9,10 +9,12 @@ import {
   getEffectiveSendAllowlistPath,
   loadConfig,
   saveConfig,
+  isDirectCliRun,
 } from './cli.js';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 // Linux CI runners do not provide libsecret, so auth imports must not load the real cache plugin.
 vi.mock('@azure/identity-cache-persistence', () => ({
@@ -309,6 +311,26 @@ afterEach(() => {
     Object.defineProperty(process.stdout, 'isTTY', originalStdoutIsTTYDescriptor);
   }
   vi.restoreAllMocks();
+});
+
+describe('cli/Direct Run Detection', () => {
+  it('Scenario: npm bin symlink resolves to the CLI entrypoint', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'email-agent-mcp-symlink-'));
+    const cliModuleUrl = new URL('./cli.ts', import.meta.url);
+    const symlinkPath = join(tempDir, 'email-agent-mcp');
+
+    try {
+      await symlink(fileURLToPath(cliModuleUrl), symlinkPath);
+      expect(isDirectCliRun(symlinkPath, cliModuleUrl.href)).toBe(true);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Scenario: wrapper entrypoints do not trigger CLI self-execution', () => {
+    const cliModuleUrl = new URL('./cli.ts', import.meta.url);
+    expect(isDirectCliRun('/tmp/email-agent-mcp-wrapper.js', cliModuleUrl.href)).toBe(false);
+  });
 });
 
 describe('cli/Serve Subcommand', () => {

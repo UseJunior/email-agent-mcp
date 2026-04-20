@@ -2,11 +2,13 @@
 // CLI entry point — serve, watch, configure, setup subcommands + TTY-aware default
 
 import { randomUUID } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const { version: PACKAGE_VERSION } = require('../package.json') as { version: string };
@@ -1171,8 +1173,18 @@ export async function runCliDirect(args: string[]): Promise<void> {
   }
 }
 
-// Auto-execute when run directly (not imported as a module in tests)
-const isDirectRun = process.argv[1]?.endsWith('cli.ts') || process.argv[1]?.endsWith('cli.js');
+export function isDirectCliRun(argv1: string | undefined, moduleUrl: string = import.meta.url): boolean {
+  if (!argv1) return false;
+
+  try {
+    return realpathSync(argv1) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
+// Auto-execute when run directly (including npm bin symlinks and shims)
+const isDirectRun = isDirectCliRun(process.argv[1]);
 if (isDirectRun) {
   void runCliDirect(process.argv.slice(2));
 }
