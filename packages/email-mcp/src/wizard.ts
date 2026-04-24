@@ -212,8 +212,42 @@ export async function runWizardMenu(opts: CliOptions, mailboxes: ConfiguredMailb
     case 'add':
       return await runWizardSetup(opts);
 
-    case 'reconnect':
-      return await runConfigure(opts);
+    case 'reconnect': {
+      if (mailboxes.length === 0) {
+        p.outro('No configured mailboxes to reconnect. Run: email-agent-mcp setup');
+        return 0;
+      }
+
+      let target: ConfiguredMailboxSummary;
+      if (mailboxes.length === 1) {
+        target = mailboxes[0]!;
+      } else {
+        const picked = await p.select<ConfiguredMailboxSummary>({
+          message: 'Which mailbox do you want to reconnect?',
+          options: mailboxes.map(mb => {
+            const email = mb.emailAddress ?? mb.mailboxName;
+            const lastAuth = mb.lastInteractiveAuthAt
+              ? new Date(mb.lastInteractiveAuthAt).toLocaleDateString()
+              : 'unknown';
+            return {
+              value: mb,
+              label: `${email} (${mb.provider}, last auth: ${lastAuth})`,
+            };
+          }),
+        });
+        if (p.isCancel(picked)) {
+          p.outro('Goodbye!');
+          return 0;
+        }
+        target = picked;
+      }
+
+      return await runConfigure({
+        ...opts,
+        provider: target.provider,
+        mailbox: target.emailAddress ?? target.mailboxName,
+      });
+    }
 
     case 'hooks': {
       const config = await loadConfig();
