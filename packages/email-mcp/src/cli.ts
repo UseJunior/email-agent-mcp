@@ -745,8 +745,17 @@ async function resolveGmailOAuthClient(opts: CliOptions): Promise<{ clientId: st
     ?? process.env['GOOGLE_CLIENT_ID'];
   let clientSecret = opts.clientSecret
     ?? process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET']
-    ?? process.env['GOOGLE_CLIENT_SECRET']
-    ?? '';
+    ?? process.env['GOOGLE_CLIENT_SECRET'];
+
+  if (!clientId || !clientSecret) {
+    const mailboxIdentifier = opts.mailbox ?? 'default';
+    const { loadGmailMailboxMetadata } = await import('@usejunior/provider-gmail');
+    const saved = await loadGmailMailboxMetadata(mailboxIdentifier);
+    if (saved) {
+      clientId ??= saved.clientId;
+      clientSecret ??= saved.clientSecret;
+    }
+  }
 
   if ((!clientId || !clientSecret) && process.stdout.isTTY) {
     const p = await import('@clack/prompts');

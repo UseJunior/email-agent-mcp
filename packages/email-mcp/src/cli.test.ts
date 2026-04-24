@@ -726,6 +726,92 @@ describe('cli/Gmail Configure', () => {
       expect.stringContaining('Inferred provider "gmail" from mailbox domain "gmail.com"'),
     );
   });
+
+  async function seedSavedGmailMetadata(identifier: string, overrides: Record<string, unknown> = {}): Promise<void> {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    const tokensDir = join(tmpHome, 'tokens');
+    await mkdir(tokensDir, { recursive: true });
+    const filename = identifier.includes('@')
+      ? `${identifier.toLowerCase().replace(/@/g, '-at-').replace(/\./g, '-').replace(/[^a-z0-9-]/g, '')}.json`
+      : `${identifier}.json`;
+    const metadata = {
+      provider: 'gmail',
+      mailboxName: identifier,
+      emailAddress: identifier.includes('@') ? identifier : 'steven.obiajulu@gmail.com',
+      clientId: 'saved-client-id',
+      clientSecret: 'saved-client-secret',
+      refreshToken: 'saved-refresh-token',
+      lastInteractiveAuthAt: '2026-04-20T12:00:00.000Z',
+      ...overrides,
+    };
+    await writeFile(join(tokensDir, filename), JSON.stringify(metadata, null, 2) + '\n');
+  }
+
+  it('Scenario: Gmail configure reuses saved OAuth credentials when flags and env vars are absent', async () => {
+    // Regression test for #44 — reauth should not re-prompt for creds that are already on disk.
+    await seedSavedGmailMetadata('personal');
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail', '--mailbox', 'personal']);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      mailboxName: 'personal',
+      clientId: 'saved-client-id',
+      clientSecret: 'saved-client-secret',
+    });
+    // Auth URL must have been generated with the saved client, not a prompted one.
+    expect(gmailMockState.authUrlOptions).not.toBeNull();
+  });
+
+  it('Scenario: Gmail configure reuses saved OAuth credentials for the default mailbox when --mailbox is omitted', async () => {
+    // Regression test for #44 — `configure --provider gmail` (no --mailbox) must look up default.json.
+    await seedSavedGmailMetadata('default');
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail']);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      mailboxName: 'default',
+      clientId: 'saved-client-id',
+      clientSecret: 'saved-client-secret',
+    });
+  });
+
+  it('Scenario: CLI flags override saved OAuth credentials (rotation path)', async () => {
+    await seedSavedGmailMetadata('personal');
+
+    const exitCode = await runCli([
+      'configure',
+      '--provider',
+      'gmail',
+      '--mailbox',
+      'personal',
+      '--client-id',
+      'cli-client-id',
+      '--client-secret',
+      'cli-client-secret',
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      clientId: 'cli-client-id',
+      clientSecret: 'cli-client-secret',
+    });
+  });
+
+  it('Scenario: Environment variables override saved OAuth credentials', async () => {
+    process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'] = 'env-client-id';
+    process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'] = 'env-client-secret';
+    await seedSavedGmailMetadata('personal');
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail', '--mailbox', 'personal']);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      clientId: 'env-client-id',
+      clientSecret: 'env-client-secret',
+    });
+  });
 });
 
 describe('cli/NemoClaw Setup', () => {
