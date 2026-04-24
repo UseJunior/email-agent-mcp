@@ -415,11 +415,28 @@ describe('cli/Configure Subcommand', () => {
   });
 
   it('Gmail configure returns an error when credentials are missing', async () => {
-    const exitCode = await runCli(['configure', '--provider', 'gmail']);
-    expect(exitCode).toBe(1);
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('Missing Gmail OAuth client ID'),
-    );
+    // Isolate from the user's real ~/.email-agent-mcp so resolveGmailOAuthClient's
+    // saved-metadata lookup does not pick up a default mailbox from the host machine.
+    const tmpHome = await mkdtemp(join(tmpdir(), 'email-agent-mcp-missing-creds-'));
+    const originalHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    const originalClientId = process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'];
+    const originalClientSecret = process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'];
+    process.env['EMAIL_AGENT_MCP_HOME'] = tmpHome;
+    delete process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'];
+    delete process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'];
+    try {
+      const exitCode = await runCli(['configure', '--provider', 'gmail']);
+      expect(exitCode).toBe(1);
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('Missing Gmail OAuth client ID'),
+      );
+    } finally {
+      if (originalHome === undefined) delete process.env['EMAIL_AGENT_MCP_HOME'];
+      else process.env['EMAIL_AGENT_MCP_HOME'] = originalHome;
+      if (originalClientId !== undefined) process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'] = originalClientId;
+      if (originalClientSecret !== undefined) process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'] = originalClientSecret;
+      await rm(tmpHome, { recursive: true, force: true });
+    }
   });
 });
 
@@ -725,6 +742,136 @@ describe('cli/Gmail Configure', () => {
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('Inferred provider "gmail" from mailbox domain "gmail.com"'),
     );
+  });
+
+  async function seedSavedGmailMetadata(identifier: string, overrides: Record<string, unknown> = {}): Promise<void> {
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    const { toFilesystemSafeKey } = await import('@usejunior/provider-gmail');
+    const tokensDir = join(tmpHome, 'tokens');
+    await mkdir(tokensDir, { recursive: true });
+    const emailAddress = (overrides['emailAddress'] as string | undefined)
+      ?? (identifier.includes('@') ? identifier : 'steven.obiajulu@gmail.com');
+    // Production's saveGmailMailboxMetadata always writes files keyed on emailAddress's safe key,
+    // never on the mailbox alias. Match that so the loader's safe-key and directory-scan
+    // branches are exercised — the same paths the wizard reconnect flow hits in production.
+    const filename = `${toFilesystemSafeKey(emailAddress)}.json`;
+    const metadata = {
+      provider: 'gmail',
+      mailboxName: identifier,
+      emailAddress,
+      clientId: 'saved-client-id',
+      clientSecret: 'saved-client-secret',
+      refreshToken: 'saved-refresh-token',
+      lastInteractiveAuthAt: '2026-04-20T12:00:00.000Z',
+      ...overrides,
+    };
+    await writeFile(join(tokensDir, filename), JSON.stringify(metadata, null, 2) + '\n');
+  }
+
+  it('Scenario: Gmail configure reuses saved OAuth credentials when flags and env vars are absent', async () => {
+    // Regression test for #44 — reauth should not re-prompt for creds that are already on disk.
+    // Exercises loadGmailMailboxMetadata's directory-scan fallback (alias identifier, no literal file match).
+    await seedSavedGmailMetadata('personal');
+    const clackPrompts = await import('@clack/prompts');
+    vi.mocked(clackPrompts.text).mockClear();
+    vi.mocked(clackPrompts.password).mockClear();
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail', '--mailbox', 'personal']);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      mailboxName: 'personal',
+      clientId: 'saved-client-id',
+      clientSecret: 'saved-client-secret',
+    });
+    // Auth URL must have been generated with the saved client, not a prompted one.
+    expect(gmailMockState.authUrlOptions).not.toBeNull();
+    expect(vi.mocked(clackPrompts.text)).not.toHaveBeenCalled();
+    expect(vi.mocked(clackPrompts.password)).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Gmail configure reuses saved OAuth credentials for the default mailbox when --mailbox is omitted', async () => {
+    // Regression test for #44 — `configure --provider gmail` (no --mailbox) normalizes to 'default'
+    // and must resolve saved creds via the directory-scan fallback on mailboxName.
+    await seedSavedGmailMetadata('default');
+    const clackPrompts = await import('@clack/prompts');
+    vi.mocked(clackPrompts.text).mockClear();
+    vi.mocked(clackPrompts.password).mockClear();
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail']);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      mailboxName: 'default',
+      clientId: 'saved-client-id',
+      clientSecret: 'saved-client-secret',
+    });
+    expect(vi.mocked(clackPrompts.text)).not.toHaveBeenCalled();
+    expect(vi.mocked(clackPrompts.password)).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Gmail configure reuses saved OAuth credentials when --mailbox is an email address (reconnect path)', async () => {
+    // Regression test for #44 via the #45 reconnect flow — the wizard passes
+    // `target.emailAddress ?? target.mailboxName` into runConfigure, so the identifier
+    // can be an email. Exercises loadGmailMailboxMetadata's safe-key branch.
+    await seedSavedGmailMetadata('steven.obiajulu@gmail.com');
+    const clackPrompts = await import('@clack/prompts');
+    vi.mocked(clackPrompts.text).mockClear();
+    vi.mocked(clackPrompts.password).mockClear();
+
+    const exitCode = await runCli([
+      'configure',
+      '--provider',
+      'gmail',
+      '--mailbox',
+      'steven.obiajulu@gmail.com',
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      mailboxName: 'steven.obiajulu@gmail.com',
+      emailAddress: 'steven.obiajulu@gmail.com',
+      clientId: 'saved-client-id',
+      clientSecret: 'saved-client-secret',
+    });
+    expect(vi.mocked(clackPrompts.text)).not.toHaveBeenCalled();
+    expect(vi.mocked(clackPrompts.password)).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: CLI flags override saved OAuth credentials (rotation path)', async () => {
+    await seedSavedGmailMetadata('personal');
+
+    const exitCode = await runCli([
+      'configure',
+      '--provider',
+      'gmail',
+      '--mailbox',
+      'personal',
+      '--client-id',
+      'cli-client-id',
+      '--client-secret',
+      'cli-client-secret',
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      clientId: 'cli-client-id',
+      clientSecret: 'cli-client-secret',
+    });
+  });
+
+  it('Scenario: Environment variables override saved OAuth credentials', async () => {
+    process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'] = 'env-client-id';
+    process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'] = 'env-client-secret';
+    await seedSavedGmailMetadata('personal');
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail', '--mailbox', 'personal']);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      clientId: 'env-client-id',
+      clientSecret: 'env-client-secret',
+    });
   });
 });
 
