@@ -16,34 +16,275 @@ function createMockClient(overrides: Partial<GraphApiClient> = {}): GraphApiClie
   };
 }
 
+// Realistic Graph createReplyAll response body — captured from a real probe.
+// Note: Graph returns contentType lowercased ("html") and prepends `<hr>` immediately
+// after `<body>`, so caller content inserted right after `<body>` lands above Graph's divider.
+const QUOTED_REPLY_BODY = '<html><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"></head>'
+  + '<body style="font-size:10pt; font-family:Verdana,Geneva,sans-serif">'
+  + '<hr tabindex="-1" style="display:inline-block; width:98%">'
+  + '<div id="divRplyFwdMsg" dir="ltr"><font face="Calibri, sans-serif" color="#000000" style="font-size:11pt">'
+  + '<b>From:</b> Alice &lt;alice@corp.com&gt;<br>'
+  + '<b>Sent:</b> Saturday, 25 April 2026 16:08:46<br>'
+  + '<b>To:</b> Steven &lt;steven@corp.com&gt;<br>'
+  + '<b>Subject:</b> Re: Quarterly Report</font><div>&nbsp;</div></div>'
+  + '<div><p>Original message content</p></div>'
+  + '</body></html>';
+
+function quotedReplyResponse(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'draft-123',
+    body: { contentType: 'html', content: QUOTED_REPLY_BODY },
+    ccRecipients: [],
+    bccRecipients: [],
+    toRecipients: [{ emailAddress: { address: 'alice@corp.com' } }],
+    ...overrides,
+  };
+}
+
 describe('provider-microsoft/Draft-Then-Send via createReplyAll', () => {
-  it('Scenario: Reply preserves embedded images', async () => {
+  it('Scenario: Reply preserves Graph auto-quoted thread (plain text)', async () => {
     const client = createMockClient({
       post: vi.fn()
-        .mockResolvedValueOnce({ id: 'draft-123' }) // createReplyAll
+        .mockResolvedValueOnce(quotedReplyResponse())
         .mockResolvedValueOnce({}), // send
-      get: vi.fn().mockResolvedValue({
-        id: 'msg-1',
-        subject: 'Test',
-        from: { emailAddress: { address: 'alice@corp.com' } },
-        receivedDateTime: '2024-03-15T10:00:00Z',
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.replyToMessage('msg-1', 'Hi — short reply.');
+
+    expect(result.success).toBe(true);
+    // createReplyAll is called with empty body (we no longer use the `comment` field)
+    expect(client.post).toHaveBeenNthCalledWith(1, expect.stringContaining('createReplyAll'), {});
+    // Draft body PATCH preserves Graph's auto-quoted thread alongside caller content
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const patchBody = (patchArgs[1] as { body: { contentType: string; content: string } }).body;
+    expect(patchBody.contentType).toBe('HTML');
+    expect(patchBody.content).toContain('Hi — short reply.');
+    expect(patchBody.content).toContain('From:</b> Alice');
+    // Send POST follows the PATCH
+    expect(client.post).toHaveBeenNthCalledWith(2, expect.stringContaining('draft-123/send'), {});
+  });
+
+  it('Scenario: HTML reply merges fragment before quoted block', async () => {
+    const client = createMockClient({
+      post: vi.fn()
+        .mockResolvedValueOnce(quotedReplyResponse())
+        .mockResolvedValueOnce({}),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.replyToMessage('msg-1', 'plain fallback', {
+      bodyHtml: '<p>rendered reply</p>',
+    });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const content = (patchArgs[1] as { body: { content: string } }).body.content;
+    const renderedAt = content.indexOf('<p>rendered reply</p>');
+    const fromHeaderAt = content.indexOf('From:</b> Alice');
+    expect(renderedAt).toBeGreaterThanOrEqual(0);
+    expect(fromHeaderAt).toBeGreaterThan(renderedAt);
+  });
+
+  it('Scenario: Caller-supplied full HTML document has wrappers stripped', async () => {
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse()),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createReplyDraft('msg-1', 'plain', {
+      bodyHtml: '<html><body><p>rendered</p></body></html>',
+    });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const content = (patchArgs[1] as { body: { content: string } }).body.content;
+    // Outer <html>/<body> from caller fragment must be stripped — exactly one <html> and <body>
+    // (the outer ones from Graph's quoted document).
+    expect(content.match(/<html[\s>]/gi)?.length ?? 0).toBe(1);
+    expect(content.match(/<body[\s>]/gi)?.length ?? 0).toBe(1);
+    expect(content).toContain('<p>rendered</p>');
+  });
+
+  it('Scenario: Fallback GET when POST response is missing body', async () => {
+    const client = createMockClient({
+      post: vi.fn()
+        .mockResolvedValueOnce({ id: 'draft-456', ccRecipients: [], bccRecipients: [] }) // no body
+        .mockResolvedValueOnce({}),
+      get: vi.fn().mockResolvedValueOnce({
+        id: 'draft-456',
+        body: { contentType: 'html', content: QUOTED_REPLY_BODY },
+        ccRecipients: [],
+        bccRecipients: [],
       }),
     });
     const provider = new GraphEmailProvider(client);
 
-    const result = await provider.replyToMessage('msg-1', '<p>Thanks!</p>');
+    await provider.replyToMessage('msg-1', 'reply');
 
-    expect(result.success).toBe(true);
-    // Verify createReplyAll was called (preserves embedded images)
-    expect(client.post).toHaveBeenCalledWith(
-      expect.stringContaining('createReplyAll'),
-      expect.anything(),
+    expect(client.get).toHaveBeenCalledWith(expect.stringContaining('draft-456'));
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const content = (patchArgs[1] as { body: { content: string } }).body.content;
+    expect(content).toContain('From:</b> Alice');
+    expect(content).toContain('reply');
+  });
+
+  it('Scenario: Fallback GET when POST response contentType is Text', async () => {
+    const client = createMockClient({
+      post: vi.fn()
+        .mockResolvedValueOnce({
+          id: 'draft-789',
+          body: { contentType: 'text', content: 'plain content from Graph' },
+          ccRecipients: [],
+          bccRecipients: [],
+        })
+        .mockResolvedValueOnce({}),
+      get: vi.fn().mockResolvedValueOnce({
+        id: 'draft-789',
+        body: { contentType: 'html', content: QUOTED_REPLY_BODY },
+        ccRecipients: [],
+        bccRecipients: [],
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.replyToMessage('msg-1', 'reply');
+
+    expect(client.get).toHaveBeenCalledWith(expect.stringContaining('draft-789'));
+  });
+
+  it('Scenario: CC merge — Graph-populated + caller-supplied', async () => {
+    const client = createMockClient({
+      post: vi.fn()
+        .mockResolvedValueOnce(quotedReplyResponse({
+          ccRecipients: [{ emailAddress: { address: 'alice@corp.com', name: 'Alice' } }],
+        }))
+        .mockResolvedValueOnce({}),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.replyToMessage('msg-1', 'reply', {
+      cc: [{ email: 'bob@corp.com', name: 'Bob' }],
+    });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const cc = (patchArgs[1] as { ccRecipients: Array<{ emailAddress: { address: string } }> }).ccRecipients;
+    const addresses = cc.map(r => r.emailAddress.address.toLowerCase()).sort();
+    expect(addresses).toEqual(['alice@corp.com', 'bob@corp.com']);
+  });
+
+  it('Scenario: CC dedupe is case-insensitive', async () => {
+    const client = createMockClient({
+      post: vi.fn()
+        .mockResolvedValueOnce(quotedReplyResponse({
+          ccRecipients: [{ emailAddress: { address: 'Alice@corp.com', name: 'Alice' } }],
+        }))
+        .mockResolvedValueOnce({}),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.replyToMessage('msg-1', 'reply', {
+      cc: [{ email: 'alice@CORP.com' }],
+    });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const cc = (patchArgs[1] as { ccRecipients: unknown[] }).ccRecipients;
+    expect(cc).toHaveLength(1);
+  });
+
+  it('Scenario: replyToMessage honors opts.cc (regression — previously dropped)', async () => {
+    const client = createMockClient({
+      post: vi.fn()
+        .mockResolvedValueOnce(quotedReplyResponse())
+        .mockResolvedValueOnce({}),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.replyToMessage('msg-1', 'reply', {
+      cc: [{ email: 'new@corp.com' }],
+    });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const cc = (patchArgs[1] as { ccRecipients: Array<{ emailAddress: { address: string } }> }).ccRecipients;
+    expect(cc.map(r => r.emailAddress.address)).toContain('new@corp.com');
+  });
+
+  it('Scenario: BCC merge', async () => {
+    const client = createMockClient({
+      post: vi.fn()
+        .mockResolvedValueOnce(quotedReplyResponse())
+        .mockResolvedValueOnce({}),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.replyToMessage('msg-1', 'reply', {
+      bcc: [{ email: 'audit@corp.com' }],
+    });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const patch = patchArgs[1] as { bccRecipients?: Array<{ emailAddress: { address: string } }> };
+    expect(patch.bccRecipients?.map(r => r.emailAddress.address)).toContain('audit@corp.com');
+  });
+
+  it('Scenario: cid: references survive the merge unchanged', async () => {
+    const bodyWithCid = QUOTED_REPLY_BODY.replace(
+      '<div><p>Original message content</p></div>',
+      '<div><p>Original</p><img src="cid:image001.jpg@01D8E4F2"></div>',
     );
-    // Verify draft body was updated
-    expect(client.patch).toHaveBeenCalledWith(
-      expect.stringContaining('draft-123'),
-      expect.objectContaining({ body: expect.anything() }),
+    const client = createMockClient({
+      post: vi.fn()
+        .mockResolvedValueOnce(quotedReplyResponse({
+          body: { contentType: 'html', content: bodyWithCid },
+        }))
+        .mockResolvedValueOnce({}),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.replyToMessage('msg-1', 'thanks', { bodyHtml: '<p>thanks</p>' });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const content = (patchArgs[1] as { body: { content: string } }).body.content;
+    expect(content).toContain('cid:image001.jpg@01D8E4F2');
+  });
+
+  it('Scenario: Truncation preserves caller content at the top', async () => {
+    const huge = '<div>' + 'x'.repeat(4 * 1024 * 1024) + '</div>';
+    const bigBody = QUOTED_REPLY_BODY.replace(
+      '<div><p>Original message content</p></div>',
+      huge,
     );
+    const client = createMockClient({
+      post: vi.fn()
+        .mockResolvedValueOnce(quotedReplyResponse({
+          body: { contentType: 'html', content: bigBody },
+        }))
+        .mockResolvedValueOnce({}),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.replyToMessage('msg-1', 'caller content here', { bodyHtml: '<p>my reply</p>' });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const content = (patchArgs[1] as { body: { content: string } }).body.content;
+    expect(content).toContain('<p>my reply</p>');
+    // Truncation keeps the caller content even though the quoted body was huge
+    expect(Buffer.byteLength(content, 'utf-8')).toBeLessThanOrEqual(3.5 * 1024 * 1024 + 200);
+  });
+
+  it('Scenario: <body>-tag-missing defensive fallback', async () => {
+    const client = createMockClient({
+      post: vi.fn()
+        .mockResolvedValueOnce(quotedReplyResponse({
+          body: { contentType: 'html', content: '<p>just a fragment, no body tag</p>' },
+        }))
+        .mockResolvedValueOnce({}),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.replyToMessage('msg-1', 'reply', { bodyHtml: '<p>rendered</p>' });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const content = (patchArgs[1] as { body: { content: string } }).body.content;
+    // Caller fragment ends up before the original (concat fallback)
+    expect(content.indexOf('<p>rendered</p>')).toBeLessThan(content.indexOf('just a fragment'));
   });
 
   it('Scenario: Fallback to sendMail on 404', async () => {
@@ -68,6 +309,33 @@ describe('provider-microsoft/Draft-Then-Send via createReplyAll', () => {
       expect.stringContaining('sendMail'),
       expect.anything(),
     );
+  });
+
+  it('Scenario: createReplyDraft parity — merges quoted body and CCs without sending', async () => {
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse({
+        ccRecipients: [{ emailAddress: { address: 'alice@corp.com' } }],
+      })),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.createReplyDraft('msg-1', 'reply', {
+      bodyHtml: '<p>rendered</p>',
+      cc: [{ email: 'bob@corp.com' }],
+    });
+
+    expect(result).toEqual({ success: true, draftId: 'draft-123' });
+    // Only one POST (createReplyAll) — no /send
+    expect(client.post).toHaveBeenCalledTimes(1);
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const patch = patchArgs[1] as {
+      body: { content: string };
+      ccRecipients: Array<{ emailAddress: { address: string } }>;
+    };
+    expect(patch.body.content).toContain('<p>rendered</p>');
+    expect(patch.body.content).toContain('From:</b> Alice');
+    const addresses = patch.ccRecipients.map(r => r.emailAddress.address.toLowerCase()).sort();
+    expect(addresses).toEqual(['alice@corp.com', 'bob@corp.com']);
   });
 });
 
@@ -127,24 +395,6 @@ describe('provider-interface/Capability Interfaces', () => {
     // Graph → contentType: Text when only body is set; newlines preserved verbatim
     expect(body.contentType).toBe('Text');
     expect(body.content).toBe('line one\nline two');
-  });
-
-  it('Scenario: Provider honors ReplyOptions.bodyHtml', async () => {
-    const client = createMockClient({
-      post: vi.fn()
-        .mockResolvedValueOnce({ id: 'draft-xyz' }) // createReplyAll
-        .mockResolvedValueOnce({}), // send
-    });
-    const provider = new GraphEmailProvider(client);
-
-    await provider.replyToMessage('msg-1', 'plain reply', {
-      bodyHtml: '<p>rendered reply</p>',
-    });
-
-    const patchCall = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
-    const body = (patchCall[1] as { body: { contentType: string; content: string } }).body;
-    expect(body.contentType).toBe('HTML');
-    expect(body.content).toBe('<p>rendered reply</p>');
   });
 
   it('Scenario: createDraft and updateDraft honor bodyHtml', async () => {

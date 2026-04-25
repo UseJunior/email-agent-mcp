@@ -289,25 +289,13 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   }
 
   async replyToMessage(messageId: string, body: string, opts?: ReplyOptions): Promise<SendResult> {
-    // Use createReplyAll to preserve embedded images and CID references
+    // Use createReplyAll to preserve embedded images, CID references, and Graph's auto-quoted thread.
     try {
-      const draft = await this.client.post(
-        `${this.basePath}/messages/${messageId}/createReplyAll`,
-        {},
-      );
-
-      if (draft.id) {
-        // Update draft body — pick HTML if caller rendered it, else plain text
-        await this.client.patch(`${this.basePath}/messages/${draft.id}`, {
-          body: buildGraphBody(opts?.bodyHtml, body),
-        });
-
-        // Send the draft
-        await this.client.post(`${this.basePath}/messages/${draft.id}/send`, {});
-        return { success: true, messageId: draft.id };
-      }
+      const draftId = await this.prepareReplyDraft(messageId, body, opts);
+      await this.client.post(`${this.basePath}/messages/${draftId}/send`, {});
+      return { success: true, messageId: draftId };
     } catch {
-      // Fallback to sendMail on 404 (original deleted)
+      // Fallback to sendMail on 404 (original deleted) or other createReplyAll failures
     }
 
     // Fallback: construct reply manually via sendMail
@@ -336,25 +324,65 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   }
 
   async createReplyDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {
-    // Use createReplyAll to preserve embedded images and CID references
+    // Use createReplyAll to preserve embedded images, CID references, and Graph's auto-quoted thread.
+    try {
+      const draftId = await this.prepareReplyDraft(messageId, body, opts);
+      return { success: true, draftId };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to create reply draft';
+      return { success: false, error: { code: 'DRAFT_FAILED', message, recoverable: false } };
+    }
+  }
+
+  /**
+   * Shared helper for both reply paths. Calls createReplyAll, then merges Graph's
+   * auto-quoted body with the caller's content and merges Graph's auto-populated
+   * recipients with caller-supplied additions before PATCHing the draft.
+   *
+   * Returns the draft id. Throws if createReplyAll fails or returns no id.
+   */
+  private async prepareReplyDraft(
+    messageId: string,
+    body: string,
+    opts?: ReplyOptions,
+  ): Promise<string> {
     const draft = await this.client.post(
       `${this.basePath}/messages/${messageId}/createReplyAll`,
       {},
     );
+    if (!draft.id) throw new Error('createReplyAll did not return a draft id');
 
-    if (draft.id) {
-      // Update draft body — HTML if caller rendered it, else plain text
-      const patch: Record<string, unknown> = {
-        body: buildGraphBody(opts?.bodyHtml, body),
-      };
-      if (opts?.cc?.length) {
-        patch.ccRecipients = opts.cc.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
-      }
-      await this.client.patch(`${this.basePath}/messages/${draft.id}`, patch);
-      return { success: true, draftId: draft.id };
+    let draftBody = draft.body as { contentType?: string; content?: string } | undefined;
+    let draftCc = (draft.ccRecipients as GraphRecipient[] | undefined) ?? [];
+    let draftBcc = (draft.bccRecipients as GraphRecipient[] | undefined) ?? [];
+
+    // Fallback GET when the POST response lacks a usable HTML body. Graph defaults
+    // to HTML on `Get message` so no Prefer header is needed.
+    if (typeof draftBody?.content !== 'string' || draftBody.contentType?.toLowerCase() !== 'html') {
+      const fetched = await this.client.get(`${this.basePath}/messages/${draft.id}`);
+      draftBody = fetched.body as { contentType?: string; content?: string } | undefined;
+      draftCc = (fetched.ccRecipients as GraphRecipient[] | undefined) ?? [];
+      draftBcc = (fetched.bccRecipients as GraphRecipient[] | undefined) ?? [];
     }
 
-    return { success: false, error: { code: 'DRAFT_FAILED', message: 'Failed to create reply draft', recoverable: false } };
+    const draftContent = typeof draftBody?.content === 'string' ? draftBody.content : '';
+    const callerFragment = opts?.bodyHtml !== undefined
+      ? stripHtmlBodyWrappers(opts.bodyHtml)
+      : wrapPlainTextAsHtml(body);
+    const merged = mergeQuotedReplyHtml(draftContent, callerFragment);
+
+    const patch: Record<string, unknown> = {
+      body: { contentType: 'HTML', content: truncateBody(merged) },
+    };
+
+    const ccMerged = mergeRecipients(draftCc, opts?.cc ?? []);
+    if (ccMerged.length > 0) patch.ccRecipients = ccMerged;
+
+    const bccMerged = mergeRecipients(draftBcc, opts?.bcc ?? []);
+    if (bccMerged.length > 0) patch.bccRecipients = bccMerged;
+
+    await this.client.patch(`${this.basePath}/messages/${draft.id}`, patch);
+    return draft.id;
   }
 
   async updateDraft(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult> {
@@ -543,4 +571,90 @@ function buildGraphBody(
     return { contentType: 'HTML', content: truncateBody(bodyHtml) };
   }
   return { contentType: 'Text', content: truncateBody(body) };
+}
+
+interface GraphRecipient {
+  emailAddress: { address: string; name?: string };
+}
+
+/**
+ * Strip outer `<html>` / `<body>` wrappers from caller-supplied HTML so it can be
+ * inserted as a fragment into Graph's auto-quoted reply document. `format: 'html'`
+ * is a passthrough in body-renderer.ts, so callers may send full documents.
+ */
+function stripHtmlBodyWrappers(html: string): string {
+  let out = html;
+  const headStart = out.search(/<html[^>]*>/i);
+  if (headStart >= 0) {
+    const bodyOpen = out.search(/<body[^>]*>/i);
+    if (bodyOpen >= 0) {
+      const tagMatch = out.slice(bodyOpen).match(/<body[^>]*>/i);
+      if (tagMatch) out = out.slice(bodyOpen + tagMatch[0].length);
+    } else {
+      const htmlTagMatch = out.match(/<html[^>]*>/i);
+      if (htmlTagMatch && htmlTagMatch.index !== undefined) {
+        out = out.slice(htmlTagMatch.index + htmlTagMatch[0].length);
+      }
+    }
+    out = out.replace(/<\/body\s*>[\s\S]*?<\/html\s*>\s*$/i, '');
+    out = out.replace(/<\/html\s*>\s*$/i, '');
+    out = out.replace(/<\/body\s*>\s*$/i, '');
+  }
+  return out;
+}
+
+/**
+ * Wrap plain text as a minimal HTML fragment suitable for merging into Graph's
+ * auto-quoted reply document. HTML-escapes the input and converts newlines to `<br>`.
+ */
+function wrapPlainTextAsHtml(text: string): string {
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+  return `<div>${escaped.replace(/\n/g, '<br>')}</div>`;
+}
+
+/**
+ * Merge a caller-supplied HTML fragment into Graph's auto-quoted reply document so
+ * that Graph's `From:/Sent:/To:/Subject:` divider and the prior thread are preserved.
+ *
+ * Insertion strategy: place the fragment immediately after the `<body>` opening tag.
+ * Graph's response begins with an `<hr>` right after `<body>`, so the caller's content
+ * naturally appears above that divider — no need to add our own.
+ *
+ * Defensive fallback (no `<body>` tag): concatenate fragment + content.
+ */
+function mergeQuotedReplyHtml(draftContent: string, callerFragment: string): string {
+  const bodyTagMatch = draftContent.match(/<body[^>]*>/i);
+  if (!bodyTagMatch || bodyTagMatch.index === undefined) {
+    return callerFragment + draftContent;
+  }
+  const insertAt = bodyTagMatch.index + bodyTagMatch[0].length;
+  return draftContent.slice(0, insertAt) + callerFragment + draftContent.slice(insertAt);
+}
+
+/**
+ * Merge two recipient lists, deduplicating by email address case-insensitively.
+ * Used to combine Graph's auto-populated reply-all recipients with caller-supplied
+ * additions without dropping either set.
+ */
+function mergeRecipients(
+  existing: GraphRecipient[],
+  additions: { email: string; name?: string }[],
+): GraphRecipient[] {
+  const byEmail = new Map<string, GraphRecipient>();
+  for (const r of existing) {
+    const email = r.emailAddress?.address?.toLowerCase();
+    if (email) byEmail.set(email, r);
+  }
+  for (const a of additions) {
+    const email = a.email.toLowerCase();
+    if (!byEmail.has(email)) {
+      byEmail.set(email, { emailAddress: { address: a.email, name: a.name } });
+    }
+  }
+  return Array.from(byEmail.values());
 }
