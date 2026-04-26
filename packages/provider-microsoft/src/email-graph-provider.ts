@@ -581,25 +581,49 @@ interface GraphRecipient {
  * Strip outer `<html>` / `<body>` wrappers from caller-supplied HTML so it can be
  * inserted as a fragment into Graph's auto-quoted reply document. `format: 'html'`
  * is a passthrough in body-renderer.ts, so callers may send full documents.
+ *
+ * Uses indexOf-based parsing rather than regex to avoid backtracking on
+ * adversarial input (caller-supplied HTML may be untrusted).
  */
 function stripHtmlBodyWrappers(html: string): string {
+  const lower = html.toLowerCase();
+
+  // Bail early if there's no <html> tag — input is already a fragment.
+  const htmlOpenIdx = lower.indexOf('<html');
+  if (htmlOpenIdx < 0) return html;
+
   let out = html;
-  const headStart = out.search(/<html[^>]*>/i);
-  if (headStart >= 0) {
-    const bodyOpen = out.search(/<body[^>]*>/i);
-    if (bodyOpen >= 0) {
-      const tagMatch = out.slice(bodyOpen).match(/<body[^>]*>/i);
-      if (tagMatch) out = out.slice(bodyOpen + tagMatch[0].length);
-    } else {
-      const htmlTagMatch = out.match(/<html[^>]*>/i);
-      if (htmlTagMatch && htmlTagMatch.index !== undefined) {
-        out = out.slice(htmlTagMatch.index + htmlTagMatch[0].length);
-      }
-    }
-    out = out.replace(/<\/body\s*>[\s\S]*?<\/html\s*>\s*$/i, '');
-    out = out.replace(/<\/html\s*>\s*$/i, '');
-    out = out.replace(/<\/body\s*>\s*$/i, '');
+  let outLower = lower;
+
+  // Strip everything up to and including the opening <body...> tag, falling
+  // back to the opening <html...> tag when no body is present.
+  const bodyOpenIdx = outLower.indexOf('<body');
+  const openTagIdx = bodyOpenIdx >= 0 ? bodyOpenIdx : htmlOpenIdx;
+  const openTagEnd = outLower.indexOf('>', openTagIdx);
+  if (openTagEnd >= 0) {
+    out = out.slice(openTagEnd + 1);
+    outLower = out.toLowerCase();
   }
+
+  // Trim trailing whitespace, then strip up to one </html> and one </body>
+  // suffix (in either order). This handles the common shapes
+  // `…</body></html>`, `…</body>`, and `…</html>` produced by HTML serializers.
+  for (let i = 0; i < 2; i++) {
+    out = out.trimEnd();
+    outLower = out.toLowerCase();
+    if (outLower.endsWith('</html>')) {
+      out = out.slice(0, -'</html>'.length);
+      outLower = out.toLowerCase();
+      continue;
+    }
+    if (outLower.endsWith('</body>')) {
+      out = out.slice(0, -'</body>'.length);
+      outLower = out.toLowerCase();
+      continue;
+    }
+    break;
+  }
+
   return out;
 }
 

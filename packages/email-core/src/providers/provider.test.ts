@@ -43,6 +43,22 @@ describe('provider-interface/Capability Interfaces', () => {
     expect(partialProvider.subscribe).toBeUndefined();
     expect(partialProvider.unsubscribe).toBeUndefined();
   });
+
+  it('Scenario: Provider honors ReplyOptions.bodyHtml', async () => {
+    const provider = new MockEmailProvider();
+    provider.addMessage({ id: 'msg1', subject: 'Hello', from: { email: 'sender@example.com' } });
+
+    // replyToMessage with opts.bodyHtml — provider should preserve the HTML
+    // body alongside the plain-text fallback.
+    await provider.replyToMessage('msg1', 'plain fallback', {
+      bodyHtml: '<p>rendered reply</p>',
+    });
+
+    const sent = provider.getSentMessages();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.bodyHtml).toBe('<p>rendered reply</p>');
+    expect(sent[0]!.body).toBe('plain fallback');
+  });
 });
 
 describe('provider-interface/Provider Registration', () => {
