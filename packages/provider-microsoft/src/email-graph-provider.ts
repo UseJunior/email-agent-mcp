@@ -315,17 +315,10 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       const draftId = await this.prepareReplyDraft(messageId, body, opts);
       await this.client.post(`${this.basePath}/messages/${draftId}/send`, {});
       return { success: true, messageId: draftId };
-    } catch {
-      // Fallback to sendMail on 404 (original deleted) or other failures
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to send reply';
+      return { success: false, error: { code: 'REPLY_FAILED', message, recoverable: false } };
     }
-
-    // Fallback: construct reply manually via sendMail
-    return this.sendMessage({
-      to: opts?.cc ?? [],
-      subject: `Re: `,
-      body,
-      bodyHtml: opts?.bodyHtml,
-    });
   }
 
   async createDraft(msg: ComposeMessage): Promise<DraftResult> {
