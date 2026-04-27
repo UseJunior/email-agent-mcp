@@ -41,6 +41,131 @@ function quotedReplyResponse(overrides: Record<string, unknown> = {}): Record<st
   };
 }
 
+describe('provider-microsoft/Message Mapping', () => {
+  it('Scenario: getMessage maps Graph attachment metadata and inline content ids', async () => {
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({
+        id: 'msg-attachments',
+        subject: 'Attachments',
+        from: { emailAddress: { address: 'sender@example.com' } },
+        toRecipients: [{ emailAddress: { address: 'recipient@example.com' } }],
+        receivedDateTime: '2026-04-09T12:00:00Z',
+        hasAttachments: true,
+        attachments: [
+          {
+            id: 'att-pdf',
+            '@odata.type': '#microsoft.graph.fileAttachment',
+            name: 'contract.pdf',
+            contentType: 'application/pdf',
+            size: 245000,
+            isInline: false,
+          },
+          {
+            id: 'att-inline',
+            '@odata.type': '#microsoft.graph.fileAttachment',
+            name: 'inline.png',
+            contentType: 'image/png',
+            size: 1024,
+            isInline: true,
+            contentId: 'image001',
+          },
+        ],
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const msg = await provider.getMessage('msg-attachments');
+
+    expect(msg.hasAttachments).toBe(true);
+    expect(msg.attachments).toEqual([
+      {
+        id: 'att-pdf',
+        filename: 'contract.pdf',
+        mimeType: 'application/pdf',
+        size: 245000,
+        contentId: undefined,
+        isInline: false,
+      },
+      {
+        id: 'att-inline',
+        filename: 'inline.png',
+        mimeType: 'image/png',
+        size: 1024,
+        contentId: 'image001',
+        isInline: true,
+      },
+    ]);
+    expect(client.get).toHaveBeenCalledWith(
+      '/me/messages/msg-attachments?$expand=attachments($select=id,name,contentType,size,isInline,contentId)',
+    );
+  });
+
+  it('Scenario: getMessage falls back to /attachments when expanded query is rejected', async () => {
+    const client = createMockClient({
+      get: vi.fn()
+        .mockRejectedValueOnce(new GraphApiError(400, 'Bad Request'))
+        .mockResolvedValueOnce({
+          id: 'msg-attachments',
+          subject: 'Attachments',
+          from: { emailAddress: { address: 'sender@example.com' } },
+          toRecipients: [{ emailAddress: { address: 'recipient@example.com' } }],
+          receivedDateTime: '2026-04-09T12:00:00Z',
+          hasAttachments: true,
+        })
+        .mockResolvedValueOnce({
+          value: [
+            {
+              id: 'att-pdf',
+              name: 'contract.pdf',
+              contentType: 'application/pdf',
+              size: 245000,
+              isInline: false,
+            },
+            {
+              id: 'att-inline',
+              name: 'inline.png',
+              contentType: 'image/png',
+              size: 1024,
+              isInline: true,
+              contentId: 'image001',
+            },
+          ],
+        }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const msg = await provider.getMessage('msg-attachments');
+
+    expect(msg.attachments).toEqual([
+      {
+        id: 'att-pdf',
+        filename: 'contract.pdf',
+        mimeType: 'application/pdf',
+        size: 245000,
+        contentId: undefined,
+        isInline: false,
+      },
+      {
+        id: 'att-inline',
+        filename: 'inline.png',
+        mimeType: 'image/png',
+        size: 1024,
+        contentId: 'image001',
+        isInline: true,
+      },
+    ]);
+    expect(client.get).toHaveBeenNthCalledWith(
+      1,
+      '/me/messages/msg-attachments?$expand=attachments($select=id,name,contentType,size,isInline,contentId)',
+    );
+    expect(client.get).toHaveBeenNthCalledWith(2, '/me/messages/msg-attachments');
+    expect(client.get).toHaveBeenNthCalledWith(
+      3,
+      '/me/messages/msg-attachments/attachments?$select=id,name,contentType,size,isInline,contentId',
+    );
+  });
+});
+
 describe('provider-microsoft/Draft-Then-Send via createReplyAll', () => {
   it('Scenario: Reply preserves Graph auto-quoted thread (plain text)', async () => {
     const client = createMockClient({
@@ -603,7 +728,10 @@ describe('provider-microsoft/Thread Lookup', () => {
 
     expect(thread.id).toBe('conv-123');
     expect(thread.messageCount).toBe(2);
-    expect(client.get).toHaveBeenNthCalledWith(1, '/me/messages/msg-1');
+    expect(client.get).toHaveBeenNthCalledWith(
+      1,
+      '/me/messages/msg-1?$expand=attachments($select=id,name,contentType,size,isInline,contentId)',
+    );
     const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[1]![0] as string;
     const decodedUrl = decodeURIComponent(url).replaceAll('+', ' ');
     expect(decodedUrl).toContain("conversationId eq 'conv-123'");
