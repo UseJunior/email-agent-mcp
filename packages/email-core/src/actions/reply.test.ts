@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MockEmailProvider } from '../testing/mock-provider.js';
 import { replyToEmailAction } from './reply.js';
 import type { ActionContext, MailboxEntry } from './registry.js';
@@ -190,5 +190,88 @@ describe('email-write/Body Rendering', () => {
     const sent = provider.getSentMessages()[0]!;
     expect(sent.body).toBe('### Not a header');
     expect(sent.bodyHtml).toBeUndefined();
+  });
+});
+
+describe('email-write/Reply All Toggle', () => {
+  // Note: Zod defaults are applied at parse() time, not in run(). The MCP server
+  // calls action.input.parse() before action.run(), so production callers see
+  // the default. These tests parse first to mirror that real flow.
+
+  it('Scenario: reply_all defaults to true and propagates to provider', async () => {
+    const replySpy = vi.spyOn(provider, 'replyToMessage');
+
+    const input = replyToEmailAction.input.parse({
+      message_id: VALID_MSG_ID,
+      body: 'Thanks!',
+    });
+    expect(input.reply_all).toBe(true);
+
+    const result = await replyToEmailAction.run(ctx, input);
+
+    expect(result.success).toBe(true);
+    expect(replySpy).toHaveBeenCalledWith(
+      VALID_MSG_ID,
+      expect.any(String),
+      expect.objectContaining({ replyAll: true }),
+    );
+  });
+
+  it('Scenario: reply_all: false propagates to provider on send path', async () => {
+    const replySpy = vi.spyOn(provider, 'replyToMessage');
+
+    const input = replyToEmailAction.input.parse({
+      message_id: VALID_MSG_ID,
+      body: 'Sender only',
+      reply_all: false,
+    });
+
+    const result = await replyToEmailAction.run(ctx, input);
+
+    expect(result.success).toBe(true);
+    expect(replySpy).toHaveBeenCalledWith(
+      VALID_MSG_ID,
+      expect.any(String),
+      expect.objectContaining({ replyAll: false }),
+    );
+  });
+
+  it('Scenario: reply_all: false propagates to provider on draft path', async () => {
+    const draftSpy = vi.spyOn(provider, 'createReplyDraft');
+
+    const input = replyToEmailAction.input.parse({
+      message_id: VALID_MSG_ID,
+      body: 'Draft reply',
+      draft: true,
+      reply_all: false,
+    });
+
+    const result = await replyToEmailAction.run(ctx, input);
+
+    expect(result.success).toBe(true);
+    expect(draftSpy).toHaveBeenCalledWith(
+      VALID_MSG_ID,
+      expect.any(String),
+      expect.objectContaining({ replyAll: false }),
+    );
+  });
+
+  it('Scenario: reply_all defaults to true on draft path', async () => {
+    const draftSpy = vi.spyOn(provider, 'createReplyDraft');
+
+    const input = replyToEmailAction.input.parse({
+      message_id: VALID_MSG_ID,
+      body: 'Draft reply',
+      draft: true,
+    });
+    expect(input.reply_all).toBe(true);
+
+    await replyToEmailAction.run(ctx, input);
+
+    expect(draftSpy).toHaveBeenCalledWith(
+      VALID_MSG_ID,
+      expect.any(String),
+      expect.objectContaining({ replyAll: true }),
+    );
   });
 });

@@ -124,6 +124,13 @@ export interface ReplyOptions {
    * send with plain-text content-type.
    */
   bodyHtml?: string;
+  /**
+   * When false, reply only to the original sender. When true or omitted,
+   * include the original thread's To/Cc recipients (reply-all). Providers
+   * branch on the explicit `false` value; `undefined` preserves the
+   * historical reply-all default.
+   */
+  replyAll?: boolean;
 }
 
 export interface Subscription {

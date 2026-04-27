@@ -289,13 +289,14 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   }
 
   async replyToMessage(messageId: string, body: string, opts?: ReplyOptions): Promise<SendResult> {
-    // Use createReplyAll to preserve embedded images, CID references, and Graph's auto-quoted thread.
+    // Routes to createReply or createReplyAll based on opts.replyAll. Both Graph
+    // endpoints preserve embedded images, CID references, and the auto-quoted thread.
     try {
       const draftId = await this.prepareReplyDraft(messageId, body, opts);
       await this.client.post(`${this.basePath}/messages/${draftId}/send`, {});
       return { success: true, messageId: draftId };
     } catch {
-      // Fallback to sendMail on 404 (original deleted) or other createReplyAll failures
+      // Fallback to sendMail on 404 (original deleted) or other failures
     }
 
     // Fallback: construct reply manually via sendMail
@@ -324,7 +325,8 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   }
 
   async createReplyDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {
-    // Use createReplyAll to preserve embedded images, CID references, and Graph's auto-quoted thread.
+    // Routes to createReply or createReplyAll based on opts.replyAll. Both Graph
+    // endpoints preserve embedded images, CID references, and the auto-quoted thread.
     try {
       const draftId = await this.prepareReplyDraft(messageId, body, opts);
       return { success: true, draftId };
@@ -335,22 +337,25 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   }
 
   /**
-   * Shared helper for both reply paths. Calls createReplyAll, then merges Graph's
-   * auto-quoted body with the caller's content and merges Graph's auto-populated
-   * recipients with caller-supplied additions before PATCHing the draft.
+   * Shared helper for both reply paths. Calls createReply (sender only) when
+   * opts.replyAll is explicitly false, otherwise createReplyAll (sender + thread
+   * recipients). Then merges Graph's auto-quoted body with the caller's content
+   * and merges Graph's auto-populated recipients with caller-supplied additions
+   * before PATCHing the draft.
    *
-   * Returns the draft id. Throws if createReplyAll fails or returns no id.
+   * Returns the draft id. Throws if the Graph endpoint fails or returns no id.
    */
   private async prepareReplyDraft(
     messageId: string,
     body: string,
     opts?: ReplyOptions,
   ): Promise<string> {
+    const endpoint = opts?.replyAll === false ? 'createReply' : 'createReplyAll';
     const draft = await this.client.post(
-      `${this.basePath}/messages/${messageId}/createReplyAll`,
+      `${this.basePath}/messages/${messageId}/${endpoint}`,
       {},
     );
-    if (!draft.id) throw new Error('createReplyAll did not return a draft id');
+    if (!draft.id) throw new Error(`${endpoint} did not return a draft id`);
 
     let draftBody = draft.body as { contentType?: string; content?: string } | undefined;
     let draftCc = (draft.ccRecipients as GraphRecipient[] | undefined) ?? [];

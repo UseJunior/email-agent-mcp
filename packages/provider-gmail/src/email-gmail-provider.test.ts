@@ -554,9 +554,77 @@ describe('provider-gmail/Reply Drafts', () => {
     expect(result.error?.code).toBe('DRAFT_FAILED');
     expect(result.error?.message).toMatch(/quota exceeded/);
   });
+
+  it('Scenario: replyAll: false omits thread To/Cc from Cc header', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(originalMessageMock()),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.createReplyDraft('msg-original', 'sender-only reply', { replyAll: false });
+
+    const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
+    // To: still the original sender.
+    expect(raw).toContain('To: "Alice" <alice@corp.com>');
+    // Cc: must not contain the thread's To/Cc participants.
+    expect(raw).not.toContain('bob@corp.com');
+    expect(raw).not.toContain('carol@corp.com');
+    // No Cc header at all when there are no recipients.
+    expect(raw).not.toMatch(/^Cc:/m);
+  });
+
+  it('Scenario: replyAll: false still honors caller-supplied opts.cc', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(originalMessageMock()),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.createReplyDraft('msg-original', 'reply', {
+      replyAll: false,
+      cc: [{ email: 'manager@corp.com', name: 'Manager' }],
+    });
+
+    const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
+    expect(raw).toContain('To: "Alice" <alice@corp.com>');
+    // Cc contains only the caller's address — thread participants excluded.
+    expect(raw).toMatch(/^Cc: .*manager@corp\.com/m);
+    expect(raw).not.toContain('bob@corp.com');
+    expect(raw).not.toContain('carol@corp.com');
+  });
+
+  it('Scenario: replyAll omitted preserves reply-all behavior (regression guard)', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(originalMessageMock()),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.createReplyDraft('msg-original', 'reply');
+
+    const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
+    expect(raw).toMatch(/Cc: .*bob@corp\.com.*carol@corp\.com/);
+  });
 });
 
 describe('provider-gmail/Reply Threading on Send', () => {
+  function ccThreadMessageMock() {
+    return {
+      id: 'msg-original',
+      threadId: 'thread-xyz',
+      labelIds: [],
+      payload: {
+        headers: [
+          { name: 'From', value: '"Alice" <alice@corp.com>' },
+          { name: 'To', value: 'bob@corp.com' },
+          { name: 'Cc', value: 'carol@corp.com' },
+          { name: 'Subject', value: 'Urgent' },
+          { name: 'Date', value: '2026-01-15T10:00:00Z' },
+          { name: 'Message-ID', value: '<msg-xyz@corp.com>' },
+        ],
+      },
+      internalDate: String(Date.now()),
+    };
+  }
+
   it('Scenario: replyToMessage sends with threadId and In-Reply-To header', async () => {
     const client = createMockGmailClient({
       getMessage: vi.fn().mockResolvedValue({
@@ -585,6 +653,33 @@ describe('provider-gmail/Reply Threading on Send', () => {
     expect(raw).toContain('In-Reply-To: <msg-xyz@corp.com>');
     expect(raw).toContain('References: <msg-xyz@corp.com>');
     expect(raw).toContain('Subject: Re: Urgent');
+  });
+
+  it('Scenario: replyToMessage with replyAll: false omits thread participants from Cc', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(ccThreadMessageMock()),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.replyToMessage('msg-original', 'sender-only reply', { replyAll: false });
+
+    const raw = lastRaw(client.sendMessage as ReturnType<typeof vi.fn>);
+    expect(raw).toContain('To: "Alice" <alice@corp.com>');
+    expect(raw).not.toContain('bob@corp.com');
+    expect(raw).not.toContain('carol@corp.com');
+    expect(raw).not.toMatch(/^Cc:/m);
+  });
+
+  it('Scenario: replyToMessage default (replyAll omitted) preserves reply-all', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(ccThreadMessageMock()),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.replyToMessage('msg-original', 'reply');
+
+    const raw = lastRaw(client.sendMessage as ReturnType<typeof vi.fn>);
+    expect(raw).toMatch(/Cc: .*bob@corp\.com.*carol@corp\.com/);
   });
 });
 

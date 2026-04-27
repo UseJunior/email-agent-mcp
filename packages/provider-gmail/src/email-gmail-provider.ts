@@ -162,19 +162,22 @@ export class GmailEmailProvider {
   }
 
   async replyToMessage(messageId: string, body: string, opts?: ReplyOptions): Promise<SendResult> {
-    // Match Microsoft's createReplyAll semantics: reply to sender and cc
-    // everyone else on the original message. Caller-supplied opts.cc/bcc
-    // layer on top. Shipping without self-exclusion — an agent that replies
-    // to its own sent mail may cc itself; documented caveat.
+    // Default reply-all: cc every other thread participant (matches Microsoft's
+    // createReplyAll semantics). When opts.replyAll is explicitly false, reply
+    // only to the original sender. Caller-supplied opts.cc/bcc layer on top
+    // either way. No self-exclusion — an agent that replies to its own sent
+    // mail may cc itself; documented caveat.
     const original = await this.getMessage(messageId);
-    const replyAllCc = mergeAddressLists(original.to, original.cc, opts?.cc);
+    const replyCc = opts?.replyAll === false
+      ? (opts?.cc ?? [])
+      : mergeAddressLists(original.to, original.cc, opts?.cc);
     const subject = prefixReSubject(original.subject);
     const references = buildReferences(original.references, original.messageId);
 
     const raw = buildRawMessage(
       {
         to: [original.from],
-        cc: replyAllCc.length > 0 ? replyAllCc : undefined,
+        cc: replyCc.length > 0 ? replyCc : undefined,
         bcc: opts?.bcc,
         subject,
         body,
@@ -204,14 +207,16 @@ export class GmailEmailProvider {
   async createReplyDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {
     try {
       const original = await this.getMessage(messageId);
-      const replyAllCc = mergeAddressLists(original.to, original.cc, opts?.cc);
+      const replyCc = opts?.replyAll === false
+        ? (opts?.cc ?? [])
+        : mergeAddressLists(original.to, original.cc, opts?.cc);
       const subject = prefixReSubject(original.subject);
       const references = buildReferences(original.references, original.messageId);
 
       const raw = buildRawMessage(
         {
           to: [original.from],
-          cc: replyAllCc.length > 0 ? replyAllCc : undefined,
+          cc: replyCc.length > 0 ? replyCc : undefined,
           bcc: opts?.bcc,
           subject,
           body,
