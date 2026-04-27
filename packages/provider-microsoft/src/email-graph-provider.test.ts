@@ -339,6 +339,80 @@ describe('provider-microsoft/Draft-Then-Send via createReplyAll', () => {
   });
 });
 
+describe('provider-microsoft/Reply-All Routing', () => {
+  it('Scenario: replyAll omitted defaults to createReplyAll', async () => {
+    const client = createMockClient({
+      post: vi.fn()
+        .mockResolvedValueOnce(quotedReplyResponse())
+        .mockResolvedValueOnce({}),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.replyToMessage('msg-1', 'reply');
+
+    const firstUrl = (client.post as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(firstUrl).toContain('createReplyAll');
+  });
+
+  it('Scenario: replyAll: true routes to createReplyAll', async () => {
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse()),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createReplyDraft('msg-1', 'reply', { replyAll: true });
+
+    const firstUrl = (client.post as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(firstUrl).toContain('createReplyAll');
+  });
+
+  it('Scenario: replyAll: false routes to createReply (sender only)', async () => {
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse()),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createReplyDraft('msg-1', 'reply', { replyAll: false });
+
+    const firstUrl = (client.post as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(firstUrl).toContain('/createReply');
+    expect(firstUrl).not.toContain('createReplyAll');
+  });
+
+  it('Scenario: replyAll: false on send path uses createReply', async () => {
+    const client = createMockClient({
+      post: vi.fn()
+        .mockResolvedValueOnce(quotedReplyResponse())
+        .mockResolvedValueOnce({}),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.replyToMessage('msg-1', 'reply', { replyAll: false });
+
+    const firstUrl = (client.post as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(firstUrl).toContain('/createReply');
+    expect(firstUrl).not.toContain('createReplyAll');
+  });
+
+  it('Scenario: replyAll: false preserves caller-supplied cc', async () => {
+    // Graph's createReply returns no auto-populated CCs (sender-only), so the
+    // PATCH should contain only the caller's cc.
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse({ ccRecipients: [] })),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createReplyDraft('msg-1', 'reply', {
+      replyAll: false,
+      cc: [{ email: 'manager@corp.com', name: 'Manager' }],
+    });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const patch = patchArgs[1] as { ccRecipients?: Array<{ emailAddress: { address: string } }> };
+    expect(patch.ccRecipients?.map(r => r.emailAddress.address)).toEqual(['manager@corp.com']);
+  });
+});
+
 describe('provider-microsoft/Size Limits', () => {
   it('Scenario: Body size enforcement', async () => {
     const client = createMockClient();

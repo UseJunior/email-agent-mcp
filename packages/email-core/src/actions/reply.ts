@@ -17,6 +17,8 @@ const ReplyToEmailInput = z.object({
   mailbox: z.string().optional(),
   cc: z.array(z.string()).optional(),
   draft: z.boolean().optional(),
+  reply_all: z.boolean().optional().default(true)
+    .describe('When false, reply only to the original sender. Default true preserves reply-all behavior (cc the original thread).'),
   format: z.enum(['markdown', 'html', 'text']).optional()
     .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
   force_black: z.boolean().optional()
@@ -39,7 +41,7 @@ export const replyToEmailAction: EmailAction<
   z.infer<typeof ReplyToEmailOutput>
 > = {
   name: 'reply_to_email',
-  description: 'Reply to an email within an existing thread. Send path gated by send allowlist; draft path bypasses.',
+  description: 'Reply to an email within an existing thread. Default reply_all=true cc\'s the original thread; pass reply_all=false to reply only to the sender. Send path gated by send allowlist; draft path bypasses.',
   input: ReplyToEmailInput,
   output: ReplyToEmailOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -83,6 +85,7 @@ export const replyToEmailAction: EmailAction<
         const draftResult = await ctx.provider.createReplyDraft(input.message_id, bodyPlain, {
           cc: input.cc?.map(email => ({ email })),
           bodyHtml,
+          replyAll: input.reply_all,
         });
         return {
           success: draftResult.success,
@@ -128,6 +131,7 @@ export const replyToEmailAction: EmailAction<
         () => ctx.provider.replyToMessage(input.message_id, bodyPlain, {
           cc: input.cc?.map(email => ({ email })),
           bodyHtml,
+          replyAll: input.reply_all,
         }),
         { maxRetries: 3, baseDelay: 1000 },
       );
