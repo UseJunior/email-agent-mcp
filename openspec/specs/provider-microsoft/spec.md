@@ -29,12 +29,17 @@ The system SHALL support client credentials (app-only) authentication for daemon
 
 ### Requirement: Draft-Then-Send via createReplyAll
 
-The system SHALL use `createReplyAll` (not `sendMail`) for replies. `createReplyAll` preserves embedded images, CID references, and thread metadata. `sendMail` is fallback only when the original message is deleted (404).
+The system SHALL use `createReplyAll` (not `sendMail`) for replies. `createReplyAll` preserves embedded images, CID references, and thread metadata. The system merges Graph's auto-quoted body with caller content rather than overwriting it. `sendMail` is fallback only when the original message is deleted (404).
 
-#### Scenario: Reply preserves embedded images
-- **WHEN** the original email contains embedded images with CID references
+#### Scenario: Reply preserves Graph auto-quoted thread (plain text)
+- **WHEN** the original email has prior thread history
+- **AND** the system replies via `createReplyAll` with plain-text content
+- **THEN** the resulting draft preserves Graph's auto-generated quoted thread divider and prior-message header block alongside the caller content
+
+#### Scenario: cid: references survive the merge unchanged
+- **WHEN** the original email contains embedded images referenced via `cid:` URLs in Graph's quoted body
 - **AND** the system replies via `createReplyAll`
-- **THEN** the quoted content includes the embedded images intact
+- **THEN** the merged draft body retains every `cid:` reference intact
 
 #### Scenario: Fallback to sendMail on 404
 - **WHEN** `createReplyAll` returns 404 (original message deleted)
