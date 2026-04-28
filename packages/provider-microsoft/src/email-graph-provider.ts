@@ -47,8 +47,8 @@ const DELTA_SELECT = '$select=subject,from,toRecipients,ccRecipients,receivedDat
 // Attachments are polymorphic: $select against the base type fails for derived-only props.
 // `contentId` lives on fileAttachment, not on the abstract attachment base, so it must be
 // qualified with the OData type cast or Graph returns HTTP 400.
-//   base attachment: https://learn.microsoft.com/en-us/graph/api/resources/attachment
-//   fileAttachment:  https://learn.microsoft.com/en-us/graph/api/resources/fileattachment
+//   base attachment: https://learn.microsoft.com/en-us/graph/api/resources/attachment?view=graph-rest-1.0
+//   fileAttachment:  https://learn.microsoft.com/en-us/graph/api/resources/fileattachment?view=graph-rest-1.0
 const ATTACHMENT_SELECT = 'id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId';
 
 /** Result from delta query, including messages and the deltaLink for persistence */

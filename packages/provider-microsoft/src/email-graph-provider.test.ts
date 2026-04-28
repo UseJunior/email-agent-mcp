@@ -20,19 +20,19 @@ function createMockClient(overrides: Partial<GraphApiClient> = {}): GraphApiClie
 // PR #56 shipped a bare `contentId` (not on the base type) and broke every
 // Outlook getMessage call; these guards make a repeat fail in unit tests.
 //
-// Base type:    https://learn.microsoft.com/en-us/graph/api/resources/attachment
-// fileAttachment (declares contentId, contentLocation):
-//               https://learn.microsoft.com/en-us/graph/api/resources/fileattachment
-// $select cast: https://learn.microsoft.com/en-us/graph/query-parameters#select-parameter
+// Base type:    https://learn.microsoft.com/en-us/graph/api/resources/attachment?view=graph-rest-1.0
+// fileAttachment (declares contentId):
+//               https://learn.microsoft.com/en-us/graph/api/resources/fileattachment?view=graph-rest-1.0
+// $select cast: https://learn.microsoft.com/en-us/graph/query-parameters?tabs=http#select-parameter
 const BASE_ATTACHMENT_PROPS = new Set([
   'id', 'name', 'contentType', 'size', 'isInline', 'lastModifiedDateTime',
 ]);
 
 // Intentionally narrow: a typo like "fileAttachment/notARealProp" fails fast
-// here instead of silently passing a permissive regex.
+// here instead of silently passing a permissive regex. Only add a cast when
+// the provider actually needs it — the explicit list is the guard.
 const ALLOWED_ATTACHMENT_CASTS = new Set([
   'microsoft.graph.fileAttachment/contentId',
-  'microsoft.graph.fileAttachment/contentLocation',
 ]);
 
 function assertAttachmentSelectValid(select: string): void {
