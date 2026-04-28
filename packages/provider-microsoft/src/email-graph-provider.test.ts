@@ -475,25 +475,75 @@ describe('provider-microsoft/Draft-Then-Send via createReplyAll', () => {
     expect(content.indexOf('<p>rendered</p>')).toBeLessThan(content.indexOf('just a fragment'));
   });
 
-  it('Scenario: Fallback to sendMail on 404', async () => {
+  it('Scenario: createReplyAll failure returns structured REPLY_FAILED', async () => {
     const client = createMockClient({
-      post: vi.fn()
-        .mockRejectedValueOnce(new Error('404 Not Found')) // createReplyAll fails
-        .mockResolvedValueOnce({ id: 'sent-msg' }), // sendMail fallback
-      get: vi.fn().mockResolvedValue({
-        id: 'deleted-msg',
-        subject: 'Deleted',
-        from: { emailAddress: { address: 'alice@corp.com' } },
-        receivedDateTime: '2024-03-15T10:00:00Z',
-      }),
+      post: vi.fn().mockRejectedValueOnce(new GraphApiError(404, 'Not Found')),
     });
     const provider = new GraphEmailProvider(client);
 
     const result = await provider.replyToMessage('deleted-msg', 'Response');
 
-    expect(result.success).toBe(true);
-    // Falls back to sendMail
-    expect(client.post).toHaveBeenCalledWith(
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('REPLY_FAILED');
+    expect(result.error?.recoverable).toBe(false);
+    expect(result.error?.message).toBeTruthy();
+    // Critical: does NOT silently send via sendMail
+    expect(client.post).not.toHaveBeenCalledWith(
+      expect.stringContaining('sendMail'),
+      expect.anything(),
+    );
+  });
+
+  it('Scenario: replyToMessage failure does not use opts.cc as to:', async () => {
+    // Regression guard for the silent-fallback bug — even when cc is supplied,
+    // a createReplyAll failure must not turn into a fresh email to the cc list.
+    const client = createMockClient({
+      post: vi.fn().mockRejectedValueOnce(new GraphApiError(404, 'Not Found')),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.replyToMessage('deleted-msg', 'Response', {
+      cc: [{ email: 'bystander@corp.com' }],
+    });
+
+    expect(result.success).toBe(false);
+    expect(client.post).toHaveBeenCalledTimes(1); // only the failed createReplyAll
+  });
+
+  it('Scenario: send failure (createReplyAll succeeds, /send fails) returns REPLY_FAILED', async () => {
+    const client = createMockClient({
+      post: vi.fn()
+        .mockResolvedValueOnce(quotedReplyResponse())
+        .mockRejectedValueOnce(new GraphApiError(500, 'Server Error')),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.replyToMessage('msg-1', 'Response');
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('REPLY_FAILED');
+    expect(result.error?.message).toBeTruthy();
+  });
+
+  it('Scenario: PATCH failure inside prepareReplyDraft returns REPLY_FAILED', async () => {
+    // Helper-stage failure: createReplyAll succeeds, PATCH rejects. Previously
+    // this also fell into the broken sendMail fallback.
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse()),
+      patch: vi.fn().mockRejectedValueOnce(new GraphApiError(500, 'Server Error')),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.replyToMessage('msg-1', 'Response');
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('REPLY_FAILED');
+    // Critical: no /send and no /sendMail call
+    expect(client.post).not.toHaveBeenCalledWith(
+      expect.stringContaining('/send'),
+      expect.anything(),
+    );
+    expect(client.post).not.toHaveBeenCalledWith(
       expect.stringContaining('sendMail'),
       expect.anything(),
     );

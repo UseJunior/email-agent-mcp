@@ -29,7 +29,7 @@ The system SHALL support client credentials (app-only) authentication for daemon
 
 ### Requirement: Draft-Then-Send via createReplyAll
 
-The system SHALL use `createReplyAll` (not `sendMail`) for replies. `createReplyAll` preserves embedded images, CID references, and thread metadata. The system merges Graph's auto-quoted body with caller content rather than overwriting it. `sendMail` is fallback only when the original message is deleted (404).
+The system SHALL use `createReplyAll` for replies. `createReplyAll` preserves embedded images, CID references, and thread metadata. The system merges Graph's auto-quoted body with caller content rather than overwriting it. When `createReplyAll`, the body merge PATCH, or the final `/send` POST fails, `replyToMessage` SHALL return a structured `{ success: false, error: { code: 'REPLY_FAILED', recoverable: false } }` rather than silently falling back to `sendMail` — a `sendMail`-based message would lack `In-Reply-To` / `References` headers and so would not thread on the recipient side.
 
 #### Scenario: Reply preserves Graph auto-quoted thread (plain text)
 - **WHEN** the original email has prior thread history
@@ -41,9 +41,10 @@ The system SHALL use `createReplyAll` (not `sendMail`) for replies. `createReply
 - **AND** the system replies via `createReplyAll`
 - **THEN** the merged draft body retains every `cid:` reference intact
 
-#### Scenario: Fallback to sendMail on 404
-- **WHEN** `createReplyAll` returns 404 (original message deleted)
-- **THEN** the system falls back to `sendMail` with manually constructed quoted content
+#### Scenario: createReplyAll failure returns structured REPLY_FAILED
+- **WHEN** `createReplyAll`, the body-merge PATCH, or the final `/send` POST throws
+- **THEN** `replyToMessage` returns `{ success: false, error: { code: 'REPLY_FAILED', recoverable: false } }`
+- **AND** does not call `sendMail`
 
 ### Requirement: Validation Token Handling
 
