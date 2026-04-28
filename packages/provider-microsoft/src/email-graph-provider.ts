@@ -1,5 +1,6 @@
 // GraphEmailProvider — Microsoft Graph API email provider
 import type {
+  EmailAttachment,
   EmailMessage,
   EmailThread,
   ComposeMessage,
@@ -43,6 +44,7 @@ export interface GraphApiClient {
 
 /** Delta query select fields for efficiency */
 const DELTA_SELECT = '$select=subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments,isRead,id';
+const ATTACHMENT_SELECT = 'id,name,contentType,size,isInline,contentId';
 
 /** Result from delta query, including messages and the deltaLink for persistence */
 export interface DeltaResult {
@@ -172,8 +174,26 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   }
 
   async getMessage(id: string): Promise<EmailMessage> {
-    const response = await this.client.get(`${this.basePath}/messages/${id}`) as unknown as GraphMessage;
-    return mapGraphMessage(response);
+    const expandedUrl = `${this.basePath}/messages/${id}?$expand=attachments($select=${ATTACHMENT_SELECT})`;
+
+    try {
+      const response = await this.client.get(expandedUrl) as unknown as GraphMessage;
+      return mapGraphMessage(response);
+    } catch (err) {
+      // Some mailboxes reject nested $select inside $expand; fall back to a
+      // second metadata-only attachments request rather than dropping data.
+      if (!(err instanceof GraphApiError) || err.status !== 400) throw err;
+    }
+
+    const message = await this.client.get(`${this.basePath}/messages/${id}`) as unknown as GraphMessage;
+    const attachments = await this.client.get(
+      `${this.basePath}/messages/${id}/attachments?$select=${ATTACHMENT_SELECT}`,
+    );
+
+    return mapGraphMessage({
+      ...message,
+      attachments: ((attachments.value ?? []) as GraphAttachment[]),
+    });
   }
 
   async searchMessages(query: string, folder?: string, limit?: number, offset?: number): Promise<EmailMessage[]> {
@@ -489,6 +509,17 @@ interface GraphMessage {
   flag?: { flagStatus?: string };
   internetMessageId?: string;
   internetMessageHeaders?: Array<{ name: string; value: string }>;
+  attachments?: GraphAttachment[];
+}
+
+interface GraphAttachment {
+  id: string;
+  '@odata.type'?: string;
+  name?: string;
+  contentType?: string;
+  size?: number;
+  isInline?: boolean;
+  contentId?: string;
 }
 
 /** A single item in a delta response — may include @removed for tombstones */
@@ -504,6 +535,15 @@ interface DeltaPageResponse {
 }
 
 function mapGraphMessage(msg: GraphMessage): EmailMessage {
+  const attachments = (msg.attachments ?? []).map((attachment): EmailAttachment => ({
+    id: attachment.id,
+    filename: attachment.name ?? '',
+    mimeType: attachment.contentType ?? 'application/octet-stream',
+    size: attachment.size ?? 0,
+    isInline: attachment.isInline ?? false,
+    contentId: attachment.contentId,
+  }));
+
   return {
     id: msg.id,
     subject: msg.subject ?? '',
@@ -525,6 +565,7 @@ function mapGraphMessage(msg: GraphMessage): EmailMessage {
     hasAttachments: msg.hasAttachments ?? false,
     body: msg.body?.contentType?.toLowerCase() === 'text' ? msg.body.content : undefined,
     bodyHtml: msg.body?.contentType?.toLowerCase() === 'html' ? msg.body.content : undefined,
+    attachments,
     labels: msg.categories,
     conversationId: msg.conversationId,
     messageId: msg.internetMessageId,
