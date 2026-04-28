@@ -1,6 +1,7 @@
 // reply_to_email action — reply within existing thread, gated by send allowlist
 import { z } from 'zod';
-import type { EmailAction } from './registry.js';
+import type { ActionContext, EmailAction } from './registry.js';
+import type { EmailMessage } from '../types.js';
 import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { isPlausibleMessageId } from '../security/reply-validation.js';
 import { withRetry } from '../providers/provider.js';
@@ -36,12 +37,71 @@ const ReplyToEmailOutput = z.object({
   }).optional(),
 });
 
+function collectCurrentMailboxEmails(ctx: ActionContext): Set<string> {
+  const currentMailboxEmails = new Set<string>();
+
+  if (ctx.mailboxName?.includes('@')) {
+    currentMailboxEmails.add(ctx.mailboxName.toLowerCase());
+  }
+
+  const resolvedMailbox = ctx.mailboxName
+    ? ctx.allMailboxes?.find(mailbox =>
+      mailbox.name.toLowerCase() === ctx.mailboxName!.toLowerCase()
+      || mailbox.emailAddress?.toLowerCase() === ctx.mailboxName!.toLowerCase(),
+    )
+    : (ctx.allMailboxes?.length === 1
+      ? ctx.allMailboxes[0]
+      : ctx.allMailboxes?.find(mailbox => mailbox.isDefault));
+
+  if (resolvedMailbox?.emailAddress) {
+    currentMailboxEmails.add(resolvedMailbox.emailAddress.toLowerCase());
+  }
+
+  return currentMailboxEmails;
+}
+
+function collectReplyAllowlistRecipients(
+  ctx: ActionContext,
+  originalMessage: EmailMessage,
+  input: z.infer<typeof ReplyToEmailInput>,
+): string[] {
+  const currentMailboxEmails = collectCurrentMailboxEmails(ctx);
+  const recipients: string[] = [];
+  const seen = new Set<string>();
+
+  const addRecipient = (email: string, opts?: { skipCurrentMailbox?: boolean }) => {
+    const normalized = email.trim().toLowerCase();
+    if (!normalized) return;
+    if (opts?.skipCurrentMailbox && currentMailboxEmails.has(normalized)) return;
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    recipients.push(email);
+  };
+
+  addRecipient(originalMessage.from.email);
+
+  if (input.reply_all !== false) {
+    for (const recipient of originalMessage.to) {
+      addRecipient(recipient.email, { skipCurrentMailbox: true });
+    }
+    for (const recipient of originalMessage.cc ?? []) {
+      addRecipient(recipient.email, { skipCurrentMailbox: true });
+    }
+  }
+
+  for (const recipient of input.cc ?? []) {
+    addRecipient(recipient);
+  }
+
+  return recipients;
+}
+
 export const replyToEmailAction: EmailAction<
   z.infer<typeof ReplyToEmailInput>,
   z.infer<typeof ReplyToEmailOutput>
 > = {
   name: 'reply_to_email',
-  description: 'Reply to an email within an existing thread. Default reply_all=true cc\'s the original thread; pass reply_all=false to reply only to the sender. Send path gated by send allowlist; draft path bypasses.',
+  description: 'Reply to an email within an existing thread. Default reply_all=true cc\'s the original thread; pass reply_all=false to reply only to the sender. Send path validates all effective recipients against the send allowlist; draft path bypasses.',
   input: ReplyToEmailInput,
   output: ReplyToEmailOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -101,12 +161,12 @@ export const replyToEmailAction: EmailAction<
       }
     }
 
-    // Send path — get the original message to check the recipient against allowlist
+    // Send path — check every effective recipient against the allowlist
     const originalMessage = await ctx.provider.getMessage(input.message_id);
-    const replyRecipient = originalMessage.from.email;
+    const replyRecipients = collectReplyAllowlistRecipients(ctx, originalMessage, input);
 
     // Check send allowlist — reply recipients must also be allowed
-    const allowlistError = checkSendAllowlist([replyRecipient], ctx.sendAllowlist);
+    const allowlistError = checkSendAllowlist(replyRecipients, ctx.sendAllowlist);
     if (allowlistError) {
       return {
         success: false,

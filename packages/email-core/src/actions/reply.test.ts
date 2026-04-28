@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MockEmailProvider } from '../testing/mock-provider.js';
 import { replyToEmailAction } from './reply.js';
-import type { ActionContext, MailboxEntry } from './registry.js';
+import type { ActionContext } from './registry.js';
 
 let provider: MockEmailProvider;
 let ctx: ActionContext;
@@ -22,6 +22,10 @@ beforeEach(() => {
   });
   ctx = {
     provider,
+    mailboxName: 'work',
+    allMailboxes: [
+      { name: 'work', emailAddress: 'me@company.com', provider, providerType: 'microsoft', isDefault: true, status: 'connected' },
+    ],
     sendAllowlist: { entries: ['*@lawfirm.com'] },
   };
 });
@@ -74,6 +78,81 @@ describe('email-write/Reply to Email', () => {
 
     expect(result.success).toBe(false);
     expect(result.error!.message).toContain('mailbox parameter required when multiple mailboxes are configured');
+  });
+});
+
+describe('email-write/Reply Allowlist Coverage', () => {
+  it('Scenario: reply_all blocks non-allowlisted thread cc recipients', async () => {
+    const replySpy = vi.spyOn(provider, 'replyToMessage');
+    const ccMsgId = 'reply_all_cc_1234567890';
+    provider.addMessage({
+      id: ccMsgId,
+      subject: 'Shared thread',
+      from: { email: 'partner@lawfirm.com', name: 'Partner' },
+      to: [{ email: 'me@company.com' }],
+      cc: [{ email: 'external@example.com', name: 'External' }],
+      receivedAt: '2024-03-15T10:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+
+    const input = replyToEmailAction.input.parse({
+      message_id: ccMsgId,
+      body: 'Reply all',
+    });
+
+    const result = await replyToEmailAction.run(ctx, input);
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('ALLOWLIST_BLOCKED');
+    expect(result.error!.message).toContain('Recipient not in send allowlist');
+    expect(replySpy).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: reply_all false ignores non-allowlisted thread cc recipients', async () => {
+    const replySpy = vi.spyOn(provider, 'replyToMessage');
+    const ccMsgId = 'sender_only_cc_1234567890';
+    provider.addMessage({
+      id: ccMsgId,
+      subject: 'Shared thread',
+      from: { email: 'partner@lawfirm.com', name: 'Partner' },
+      to: [{ email: 'me@company.com' }],
+      cc: [{ email: 'external@example.com', name: 'External' }],
+      receivedAt: '2024-03-15T10:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+
+    const input = replyToEmailAction.input.parse({
+      message_id: ccMsgId,
+      body: 'Sender only',
+      reply_all: false,
+    });
+
+    const result = await replyToEmailAction.run(ctx, input);
+
+    expect(result.success).toBe(true);
+    expect(replySpy).toHaveBeenCalledWith(
+      ccMsgId,
+      expect.any(String),
+      expect.objectContaining({ replyAll: false }),
+    );
+  });
+
+  it('Scenario: explicit cc recipients are also gated by allowlist', async () => {
+    const replySpy = vi.spyOn(provider, 'replyToMessage');
+
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: VALID_MSG_ID,
+      body: 'Loop in external',
+      reply_all: false,
+      cc: ['external@example.com'],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('ALLOWLIST_BLOCKED');
+    expect(result.error!.message).toContain('Recipient not in send allowlist');
+    expect(replySpy).not.toHaveBeenCalled();
   });
 });
 
