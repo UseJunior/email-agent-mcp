@@ -3,7 +3,7 @@
   "name": "io.github.UseJunior/email-agent-mcp",
   "title": "Agent Email",
   "description": "Local email connectivity for AI agents — read, draft, send, and organize Outlook mail via MCP",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "websiteUrl": "https://github.com/UseJunior/email-agent-mcp",
   "repository": {
     "url": "https://github.com/UseJunior/email-agent-mcp",
@@ -26,7 +26,7 @@
     {
       "registryType": "npm",
       "identifier": "email-agent-mcp",
-      "version": "0.1.6",
+      "version": "0.1.7",
       "transport": {
         "type": "stdio"
       },
