@@ -16,6 +16,70 @@ function createMockClient(overrides: Partial<GraphApiClient> = {}): GraphApiClie
   };
 }
 
+// Allow-lists for OData $select against the polymorphic attachment collection.
+// PR #56 shipped a bare `contentId` (not on the base type) and broke every
+// Outlook getMessage call; these guards make a repeat fail in unit tests.
+//
+// Base type:    https://learn.microsoft.com/en-us/graph/api/resources/attachment?view=graph-rest-1.0
+// fileAttachment (declares contentId):
+//               https://learn.microsoft.com/en-us/graph/api/resources/fileattachment?view=graph-rest-1.0
+// $select cast: https://learn.microsoft.com/en-us/graph/query-parameters?tabs=http#select-parameter
+const BASE_ATTACHMENT_PROPS = new Set([
+  'id', 'name', 'contentType', 'size', 'isInline', 'lastModifiedDateTime',
+]);
+
+// Intentionally narrow: a typo like "fileAttachment/notARealProp" fails fast
+// here instead of silently passing a permissive regex. Only add a cast when
+// the provider actually needs it — the explicit list is the guard.
+const ALLOWED_ATTACHMENT_CASTS = new Set([
+  'microsoft.graph.fileAttachment/contentId',
+]);
+
+function assertAttachmentSelectValid(select: string): void {
+  for (const raw of select.split(',')) {
+    const f = raw.trim();
+    if (BASE_ATTACHMENT_PROPS.has(f) || ALLOWED_ATTACHMENT_CASTS.has(f)) continue;
+    throw new GraphApiError(
+      400,
+      `{"error":{"code":"BadRequest","message":"Could not find a property named '${f}' on type 'microsoft.graph.attachment'."}}`,
+    );
+  }
+}
+
+function extractAttachmentSelects(url: string): string[] {
+  const out: string[] = [];
+  if (/\/attachments(\?|$)/.test(url)) {
+    const m = url.match(/[?&]\$select=([^&]+)/);
+    if (m) out.push(decodeURIComponent(m[1]));
+  }
+  for (const m of url.matchAll(/attachments\(\$select=([^)]+)\)/g)) {
+    out.push(decodeURIComponent(m[1]));
+  }
+  return out;
+}
+
+/**
+ * Wraps a sequenced response list with $select schema validation. Each URL
+ * passed to .get() has its attachment $select fragments checked against the
+ * allow-lists above; an invalid field throws a Graph-realistic GraphApiError(400)
+ * before the response is consumed.
+ */
+function createSchemaValidatingClient(responses: Array<unknown | Error>): GraphApiClient {
+  let i = 0;
+  const get = vi.fn(async (url: string) => {
+    for (const sel of extractAttachmentSelects(url)) assertAttachmentSelectValid(sel);
+    const next = responses[i++];
+    if (next instanceof Error) throw next;
+    return next as { value?: unknown[]; [k: string]: unknown };
+  });
+  return {
+    get,
+    post: vi.fn().mockResolvedValue({ id: 'new-id' }),
+    patch: vi.fn().mockResolvedValue(undefined),
+    delete: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
 // Realistic Graph createReplyAll response body — captured from a real probe.
 // Note: Graph returns contentType lowercased ("html") and prepends `<hr>` immediately
 // after `<body>`, so caller content inserted right after `<body>` lands above Graph's divider.
@@ -43,8 +107,8 @@ function quotedReplyResponse(overrides: Record<string, unknown> = {}): Record<st
 
 describe('provider-microsoft/Message Mapping', () => {
   it('Scenario: getMessage maps Graph attachment metadata and inline content ids', async () => {
-    const client = createMockClient({
-      get: vi.fn().mockResolvedValue({
+    const client = createSchemaValidatingClient([
+      {
         id: 'msg-attachments',
         subject: 'Attachments',
         from: { emailAddress: { address: 'sender@example.com' } },
@@ -70,8 +134,8 @@ describe('provider-microsoft/Message Mapping', () => {
             contentId: 'image001',
           },
         ],
-      }),
-    });
+      },
+    ]);
     const provider = new GraphEmailProvider(client);
 
     const msg = await provider.getMessage('msg-attachments');
@@ -96,42 +160,41 @@ describe('provider-microsoft/Message Mapping', () => {
       },
     ]);
     expect(client.get).toHaveBeenCalledWith(
-      '/me/messages/msg-attachments?$expand=attachments($select=id,name,contentType,size,isInline,contentId)',
+      '/me/messages/msg-attachments?$expand=attachments($select=id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId)',
     );
   });
 
   it('Scenario: getMessage falls back to /attachments when expanded query is rejected', async () => {
-    const client = createMockClient({
-      get: vi.fn()
-        .mockRejectedValueOnce(new GraphApiError(400, 'Bad Request'))
-        .mockResolvedValueOnce({
-          id: 'msg-attachments',
-          subject: 'Attachments',
-          from: { emailAddress: { address: 'sender@example.com' } },
-          toRecipients: [{ emailAddress: { address: 'recipient@example.com' } }],
-          receivedDateTime: '2026-04-09T12:00:00Z',
-          hasAttachments: true,
-        })
-        .mockResolvedValueOnce({
-          value: [
-            {
-              id: 'att-pdf',
-              name: 'contract.pdf',
-              contentType: 'application/pdf',
-              size: 245000,
-              isInline: false,
-            },
-            {
-              id: 'att-inline',
-              name: 'inline.png',
-              contentType: 'image/png',
-              size: 1024,
-              isInline: true,
-              contentId: 'image001',
-            },
-          ],
-        }),
-    });
+    const client = createSchemaValidatingClient([
+      new GraphApiError(400, 'Bad Request'),
+      {
+        id: 'msg-attachments',
+        subject: 'Attachments',
+        from: { emailAddress: { address: 'sender@example.com' } },
+        toRecipients: [{ emailAddress: { address: 'recipient@example.com' } }],
+        receivedDateTime: '2026-04-09T12:00:00Z',
+        hasAttachments: true,
+      },
+      {
+        value: [
+          {
+            id: 'att-pdf',
+            name: 'contract.pdf',
+            contentType: 'application/pdf',
+            size: 245000,
+            isInline: false,
+          },
+          {
+            id: 'att-inline',
+            name: 'inline.png',
+            contentType: 'image/png',
+            size: 1024,
+            isInline: true,
+            contentId: 'image001',
+          },
+        ],
+      },
+    ]);
     const provider = new GraphEmailProvider(client);
 
     const msg = await provider.getMessage('msg-attachments');
@@ -156,12 +219,12 @@ describe('provider-microsoft/Message Mapping', () => {
     ]);
     expect(client.get).toHaveBeenNthCalledWith(
       1,
-      '/me/messages/msg-attachments?$expand=attachments($select=id,name,contentType,size,isInline,contentId)',
+      '/me/messages/msg-attachments?$expand=attachments($select=id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId)',
     );
     expect(client.get).toHaveBeenNthCalledWith(2, '/me/messages/msg-attachments');
     expect(client.get).toHaveBeenNthCalledWith(
       3,
-      '/me/messages/msg-attachments/attachments?$select=id,name,contentType,size,isInline,contentId',
+      '/me/messages/msg-attachments/attachments?$select=id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId',
     );
   });
 });
@@ -694,34 +757,33 @@ describe('provider-microsoft/Dual Watch Mode', () => {
 
 describe('provider-microsoft/Thread Lookup', () => {
   it('Scenario: getThread filters by conversationId', async () => {
-    const client = createMockClient({
-      get: vi.fn()
-        .mockResolvedValueOnce({
-          id: 'msg-1',
-          subject: 'Thread root',
-          conversationId: 'conv-123',
-          from: { emailAddress: { address: 'alice@corp.com' } },
-          receivedDateTime: '2024-03-15T10:00:00Z',
-        })
-        .mockResolvedValueOnce({
-          value: [
-            {
-              id: 'msg-1',
-              subject: 'Thread root',
-              conversationId: 'conv-123',
-              from: { emailAddress: { address: 'alice@corp.com' } },
-              receivedDateTime: '2024-03-15T10:00:00Z',
-            },
-            {
-              id: 'msg-2',
-              subject: 'Re: Thread root',
-              conversationId: 'conv-123',
-              from: { emailAddress: { address: 'bob@corp.com' } },
-              receivedDateTime: '2024-03-15T11:00:00Z',
-            },
-          ],
-        }),
-    });
+    const client = createSchemaValidatingClient([
+      {
+        id: 'msg-1',
+        subject: 'Thread root',
+        conversationId: 'conv-123',
+        from: { emailAddress: { address: 'alice@corp.com' } },
+        receivedDateTime: '2024-03-15T10:00:00Z',
+      },
+      {
+        value: [
+          {
+            id: 'msg-1',
+            subject: 'Thread root',
+            conversationId: 'conv-123',
+            from: { emailAddress: { address: 'alice@corp.com' } },
+            receivedDateTime: '2024-03-15T10:00:00Z',
+          },
+          {
+            id: 'msg-2',
+            subject: 'Re: Thread root',
+            conversationId: 'conv-123',
+            from: { emailAddress: { address: 'bob@corp.com' } },
+            receivedDateTime: '2024-03-15T11:00:00Z',
+          },
+        ],
+      },
+    ]);
     const provider = new GraphEmailProvider(client);
 
     const thread = await provider.getThread('msg-1');
@@ -730,7 +792,7 @@ describe('provider-microsoft/Thread Lookup', () => {
     expect(thread.messageCount).toBe(2);
     expect(client.get).toHaveBeenNthCalledWith(
       1,
-      '/me/messages/msg-1?$expand=attachments($select=id,name,contentType,size,isInline,contentId)',
+      '/me/messages/msg-1?$expand=attachments($select=id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId)',
     );
     const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[1]![0] as string;
     const decodedUrl = decodeURIComponent(url).replaceAll('+', ' ');
