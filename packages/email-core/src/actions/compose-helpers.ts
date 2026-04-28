@@ -3,6 +3,8 @@ import type { RateLimiter, MailboxEntry } from './registry.js';
 import { ProviderError } from '../providers/provider.js';
 import { resolveBodyFile } from '../content/body-loader.js';
 import type { BodyFormat } from '../content/body-renderer.js';
+import { parseAddressList } from '../utils/address.js';
+import type { EmailAddress } from '../types.js';
 
 // --- Error shape used by all actions ---
 
@@ -145,6 +147,36 @@ export function checkRateLimit(
     };
   }
   return null;
+}
+
+// --- parseRecipients ---
+
+export type ParsedRecipients =
+  | { to: EmailAddress[]; cc: EmailAddress[] }
+  | { error: ActionError };
+
+export function parseRecipients(input: { to?: string[]; cc?: string[] }): ParsedRecipients {
+  const toResult = parseAddressList(input.to, 'to');
+  if (!toResult.ok) {
+    return {
+      error: {
+        code: 'INVALID_ADDRESS',
+        message: `${toResult.field}[${toResult.index}] invalid address: "${toResult.value}"`,
+        recoverable: false,
+      },
+    };
+  }
+  const ccResult = parseAddressList(input.cc, 'cc');
+  if (!ccResult.ok) {
+    return {
+      error: {
+        code: 'INVALID_ADDRESS',
+        message: `${ccResult.field}[${ccResult.index}] invalid address: "${ccResult.value}"`,
+        recoverable: false,
+      },
+    };
+  }
+  return { to: toResult.addresses, cc: ccResult.addresses };
 }
 
 // --- handleProviderError ---

@@ -1,7 +1,7 @@
 // reply_to_email action — reply within existing thread, gated by send allowlist
 import { z } from 'zod';
 import type { ActionContext, EmailAction } from './registry.js';
-import type { EmailMessage } from '../types.js';
+import type { EmailAddress, EmailMessage } from '../types.js';
 import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { isPlausibleMessageId } from '../security/reply-validation.js';
 import { withRetry } from '../providers/provider.js';
@@ -10,6 +10,7 @@ import {
   checkMailboxRequired,
   checkRateLimit,
   handleProviderError,
+  parseRecipients,
 } from './compose-helpers.js';
 
 const ReplyToEmailInput = z.object({
@@ -63,7 +64,8 @@ function collectCurrentMailboxEmails(ctx: ActionContext): Set<string> {
 function collectReplyAllowlistRecipients(
   ctx: ActionContext,
   originalMessage: EmailMessage,
-  input: z.infer<typeof ReplyToEmailInput>,
+  parsedCc: EmailAddress[],
+  replyAll: boolean,
 ): string[] {
   const currentMailboxEmails = collectCurrentMailboxEmails(ctx);
   const recipients: string[] = [];
@@ -80,7 +82,7 @@ function collectReplyAllowlistRecipients(
 
   addRecipient(originalMessage.from.email);
 
-  if (input.reply_all !== false) {
+  if (replyAll) {
     for (const recipient of originalMessage.to) {
       addRecipient(recipient.email, { skipCurrentMailbox: true });
     }
@@ -89,8 +91,8 @@ function collectReplyAllowlistRecipients(
     }
   }
 
-  for (const recipient of input.cc ?? []) {
-    addRecipient(recipient);
+  for (const recipient of parsedCc) {
+    addRecipient(recipient.email);
   }
 
   return recipients;
@@ -124,6 +126,13 @@ export const replyToEmailAction: EmailAction<
       };
     }
 
+    // Parse cc once — name-address strings ('Jane <jane@x>') become {name, email}.
+    // Errors return INVALID_ADDRESS before any provider call or retry logic.
+    const parsed = parseRecipients({ cc: input.cc });
+    if ('error' in parsed) {
+      return { success: false, error: parsed.error };
+    }
+
     // Render body: markdown → HTML by default
     const rendered = renderEmailBody(input.body, { format: input.format, forceBlack: input.force_black });
     const bodyPlain = rendered.body;
@@ -143,7 +152,7 @@ export const replyToEmailAction: EmailAction<
       }
       try {
         const draftResult = await ctx.provider.createReplyDraft(input.message_id, bodyPlain, {
-          cc: input.cc?.map(email => ({ email })),
+          cc: parsed.cc,
           bodyHtml,
           replyAll: input.reply_all,
         });
@@ -163,7 +172,7 @@ export const replyToEmailAction: EmailAction<
 
     // Send path — check every effective recipient against the allowlist
     const originalMessage = await ctx.provider.getMessage(input.message_id);
-    const replyRecipients = collectReplyAllowlistRecipients(ctx, originalMessage, input);
+    const replyRecipients = collectReplyAllowlistRecipients(ctx, originalMessage, parsed.cc, input.reply_all !== false);
 
     // Check send allowlist — reply recipients must also be allowed
     const allowlistError = checkSendAllowlist(replyRecipients, ctx.sendAllowlist);
@@ -189,7 +198,7 @@ export const replyToEmailAction: EmailAction<
     try {
       const result = await withRetry(
         () => ctx.provider.replyToMessage(input.message_id, bodyPlain, {
-          cc: input.cc?.map(email => ({ email })),
+          cc: parsed.cc,
           bodyHtml,
           replyAll: input.reply_all,
         }),
