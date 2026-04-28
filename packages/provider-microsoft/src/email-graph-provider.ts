@@ -44,7 +44,12 @@ export interface GraphApiClient {
 
 /** Delta query select fields for efficiency */
 const DELTA_SELECT = '$select=subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments,isRead,id';
-const ATTACHMENT_SELECT = 'id,name,contentType,size,isInline,contentId';
+// Attachments are polymorphic: $select against the base type fails for derived-only props.
+// `contentId` lives on fileAttachment, not on the abstract attachment base, so it must be
+// qualified with the OData type cast or Graph returns HTTP 400.
+//   base attachment: https://learn.microsoft.com/en-us/graph/api/resources/attachment
+//   fileAttachment:  https://learn.microsoft.com/en-us/graph/api/resources/fileattachment
+const ATTACHMENT_SELECT = 'id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId';
 
 /** Result from delta query, including messages and the deltaLink for persistence */
 export interface DeltaResult {
