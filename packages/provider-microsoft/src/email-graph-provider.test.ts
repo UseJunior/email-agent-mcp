@@ -412,7 +412,7 @@ describe('provider-microsoft/Draft-Then-Send via createReplyAll', () => {
     expect(content.indexOf('<p>rendered</p>')).toBeLessThan(content.indexOf('just a fragment'));
   });
 
-  it('Scenario: createReplyAll failure returns structured REPLY_FAILED error', async () => {
+  it('Scenario: createReplyAll failure returns structured REPLY_FAILED', async () => {
     const client = createMockClient({
       post: vi.fn().mockRejectedValueOnce(new GraphApiError(404, 'Not Found')),
     });
