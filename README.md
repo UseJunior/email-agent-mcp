@@ -152,7 +152,7 @@ Agent Email exposes 15 MCP tools:
 | `get_mailbox_status` | Connection status and warnings | read |
 | `get_thread` | Full conversation context | read |
 | `send_email` | Send new email (allowlist-gated) | write |
-| `reply_to_email` | Reply with RFC threading | write |
+| `reply_to_email` | Reply within thread (allowlist-gated on send) | write |
 | `create_draft` | Create email draft | write |
 | `update_draft` | Update draft content | write |
 | `send_draft` | Send a saved draft | write |
