@@ -313,3 +313,113 @@ describe('email-write/Body Rendering', () => {
     expect(draft.bodyHtml).toBeUndefined();
   });
 });
+
+describe('email-write/Draft Address Parsing', () => {
+  it('create_draft parses name-address strings on standard path', async () => {
+    const result = await createDraftAction.run(ctx, {
+      to: ['Alice <alice@allowed.com>'],
+      cc: ['"Doe, Bob" <bob@allowed.com>'],
+      subject: 'Hi',
+      body: 'Hello',
+    });
+
+    expect(result.success).toBe(true);
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.to).toEqual([{ name: 'Alice', email: 'alice@allowed.com' }]);
+    expect(draft.cc).toEqual([{ name: 'Doe, Bob', email: 'bob@allowed.com' }]);
+  });
+
+  it('create_draft parses name-address cc on reply-draft path', async () => {
+    provider.addMessage({
+      id: 'reply-orig',
+      subject: 'Original',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'partner@allowed.com',
+      subject: 'Re: Original',
+      reply_to: 'reply-orig',
+      cc: ['Jane <jane@allowed.com>'],
+      body: 'Reply draft body',
+    });
+
+    expect(result.success).toBe(true);
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.cc).toEqual([{ name: 'Jane', email: 'jane@allowed.com' }]);
+  });
+
+  it('create_draft returns INVALID_ADDRESS for bad input', async () => {
+    const result = await createDraftAction.run(ctx, {
+      to: ['alice@allowed.com', 'not an email'],
+      subject: 'Bad',
+      body: 'Hi',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('INVALID_ADDRESS');
+    expect(result.error!.message).toContain('to[1]');
+    expect(provider.getDrafts().size).toBe(0);
+  });
+
+  it('update_draft parses name-address strings', async () => {
+    const created = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Original',
+      body: 'Body',
+    });
+    expect(created.success).toBe(true);
+
+    const updated = await updateDraftAction.run(ctx, {
+      draft_id: created.draftId!,
+      to: ['Alice Updated <alice@allowed.com>'],
+      cc: ['Bob <bob@allowed.com>'],
+    });
+
+    expect(updated.success).toBe(true);
+    const draft = provider.getDrafts().get(created.draftId!)!;
+    expect(draft.to).toEqual([{ name: 'Alice Updated', email: 'alice@allowed.com' }]);
+    expect(draft.cc).toEqual([{ name: 'Bob', email: 'bob@allowed.com' }]);
+  });
+
+  it('update_draft with cc: [] explicitly clears cc', async () => {
+    const created = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      cc: ['bob@allowed.com'],
+      subject: 'Original',
+      body: 'Body',
+    });
+    expect(created.success).toBe(true);
+
+    const updated = await updateDraftAction.run(ctx, {
+      draft_id: created.draftId!,
+      cc: [],
+    });
+
+    expect(updated.success).toBe(true);
+    const draft = provider.getDrafts().get(created.draftId!)!;
+    expect(draft.cc).toEqual([]);
+  });
+
+  it('update_draft returns INVALID_ADDRESS for bad input', async () => {
+    const created = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Original',
+      body: 'Body',
+    });
+    expect(created.success).toBe(true);
+
+    const updated = await updateDraftAction.run(ctx, {
+      draft_id: created.draftId!,
+      cc: ['not an email'],
+    });
+
+    expect(updated.success).toBe(false);
+    expect(updated.error!.code).toBe('INVALID_ADDRESS');
+    expect(updated.error!.message).toContain('cc[0]');
+  });
+});

@@ -12,6 +12,7 @@ import {
   validateRequiredFields,
   checkRateLimit,
   handleProviderError,
+  parseRecipients,
 } from './compose-helpers.js';
 
 const SendEmailInput = z.object({
@@ -73,6 +74,13 @@ export const sendEmailAction: EmailAction<
     // Resolve recipients
     const recipients = Array.isArray(to) ? to : [to!];
 
+    // Parse name-address strings ('Jane <jane@x>') into {name, email} once,
+    // before allowlist or provider call, so both consume the same parsed list.
+    const parsed = parseRecipients({ to: recipients, cc });
+    if ('error' in parsed) {
+      return { success: false, error: parsed.error };
+    }
+
     // Re: threading guardrail
     const threadingError = checkReplyThreading(subject!);
     if (threadingError) {
@@ -98,8 +106,8 @@ export const sendEmailAction: EmailAction<
     // Draft workflow — skip allowlist check and rate limit
     if (draft) {
       const draftResult = await ctx.provider.createDraft({
-        to: recipients.map(email => ({ email })),
-        cc: cc?.map(email => ({ email })),
+        to: parsed.to,
+        cc: parsed.cc,
         subject: subject!,
         body,
         bodyHtml: outBodyHtml,
@@ -115,8 +123,8 @@ export const sendEmailAction: EmailAction<
       };
     }
 
-    // Send path — check allowlist
-    const allowlistError = checkSendAllowlist(recipients, ctx.sendAllowlist);
+    // Send path — check allowlist (use parsed bare emails so name-address form passes correctly)
+    const allowlistError = checkSendAllowlist(parsed.to.map(a => a.email), ctx.sendAllowlist);
     if (allowlistError) {
       return {
         success: false,
@@ -134,8 +142,8 @@ export const sendEmailAction: EmailAction<
     try {
       const result = await withRetry(
         () => ctx.provider.sendMessage({
-          to: recipients.map(email => ({ email })),
-          cc: cc?.map(email => ({ email })),
+          to: parsed.to,
+          cc: parsed.cc,
           subject: subject!,
           body,
           bodyHtml: outBodyHtml,

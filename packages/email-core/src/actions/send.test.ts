@@ -484,3 +484,75 @@ format: text
     expect(sent.bodyHtml).toBeUndefined();
   });
 });
+
+describe('email-write/Send Address Parsing', () => {
+  it('Scenario: name-address strings parse on send path (to + cc)', async () => {
+    const result = await sendEmailAction.run(ctx, {
+      to: ['Alice <alice@allowed.com>'],
+      cc: ['"Doe, Bob" <bob@allowed.com>'],
+      subject: 'Hi',
+      body: 'Hello team',
+    });
+
+    expect(result.success).toBe(true);
+    const sent = provider.getSentMessages()[0]!;
+    expect(sent.to).toEqual([{ name: 'Alice', email: 'alice@allowed.com' }]);
+    expect(sent.cc).toEqual([{ name: 'Doe, Bob', email: 'bob@allowed.com' }]);
+  });
+
+  it('Scenario: name-address strings parse on draft path', async () => {
+    const result = await sendEmailAction.run(ctx, {
+      to: 'Alice <alice@allowed.com>',
+      cc: ['Bob <bob@allowed.com>'],
+      subject: 'Draft hi',
+      body: 'Hello team',
+      draft: true,
+    });
+
+    expect(result.success).toBe(true);
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.to).toEqual([{ name: 'Alice', email: 'alice@allowed.com' }]);
+    expect(draft.cc).toEqual([{ name: 'Bob', email: 'bob@allowed.com' }]);
+  });
+
+  it('Scenario: name-address `to` is NOT falsely rejected by allowlist (regression guard)', async () => {
+    // Pre-fix, allowlist saw 'Alice <alice@allowed.com>' verbatim and rejected it.
+    // Post-fix, allowlist receives the parsed bare email and accepts.
+    const result = await sendEmailAction.run(ctx, {
+      to: 'Alice <alice@allowed.com>',
+      subject: 'Hi',
+      body: 'Hello',
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('Scenario: invalid `to` returns INVALID_ADDRESS with field/index', async () => {
+    const result = await sendEmailAction.run(ctx, {
+      to: ['alice@allowed.com', 'not an email'],
+      subject: 'Bad',
+      body: 'Hi',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('INVALID_ADDRESS');
+    expect(result.error!.message).toContain('to[1]');
+    expect(result.error!.message).toContain('not an email');
+    expect(provider.getSentMessages()).toHaveLength(0);
+  });
+
+  it('Scenario: invalid `cc` returns INVALID_ADDRESS even on draft path', async () => {
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      cc: ['bob@allowed.com', 'Alice <a@x>, Bob <b@y>'],
+      subject: 'Bad',
+      body: 'Hi',
+      draft: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('INVALID_ADDRESS');
+    expect(result.error!.message).toContain('cc[1]');
+    expect(provider.getDrafts().size).toBe(0);
+  });
+});

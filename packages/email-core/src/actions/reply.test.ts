@@ -354,3 +354,57 @@ describe('email-write/Reply All Toggle', () => {
     );
   });
 });
+
+describe('email-write/Reply CC Address Parsing', () => {
+  it('Scenario: name-address cc string is parsed into {name, email} on send path', async () => {
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: VALID_MSG_ID,
+      body: 'Looping in counsel',
+      reply_all: false,
+      cc: ['Jane Doe <jane@lawfirm.com>'],
+    });
+
+    expect(result.success).toBe(true);
+    const sent = provider.getSentMessages()[0]!;
+    expect(sent.cc).toEqual([{ name: 'Jane Doe', email: 'jane@lawfirm.com' }]);
+  });
+
+  it('Scenario: name-address cc string is parsed on draft path', async () => {
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: VALID_MSG_ID,
+      body: 'Draft with cc',
+      draft: true,
+      cc: ['"Doe, Jane" <jane@lawfirm.com>'],
+    });
+
+    expect(result.success).toBe(true);
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.cc).toEqual([{ name: 'Doe, Jane', email: 'jane@lawfirm.com' }]);
+  });
+
+  it('Scenario: invalid cc address returns INVALID_ADDRESS with field/index', async () => {
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: VALID_MSG_ID,
+      body: 'Bad cc',
+      cc: ['jane@lawfirm.com', 'not an email'],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('INVALID_ADDRESS');
+    expect(result.error!.message).toContain('cc[1]');
+    expect(result.error!.message).toContain('not an email');
+    expect(provider.getSentMessages()).toHaveLength(0);
+  });
+
+  it('Scenario: parsed cc email is what feeds the allowlist (no false reject for name-address form)', async () => {
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: VALID_MSG_ID,
+      body: 'Looping in counsel',
+      reply_all: false,
+      cc: ['Jane <jane@lawfirm.com>'],
+    });
+
+    // sendAllowlist is *@lawfirm.com — parsed cc email matches; should pass.
+    expect(result.success).toBe(true);
+  });
+});

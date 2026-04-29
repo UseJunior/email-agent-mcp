@@ -364,6 +364,21 @@ describe('provider-gmail/buildRawMessage', () => {
     expect(raw).toContain('Bcc: legal@corp.com');
   });
 
+  it('Scenario: Cc with display name emits quoted name-address form', async () => {
+    const client = createMockGmailClient();
+    const provider = new GmailEmailProvider(client);
+
+    await provider.sendMessage({
+      to: [{ email: 'bob@corp.com' }],
+      cc: [{ name: 'Jane Doe', email: 'jane@corp.com' }],
+      subject: 'Hi',
+      body: 'Hello',
+    });
+
+    const raw = lastRaw(client.sendMessage as ReturnType<typeof vi.fn>);
+    expect(raw).toContain('Cc: "Jane Doe" <jane@corp.com>');
+  });
+
   it('Scenario: Cc and Bcc headers omitted when no recipients', async () => {
     const client = createMockGmailClient();
     const provider = new GmailEmailProvider(client);

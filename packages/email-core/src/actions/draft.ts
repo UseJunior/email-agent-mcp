@@ -12,6 +12,7 @@ import {
   validateRequiredFields,
   checkRateLimit,
   handleProviderError,
+  parseRecipients,
 } from './compose-helpers.js';
 
 // --- Shared schemas ---
@@ -75,6 +76,12 @@ export const createDraftAction: EmailAction<
 
     const recipients = Array.isArray(to) ? to : [to!];
 
+    // Parse name-address strings into {name, email} once before any provider call.
+    const parsed = parseRecipients({ to: recipients, cc });
+    if ('error' in parsed) {
+      return { success: false, error: parsed.error };
+    }
+
     // Drafts bypass allowlist — enforcement happens at send_draft time
 
     // Re: threading guardrail
@@ -106,7 +113,7 @@ export const createDraftAction: EmailAction<
       }
       try {
         const result = await ctx.provider.createReplyDraft(replyTo, body, {
-          cc: cc?.map(email => ({ email })),
+          cc: parsed.cc,
           bodyHtml: outBodyHtml,
         });
         return {
@@ -122,8 +129,8 @@ export const createDraftAction: EmailAction<
     // Standard draft path
     try {
       const result = await ctx.provider.createDraft({
-        to: recipients.map(email => ({ email })),
-        cc: cc?.map(email => ({ email })),
+        to: parsed.to,
+        cc: parsed.cc,
         subject: subject!,
         body,
         bodyHtml: outBodyHtml,
@@ -292,13 +299,19 @@ export const updateDraftAction: EmailAction<
       }
     }
 
-    // Build partial update
+    // Build partial update — parse name-address strings only for fields the caller actually provided.
     const partial: Partial<import('../types.js').ComposeMessage> = {};
-    if (to) {
-      const recipients = Array.isArray(to) ? to : [to];
-      partial.to = recipients.map(email => ({ email }));
+    if (to !== undefined || cc !== undefined) {
+      const parsed = parseRecipients({
+        to: to !== undefined ? (Array.isArray(to) ? to : [to]) : undefined,
+        cc,
+      });
+      if ('error' in parsed) {
+        return { success: false, error: parsed.error };
+      }
+      if (to !== undefined) partial.to = parsed.to;
+      if (cc !== undefined) partial.cc = parsed.cc;
     }
-    if (cc) partial.cc = cc.map(email => ({ email }));
     if (subject) partial.subject = subject;
     if (body) {
       const rendered = renderEmailBody(body, { format, forceBlack });
