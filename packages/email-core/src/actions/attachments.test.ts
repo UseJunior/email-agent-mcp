@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MockEmailProvider } from '../testing/mock-provider.js';
 import { listAttachmentsAction, downloadAttachmentAction, detectMimeType, validateAttachment, sanitizeFilename } from './attachments.js';
-import { AttachmentNotSupportedError } from '../providers/provider.js';
+import { AttachmentNotSupportedError, AttachmentNotFoundError } from '../providers/provider.js';
 import type { ActionContext } from './registry.js';
 
 let provider: MockEmailProvider;
@@ -31,6 +31,7 @@ describe('email-attachments/Download Attachments', () => {
     expect(result.attachments[0]).toMatchObject({
       id: 'att1',
       filename: 'report.pdf',
+      original_filename: 'report.pdf',
       mimeType: 'application/pdf',
       size: 245000,
       isInline: false,
@@ -40,12 +41,28 @@ describe('email-attachments/Download Attachments', () => {
       isInline: true,
     });
   });
+
+  it('Scenario: list_attachments preserves the raw filename in original_filename even when sanitization mangles it', async () => {
+    provider.addMessage({
+      id: 'msg-i18n',
+      hasAttachments: true,
+      attachments: [
+        { id: 'att-i18n', filename: 'Räsumé (Final).pdf', mimeType: 'application/pdf', size: 1024, isInline: false },
+      ],
+    });
+
+    const result = await listAttachmentsAction.run(ctx, { message_id: 'msg-i18n' });
+
+    expect(result.attachments[0]!.original_filename).toBe('Räsumé (Final).pdf');
+    expect(result.attachments[0]!.filename).toMatch(/\.pdf$/);
+    expect(result.attachments[0]!.filename).not.toContain('(');
+  });
 });
 
 describe('email-attachments/Download Attachment', () => {
   const PDF_BYTES = Buffer.from('%PDF-1.4 fake pdf body for tests');
 
-  it('Scenario: Happy path returns sanitized filename, declared mimeType, and round-trippable base64', async () => {
+  it('Scenario: Happy path returns sanitized filename, original_filename, declared mimeType, and round-trippable base64', async () => {
     provider.addMessage({
       id: 'msg-dl',
       hasAttachments: true,
@@ -66,19 +83,41 @@ describe('email-attachments/Download Attachment', () => {
     expect(result.size).toBe(PDF_BYTES.length);
     expect(result.filename).not.toContain('(');
     expect(result.filename).toMatch(/\.pdf$/);
+    expect(result.original_filename).toBe('Report (Final).pdf');
     expect(Buffer.from(result.base64!, 'base64').equals(PDF_BYTES)).toBe(true);
   });
 
-  it('Scenario: Pre-download size rejection — declared size exceeds cap, downloadAttachment is not called', async () => {
+  it('Scenario: Non-ASCII filename round-trips through original_filename while filename gets sanitized', async () => {
+    provider.addMessage({
+      id: 'msg-i18n',
+      hasAttachments: true,
+      attachments: [
+        { id: 'att-i18n', filename: 'Räsumé.pdf', mimeType: 'application/pdf', size: PDF_BYTES.length, isInline: false },
+      ],
+    });
+    provider.addAttachmentData('msg-i18n', 'att-i18n', PDF_BYTES);
+
+    const result = await downloadAttachmentAction.run(ctx, {
+      message_id: 'msg-i18n',
+      attachment_id: 'att-i18n',
+      max_size_mb: 5,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.original_filename).toBe('Räsumé.pdf');
+    expect(result.filename).toMatch(/\.pdf$/);
+  });
+
+  it('Scenario: Size rejection when downloaded payload exceeds the cap', async () => {
+    const actualBuf = Buffer.alloc(2 * 1024 * 1024);
     provider.addMessage({
       id: 'msg-big',
       hasAttachments: true,
       attachments: [
-        { id: 'att-big', filename: 'huge.pdf', mimeType: 'application/pdf', size: 2 * 1024 * 1024, isInline: false },
+        { id: 'att-big', filename: 'huge.bin', mimeType: 'application/octet-stream', size: actualBuf.length, isInline: false },
       ],
     });
-    provider.addAttachmentData('msg-big', 'att-big', Buffer.alloc(2 * 1024 * 1024));
-    const downloadSpy = vi.spyOn(provider, 'downloadAttachment');
+    provider.addAttachmentData('msg-big', 'att-big', actualBuf);
 
     const result = await downloadAttachmentAction.run(ctx, {
       message_id: 'msg-big',
@@ -89,30 +128,6 @@ describe('email-attachments/Download Attachment', () => {
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('ATTACHMENT_TOO_LARGE');
     expect(result.error?.message).toMatch(/exceeds max_size_mb=1/);
-    expect(downloadSpy).not.toHaveBeenCalled();
-  });
-
-  it('Scenario: Post-download size rejection — provider lies about size, actual buffer overruns the cap', async () => {
-    const declaredSize = 100;
-    const actualBuf = Buffer.alloc(2 * 1024 * 1024);
-    provider.addMessage({
-      id: 'msg-liar',
-      hasAttachments: true,
-      attachments: [
-        { id: 'att-liar', filename: 'liar.bin', mimeType: 'application/octet-stream', size: declaredSize, isInline: false },
-      ],
-    });
-    provider.addAttachmentData('msg-liar', 'att-liar', actualBuf);
-
-    const result = await downloadAttachmentAction.run(ctx, {
-      message_id: 'msg-liar',
-      attachment_id: 'att-liar',
-      max_size_mb: 1,
-    });
-
-    expect(result.success).toBe(false);
-    expect(result.error?.code).toBe('ATTACHMENT_TOO_LARGE');
-    expect(result.error?.message).toMatch(new RegExp(`${actualBuf.length} bytes`));
   });
 
   it('Scenario: NOT_SUPPORTED when provider lacks downloadAttachment', async () => {
@@ -128,7 +143,7 @@ describe('email-attachments/Download Attachment', () => {
     expect(result.error?.code).toBe('NOT_SUPPORTED');
   });
 
-  it('Scenario: ATTACHMENT_NOT_FOUND when attachment id is missing from listAttachments', async () => {
+  it('Scenario: ATTACHMENT_NOT_FOUND when provider throws AttachmentNotFoundError (race deletion or bad id)', async () => {
     provider.addMessage({
       id: 'msg-empty',
       hasAttachments: true,
@@ -147,14 +162,23 @@ describe('email-attachments/Download Attachment', () => {
     expect(result.error?.code).toBe('ATTACHMENT_NOT_FOUND');
   });
 
-  it('Scenario: NOT_SUPPORTED when provider throws AttachmentNotSupportedError during download (e.g. Graph itemAttachment)', async () => {
-    provider.addMessage({
-      id: 'msg-item',
-      hasAttachments: true,
-      attachments: [
-        { id: 'att-item', filename: 'embedded.eml', mimeType: 'message/rfc822', size: 1000, isInline: false },
-      ],
+  it('Scenario: explicit AttachmentNotFoundError thrown by provider maps to ATTACHMENT_NOT_FOUND', async () => {
+    vi.spyOn(provider, 'downloadAttachment').mockRejectedValue(
+      new AttachmentNotFoundError('race-deleted attachment'),
+    );
+
+    const result = await downloadAttachmentAction.run(ctx, {
+      message_id: 'msg-deleted',
+      attachment_id: 'att-deleted',
+      max_size_mb: 5,
     });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('ATTACHMENT_NOT_FOUND');
+    expect(result.error?.message).toMatch(/race-deleted/);
+  });
+
+  it('Scenario: NOT_SUPPORTED when provider throws AttachmentNotSupportedError during download (e.g. Graph itemAttachment)', async () => {
     vi.spyOn(provider, 'downloadAttachment').mockRejectedValue(
       new AttachmentNotSupportedError('Attachment att-item has @odata.type=#microsoft.graph.itemAttachment'),
     );
@@ -170,8 +194,8 @@ describe('email-attachments/Download Attachment', () => {
     expect(result.error?.message).toMatch(/itemAttachment/);
   });
 
-  it('Scenario: Network errors are NOT swallowed as ATTACHMENT_NOT_FOUND — must propagate so wrapAction returns PROVIDER_UNAVAILABLE', async () => {
-    vi.spyOn(provider, 'listAttachments').mockRejectedValue(new Error('Network unreachable'));
+  it('Scenario: Network errors are NOT swallowed — must propagate so wrapAction returns PROVIDER_UNAVAILABLE', async () => {
+    vi.spyOn(provider, 'downloadAttachment').mockRejectedValue(new Error('Network unreachable'));
 
     await expect(
       downloadAttachmentAction.run(ctx, {

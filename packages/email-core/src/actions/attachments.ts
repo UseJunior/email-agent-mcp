@@ -2,7 +2,7 @@
 import { z } from 'zod';
 import { extname } from 'node:path';
 import type { EmailAction } from './registry.js';
-import { AttachmentNotSupportedError } from '../providers/provider.js';
+import { AttachmentNotSupportedError, AttachmentNotFoundError } from '../providers/provider.js';
 
 const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024; // 25MB
 
@@ -54,6 +54,7 @@ const ListAttachmentsInput = z.object({
 const AttachmentInfo = z.object({
   id: z.string(),
   filename: z.string(),
+  original_filename: z.string(),
   mimeType: z.string(),
   size: z.number(),
   contentId: z.string().optional(),
@@ -78,6 +79,7 @@ export const listAttachmentsAction: EmailAction<
     const attachments = (msg.attachments ?? []).map(a => ({
       id: a.id,
       filename: sanitizeFilename(a.filename),
+      original_filename: a.filename,
       mimeType: a.mimeType,
       size: a.size,
       contentId: a.contentId,
@@ -98,6 +100,7 @@ const DownloadAttachmentInput = z.object({
 const DownloadAttachmentOutput = z.object({
   success: z.boolean(),
   filename: z.string().optional(),
+  original_filename: z.string().optional(),
   mimeType: z.string().optional(),
   size: z.number().optional(),
   base64: z.string().optional(),
@@ -129,37 +132,10 @@ export const downloadAttachmentAction: EmailAction<
       };
     }
 
-    const attachments = ctx.provider.listAttachments
-      ? await ctx.provider.listAttachments(input.message_id)
-      : ((await ctx.provider.getMessage(input.message_id)).attachments ?? []);
-
-    const meta = attachments.find(a => a.id === input.attachment_id);
-    if (!meta) {
-      return {
-        success: false,
-        error: {
-          code: 'ATTACHMENT_NOT_FOUND',
-          message: `Attachment ${input.attachment_id} not found on message ${input.message_id}`,
-          recoverable: false,
-        },
-      };
-    }
-
     const cap = input.max_size_mb * 1024 * 1024;
-    if (meta.size > cap) {
-      return {
-        success: false,
-        error: {
-          code: 'ATTACHMENT_TOO_LARGE',
-          message: `Attachment is ${meta.size} bytes; exceeds max_size_mb=${input.max_size_mb} (${cap} bytes)`,
-          recoverable: false,
-        },
-      };
-    }
-
-    let buf: Buffer;
+    let downloaded;
     try {
-      buf = await ctx.provider.downloadAttachment(input.message_id, input.attachment_id);
+      downloaded = await ctx.provider.downloadAttachment(input.message_id, input.attachment_id);
     } catch (err) {
       if (err instanceof AttachmentNotSupportedError) {
         return {
@@ -167,15 +143,21 @@ export const downloadAttachmentAction: EmailAction<
           error: { code: 'NOT_SUPPORTED', message: err.message, recoverable: false },
         };
       }
+      if (err instanceof AttachmentNotFoundError) {
+        return {
+          success: false,
+          error: { code: 'ATTACHMENT_NOT_FOUND', message: err.message, recoverable: false },
+        };
+      }
       throw err;
     }
 
-    if (buf.length > cap) {
+    if (downloaded.size > cap || downloaded.content.length > cap) {
       return {
         success: false,
         error: {
           code: 'ATTACHMENT_TOO_LARGE',
-          message: `Downloaded attachment is ${buf.length} bytes; exceeds max_size_mb=${input.max_size_mb} (${cap} bytes)`,
+          message: `Attachment is ${downloaded.size} bytes; exceeds max_size_mb=${input.max_size_mb} (${cap} bytes)`,
           recoverable: false,
         },
       };
@@ -183,10 +165,11 @@ export const downloadAttachmentAction: EmailAction<
 
     return {
       success: true,
-      filename: sanitizeFilename(meta.filename),
-      mimeType: meta.mimeType,
-      size: buf.length,
-      base64: buf.toString('base64'),
+      filename: sanitizeFilename(downloaded.filename),
+      original_filename: downloaded.filename,
+      mimeType: downloaded.mimeType,
+      size: downloaded.content.length,
+      base64: downloaded.content.toString('base64'),
     };
   },
 };

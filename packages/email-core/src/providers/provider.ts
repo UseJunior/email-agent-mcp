@@ -41,9 +41,16 @@ export interface EmailCategorizer {
   deleteMessage(messageId: string, hard?: boolean): Promise<void>;
 }
 
+export interface DownloadedAttachment {
+  content: Buffer;
+  filename: string;
+  mimeType: string;
+  size: number;
+}
+
 export interface EmailAttachmentHandler {
   listAttachments(messageId: string): Promise<import('../types.js').EmailAttachment[]>;
-  downloadAttachment(messageId: string, attachmentId: string): Promise<Buffer>;
+  downloadAttachment(messageId: string, attachmentId: string): Promise<DownloadedAttachment>;
 }
 
 // Combined provider type — providers implement what they support
@@ -102,6 +109,17 @@ export class AttachmentNotSupportedError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'AttachmentNotSupportedError';
+  }
+}
+
+// Thrown by providers when the requested attachment id does not exist on the
+// message (e.g. Graph 404 on the bytes call after a race deletion). The
+// download_attachment action remaps this to { code: 'ATTACHMENT_NOT_FOUND' }
+// so race-deleted attachments surface with the same code as a stale id.
+export class AttachmentNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AttachmentNotFoundError';
   }
 }
 

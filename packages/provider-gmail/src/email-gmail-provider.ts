@@ -10,7 +10,9 @@ import type {
   DraftResult,
   ListOptions,
   ReplyOptions,
+  DownloadedAttachment,
 } from '@usejunior/email-core';
+import { AttachmentNotFoundError } from '@usejunior/email-core';
 
 // Gmail label mapping
 const FOLDER_TO_LABEL: Record<string, string> = {
@@ -138,21 +140,50 @@ export class GmailEmailProvider {
     return message.attachments ?? [];
   }
 
-  async downloadAttachment(messageId: string, attachmentId: string): Promise<Buffer> {
+  async downloadAttachment(messageId: string, attachmentId: string): Promise<DownloadedAttachment> {
+    // Gmail's getAttachment endpoint returns only base64 bytes — it doesn't
+    // include filename/mimeType. Pull metadata from the message payload
+    // alongside the bytes so the action layer gets a self-contained result.
+    let message: GmailMessage;
+    try {
+      message = await this.client.getMessage(messageId);
+    } catch (err) {
+      if (isNotFoundError(err)) {
+        throw new AttachmentNotFoundError(`Gmail message ${messageId} not found`);
+      }
+      throw err;
+    }
+    const meta = findAttachmentMetadata(message.payload?.parts, attachmentId);
+
+    let content: Buffer;
     if (attachmentId.startsWith('part:')) {
-      const message = await this.client.getMessage(messageId);
       const part = findPartByPath(message.payload?.parts, attachmentId.slice('part:'.length));
       if (!part?.body?.data) {
-        throw new Error(`Gmail attachment ${attachmentId} is missing inline body data`);
+        throw new AttachmentNotFoundError(`Gmail attachment ${attachmentId} is missing inline body data`);
       }
-      return Buffer.from(part.body.data, 'base64url');
+      content = Buffer.from(part.body.data, 'base64url');
+    } else {
+      let attachment: { data?: string; size?: number };
+      try {
+        attachment = await this.client.getAttachment(messageId, attachmentId);
+      } catch (err) {
+        if (isNotFoundError(err)) {
+          throw new AttachmentNotFoundError(`Gmail attachment ${attachmentId} not found on message ${messageId}`);
+        }
+        throw err;
+      }
+      if (!attachment.data) {
+        throw new AttachmentNotFoundError(`Gmail attachment ${attachmentId} returned no data`);
+      }
+      content = Buffer.from(attachment.data, 'base64url');
     }
 
-    const attachment = await this.client.getAttachment(messageId, attachmentId);
-    if (!attachment.data) {
-      throw new Error(`Gmail attachment ${attachmentId} returned no data`);
-    }
-    return Buffer.from(attachment.data, 'base64url');
+    return {
+      content,
+      filename: meta?.filename || attachmentId,
+      mimeType: meta?.mimeType ?? 'application/octet-stream',
+      size: content.length,
+    };
   }
 
   async sendMessage(msg: ComposeMessage): Promise<SendResult> {
@@ -417,6 +448,66 @@ function findPartByPath(parts: GmailMessagePart[] | undefined, path: string): Gm
     currentParts = current.parts ?? [];
   }
   return current ?? null;
+}
+
+// Walk the part tree looking for an attachment by id (either body.attachmentId
+// for non-inline parts, or `part:<index-path>` for inline parts whose data is
+// already in the message payload). Returns filename + mimeType when found.
+//
+// Filename fallback mirrors collectPayloadContent: real filename → stripped
+// Content-ID → synthetic `attachment-<path>`. Without this, CID-only inline
+// parts (common for HTML emails) regress from a meaningful name like
+// `image002` to empty-string after the contract reshape.
+function findAttachmentMetadata(
+  parts: GmailMessagePart[] | undefined,
+  attachmentId: string,
+): { filename: string; mimeType: string } | null {
+  if (!parts) return null;
+  if (attachmentId.startsWith('part:')) {
+    const path = attachmentId.slice('part:'.length);
+    const part = findPartByPath(parts, path);
+    if (!part) return null;
+    return {
+      filename: deriveAttachmentFilename(part, path),
+      mimeType: part.mimeType ?? 'application/octet-stream',
+    };
+  }
+  const find = (
+    list: GmailMessagePart[],
+    pathPrefix: string,
+  ): { part: GmailMessagePart; path: string } | null => {
+    for (const [index, p] of list.entries()) {
+      const path = pathPrefix === '' ? String(index) : `${pathPrefix}.${index}`;
+      if (p.body?.attachmentId === attachmentId) return { part: p, path };
+      if (p.parts) {
+        const hit = find(p.parts, path);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  };
+  const found = find(parts, '');
+  if (!found) return null;
+  return {
+    filename: deriveAttachmentFilename(found.part, found.path),
+    mimeType: found.part.mimeType ?? 'application/octet-stream',
+  };
+}
+
+function deriveAttachmentFilename(part: GmailMessagePart, path: string): string {
+  if (part.filename) return part.filename;
+  const contentId = getPartHeader(part, 'Content-ID');
+  const stripped = contentId ? stripAngleBrackets(contentId) : '';
+  if (stripped) return stripped;
+  return `attachment-${path.replace(/\./g, '-')}`;
+}
+
+function isNotFoundError(err: unknown): boolean {
+  const record = err as { code?: unknown; response?: { status?: unknown } } | null;
+  if (!record || typeof record !== 'object') return false;
+  if (record.code === 404) return true;
+  if (record.response && typeof record.response === 'object' && record.response.status === 404) return true;
+  return false;
 }
 
 function parseEmailAddress(raw: string): { email: string; name?: string } {

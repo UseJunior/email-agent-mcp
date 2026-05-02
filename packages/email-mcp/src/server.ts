@@ -74,8 +74,15 @@ export interface McpTool {
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
 }
 
+export type McpContent =
+  | { type: 'text'; text: string }
+  | {
+      type: 'resource';
+      resource: { uri: string; mimeType?: string; blob?: string; text?: string };
+    };
+
 export interface McpToolCallResult {
-  content: Array<{ type: string; text: string }>;
+  content: McpContent[];
 }
 
 export interface EmailActionDef {
@@ -224,6 +231,43 @@ export async function handleToolCall(
   const coerced = coerceArgsForZod(action.input, args);
   const input = action.input.parse(coerced);
   const result = await action.run(ctx, input);
+
+  // download_attachment returns base64 inline. To avoid stuffing megabytes of
+  // base64 inside the JSON-stringified text envelope (which agents have to
+  // parse to extract the bytes), emit the bytes as a typed `resource` content
+  // item alongside a text item carrying just the metadata. Clients that
+  // understand `resource` content can decode the blob directly; clients that
+  // only know `text` still see the metadata.
+  if (toolName === 'download_attachment') {
+    const r = result as {
+      success?: boolean;
+      base64?: string;
+      mimeType?: string;
+      filename?: string;
+      original_filename?: string;
+      size?: number;
+    } & Record<string, unknown>;
+    if (r.success && typeof r.base64 === 'string') {
+      const { base64, ...metadata } = r;
+      const messageId = (input as { message_id?: string }).message_id ?? 'unknown';
+      const attachmentId = (input as { attachment_id?: string }).attachment_id ?? 'unknown';
+      const mailbox = (input as { mailbox?: string }).mailbox ?? 'default';
+      const uri = `attachment://${encodeURIComponent(mailbox)}/${encodeURIComponent(messageId)}/${encodeURIComponent(attachmentId)}`;
+      return {
+        content: [
+          { type: 'text', text: JSON.stringify(metadata, null, 2) },
+          {
+            type: 'resource',
+            resource: {
+              uri,
+              mimeType: r.mimeType ?? 'application/octet-stream',
+              blob: base64,
+            },
+          },
+        ],
+      };
+    }
+  }
 
   return {
     content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
