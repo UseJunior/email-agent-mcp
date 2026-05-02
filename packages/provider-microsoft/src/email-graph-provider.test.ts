@@ -763,6 +763,102 @@ describe('provider-microsoft/Draft-Then-Send via createReplyAll', () => {
   });
 });
 
+describe('provider-microsoft/update_draft Quote Preservation', () => {
+  it('Scenario: update_draft preserves Graph auto-quoted thread', async () => {
+    // Simulate a reply draft already merged by prepareReplyDraft: caller fragment
+    // sits between <body> and <hr>, then Graph's quoted block follows.
+    const REPLY_DRAFT_BODY = '<html><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"></head>'
+      + '<body style="font-size:10pt; font-family:Verdana,Geneva,sans-serif">'
+      + '<div>Old caller content</div>'
+      + '<hr tabindex="-1" style="display:inline-block; width:98%">'
+      + '<div id="divRplyFwdMsg" dir="ltr"><font face="Calibri, sans-serif" color="#000000" style="font-size:11pt">'
+      + '<b>From:</b> Alice &lt;alice@corp.com&gt;<br>'
+      + '<b>Sent:</b> Saturday, 25 April 2026 16:08:46<br>'
+      + '<b>To:</b> Steven &lt;steven@corp.com&gt;<br>'
+      + '<b>Subject:</b> Re: Quarterly Report</font><div>&nbsp;</div></div>'
+      + '<div><p>Original message content</p></div>'
+      + '</body></html>';
+
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValueOnce({
+        id: 'draft-update-1',
+        body: { contentType: 'html', content: REPLY_DRAFT_BODY },
+      }),
+      patch: vi.fn().mockResolvedValueOnce({}),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.updateDraft('draft-update-1', { body: 'Updated reply text' });
+
+    expect(result.success).toBe(true);
+    expect(client.get).toHaveBeenCalledWith(expect.stringContaining('draft-update-1'));
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const patchBody = (patchArgs[1] as { body: { contentType: string; content: string } }).body;
+    expect(patchBody.contentType).toBe('HTML');
+    // New caller content present
+    expect(patchBody.content).toContain('Updated reply text');
+    // Old caller content gone
+    expect(patchBody.content).not.toContain('Old caller content');
+    // Quoted thread preserved (divider, header block, prior message body)
+    expect(patchBody.content).toContain('divRplyFwdMsg');
+    expect(patchBody.content).toContain('From:</b> Alice');
+    expect(patchBody.content).toContain('Original message content');
+  });
+
+  it('Scenario: update_draft on a fresh draft replaces body wholesale', async () => {
+    const FRESH_DRAFT_BODY = '<html><body><div>Old fresh content</div></body></html>';
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValueOnce({
+        id: 'draft-update-2',
+        body: { contentType: 'html', content: FRESH_DRAFT_BODY },
+      }),
+      patch: vi.fn().mockResolvedValueOnce({}),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.updateDraft('draft-update-2', { body: 'New body' });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const patchBody = (patchArgs[1] as { body: { contentType: string; content: string } }).body;
+    // No quoted-thread marker → falls through to buildGraphBody, which produces Text contentType
+    expect(patchBody.contentType).toBe('Text');
+    expect(patchBody.content).toBe('New body');
+    expect(patchBody.content).not.toContain('Old fresh content');
+  });
+
+  it('Scenario: update_draft with bodyHtml preserves quoted thread and strips outer wrappers', async () => {
+    const REPLY_DRAFT_BODY = '<html><body>'
+      + '<div>Old caller</div>'
+      + '<hr><div id="divRplyFwdMsg"><b>From:</b> Bob</div>'
+      + '<div>Prior body</div>'
+      + '</body></html>';
+
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValueOnce({
+        id: 'draft-update-3',
+        body: { contentType: 'html', content: REPLY_DRAFT_BODY },
+      }),
+      patch: vi.fn().mockResolvedValueOnce({}),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.updateDraft('draft-update-3', {
+      body: 'plain fallback',
+      bodyHtml: '<html><body><p>rendered update</p></body></html>',
+    });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const content = (patchArgs[1] as { body: { content: string } }).body.content;
+    // Caller's outer <html>/<body> from bodyHtml stripped — only one of each (Graph's outer ones)
+    expect(content.match(/<html[\s>]/gi)?.length ?? 0).toBe(1);
+    expect(content.match(/<body[\s>]/gi)?.length ?? 0).toBe(1);
+    expect(content).toContain('<p>rendered update</p>');
+    expect(content).toContain('divRplyFwdMsg');
+    expect(content).toContain('From:</b> Bob');
+    expect(content).not.toContain('Old caller');
+  });
+});
+
 describe('provider-microsoft/Reply-All Routing', () => {
   it('Scenario: replyAll omitted defaults to createReplyAll', async () => {
     const client = createMockClient({

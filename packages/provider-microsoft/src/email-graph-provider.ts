@@ -497,7 +497,25 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   async updateDraft(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult> {
     const patch: Record<string, unknown> = {};
     if (msg.body !== undefined || msg.bodyHtml !== undefined) {
-      patch.body = buildGraphBody(msg.bodyHtml, msg.body ?? '');
+      // For reply drafts, GET the existing body so we can preserve Graph's auto-quoted
+      // thread (divider + From/Sent/To/Subject + prior message). Replacing the body
+      // wholesale via PATCH would drop the quoted history that prepareReplyDraft set up.
+      // For non-reply drafts (no quoted-thread marker), this falls through to the
+      // normal buildGraphBody path so behavior is unchanged.
+      const current = await this.client.get(`${this.basePath}/messages/${encodeGraphPathId(draftId)}`);
+      const currentBody = current.body as { contentType?: string; content?: string } | undefined;
+      const currentContent = typeof currentBody?.content === 'string' ? currentBody.content : '';
+      const currentIsHtml = currentBody?.contentType?.toLowerCase() === 'html';
+
+      if (currentIsHtml && hasQuotedReplyThread(currentContent)) {
+        const callerFragment = msg.bodyHtml !== undefined
+          ? stripHtmlBodyWrappers(msg.bodyHtml)
+          : wrapPlainTextAsHtml(msg.body ?? '');
+        const merged = replaceCallerFragmentPreservingQuote(currentContent, callerFragment);
+        patch.body = { contentType: 'HTML', content: truncateBody(merged) };
+      } else {
+        patch.body = buildGraphBody(msg.bodyHtml, msg.body ?? '');
+      }
     }
     if (msg.subject !== undefined) patch.subject = msg.subject.slice(0, SUBJECT_MAX_LENGTH);
     if (msg.to) patch.toRecipients = msg.to.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
@@ -789,6 +807,51 @@ function mergeQuotedReplyHtml(draftContent: string, callerFragment: string): str
   }
   const insertAt = bodyTagMatch.index + bodyTagMatch[0].length;
   return draftContent.slice(0, insertAt) + callerFragment + draftContent.slice(insertAt);
+}
+
+/**
+ * Detect whether a draft body contains Graph's auto-generated quoted reply thread.
+ *
+ * Graph's reply drafts have a stable shape: `<body ...><hr ...><div id="divRplyFwdMsg">`
+ * (the divider + the `From:/Sent:/To:/Subject:` block). Either marker is sufficient
+ * evidence that the draft has a quoted thread we need to preserve.
+ *
+ * Used by `updateDraft` to decide whether to splice a new caller fragment into an
+ * existing reply draft or PATCH the body wholesale (fresh draft).
+ */
+function hasQuotedReplyThread(content: string): boolean {
+  return /divRplyFwdMsg/i.test(content) || /<hr\b[^>]*>\s*<div[^>]*<b>From:<\/b>/i.test(content);
+}
+
+/**
+ * Replace the caller fragment in an existing reply draft while preserving Graph's
+ * auto-quoted thread (divider + header block + prior message body).
+ *
+ * Strategy:
+ * - Locate `<body>` opening tag and the first `<hr ...>` after it.
+ * - Replace everything between `<body>` and that `<hr>` with the new fragment.
+ * - Leave the `<hr>` and everything after it untouched (preserves divider, From:/Sent:/To:/Subject:,
+ *   prior body, and `</body></html>` tail).
+ *
+ * Falls back to inserting the fragment after `<body>` (without removing anything) when
+ * no `<hr>` divider is present — the caller has already verified `hasQuotedReplyThread`,
+ * so this fallback is purely defensive.
+ *
+ * Falls back to `callerFragment + draftContent` when there's no `<body>` tag at all.
+ */
+function replaceCallerFragmentPreservingQuote(draftContent: string, callerFragment: string): string {
+  const bodyMatch = draftContent.match(/<body[^>]*>/i);
+  if (!bodyMatch || bodyMatch.index === undefined) {
+    return callerFragment + draftContent;
+  }
+  const afterBody = bodyMatch.index + bodyMatch[0].length;
+  const tail = draftContent.slice(afterBody);
+  const dividerMatch = tail.match(/<hr\b[^>]*>/i);
+  if (!dividerMatch || dividerMatch.index === undefined) {
+    return draftContent.slice(0, afterBody) + callerFragment + draftContent.slice(afterBody);
+  }
+  const dividerStart = afterBody + dividerMatch.index;
+  return draftContent.slice(0, afterBody) + callerFragment + draftContent.slice(dividerStart);
 }
 
 /**

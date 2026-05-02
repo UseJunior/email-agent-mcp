@@ -46,6 +46,15 @@ The system SHALL use `createReplyAll` for replies. `createReplyAll` preserves em
 - **THEN** `replyToMessage` returns `{ success: false, error: { code: 'REPLY_FAILED', recoverable: false } }`
 - **AND** does not call `sendMail`
 
+#### Scenario: update_draft preserves Graph auto-quoted thread
+- **WHEN** `update_draft` is called with a new body on a draft that contains Graph's auto-quoted thread (divider + `From:/Sent:/To:/Subject:` block)
+- **THEN** the resulting PATCH replaces only the caller content above the divider
+- **AND** preserves the divider, header block, and prior message body intact
+
+#### Scenario: update_draft on a fresh draft replaces body wholesale
+- **WHEN** `update_draft` is called on a draft with no quoted-thread marker
+- **THEN** the body is PATCHed wholesale via `buildGraphBody` (existing behavior unchanged)
+
 ### Requirement: Validation Token Handling
 
 The system SHALL respond to Graph validation requests on BOTH GET and POST methods. The `validationToken` query parameter SHALL be HTML-escaped and returned as `200 OK` plaintext.
