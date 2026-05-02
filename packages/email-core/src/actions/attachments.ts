@@ -2,6 +2,7 @@
 import { z } from 'zod';
 import { extname } from 'node:path';
 import type { EmailAction } from './registry.js';
+import { AttachmentNotSupportedError } from '../providers/provider.js';
 
 const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024; // 25MB
 
@@ -83,6 +84,110 @@ export const listAttachmentsAction: EmailAction<
       isInline: a.isInline,
     }));
     return { attachments };
+  },
+};
+
+// Download a single attachment as inline base64
+const DownloadAttachmentInput = z.object({
+  message_id: z.string(),
+  attachment_id: z.string(),
+  mailbox: z.string().optional(),
+  max_size_mb: z.number().int().positive().max(25).optional().default(5),
+});
+
+const DownloadAttachmentOutput = z.object({
+  success: z.boolean(),
+  filename: z.string().optional(),
+  mimeType: z.string().optional(),
+  size: z.number().optional(),
+  base64: z.string().optional(),
+  error: z.object({
+    code: z.string(),
+    message: z.string(),
+    recoverable: z.boolean(),
+  }).optional(),
+});
+
+export const downloadAttachmentAction: EmailAction<
+  z.infer<typeof DownloadAttachmentInput>,
+  z.infer<typeof DownloadAttachmentOutput>
+> = {
+  name: 'download_attachment',
+  description: 'Download a single attachment as inline base64. Default max_size_mb=5 (hard ceiling 25). File attachments only — Microsoft item/reference attachments return NOT_SUPPORTED.',
+  input: DownloadAttachmentInput,
+  output: DownloadAttachmentOutput,
+  annotations: { readOnlyHint: true, destructiveHint: false },
+  run: async (ctx, input) => {
+    if (typeof ctx.provider.downloadAttachment !== 'function') {
+      return {
+        success: false,
+        error: {
+          code: 'NOT_SUPPORTED',
+          message: 'Provider does not support attachment download',
+          recoverable: false,
+        },
+      };
+    }
+
+    const attachments = ctx.provider.listAttachments
+      ? await ctx.provider.listAttachments(input.message_id)
+      : ((await ctx.provider.getMessage(input.message_id)).attachments ?? []);
+
+    const meta = attachments.find(a => a.id === input.attachment_id);
+    if (!meta) {
+      return {
+        success: false,
+        error: {
+          code: 'ATTACHMENT_NOT_FOUND',
+          message: `Attachment ${input.attachment_id} not found on message ${input.message_id}`,
+          recoverable: false,
+        },
+      };
+    }
+
+    const cap = input.max_size_mb * 1024 * 1024;
+    if (meta.size > cap) {
+      return {
+        success: false,
+        error: {
+          code: 'ATTACHMENT_TOO_LARGE',
+          message: `Attachment is ${meta.size} bytes; exceeds max_size_mb=${input.max_size_mb} (${cap} bytes)`,
+          recoverable: false,
+        },
+      };
+    }
+
+    let buf: Buffer;
+    try {
+      buf = await ctx.provider.downloadAttachment(input.message_id, input.attachment_id);
+    } catch (err) {
+      if (err instanceof AttachmentNotSupportedError) {
+        return {
+          success: false,
+          error: { code: 'NOT_SUPPORTED', message: err.message, recoverable: false },
+        };
+      }
+      throw err;
+    }
+
+    if (buf.length > cap) {
+      return {
+        success: false,
+        error: {
+          code: 'ATTACHMENT_TOO_LARGE',
+          message: `Downloaded attachment is ${buf.length} bytes; exceeds max_size_mb=${input.max_size_mb} (${cap} bytes)`,
+          recoverable: false,
+        },
+      };
+    }
+
+    return {
+      success: true,
+      filename: sanitizeFilename(meta.filename),
+      mimeType: meta.mimeType,
+      size: buf.length,
+      base64: buf.toString('base64'),
+    };
   },
 };
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { GraphEmailProvider, GraphApiError, RealGraphApiClient, simplifySearchQuery, type GraphApiClient } from './email-graph-provider.js';
+import { AttachmentNotSupportedError } from '@usejunior/email-core';
 
 // Linux CI runners do not provide libsecret, so auth imports must not load the real cache plugin.
 vi.mock('@azure/identity-cache-persistence', () => ({
@@ -33,6 +34,7 @@ const BASE_ATTACHMENT_PROPS = new Set([
 // the provider actually needs it — the explicit list is the guard.
 const ALLOWED_ATTACHMENT_CASTS = new Set([
   'microsoft.graph.fileAttachment/contentId',
+  'microsoft.graph.fileAttachment/contentBytes',
 ]);
 
 function assertAttachmentSelectValid(select: string): void {
@@ -48,7 +50,10 @@ function assertAttachmentSelectValid(select: string): void {
 
 function extractAttachmentSelects(url: string): string[] {
   const out: string[] = [];
-  if (/\/attachments(\?|$)/.test(url)) {
+  // Matches both collection (`/attachments?...`) and single-attachment
+  // (`/attachments/{id}?...`) URLs — both go through the polymorphic attachment
+  // type, so any $select on either needs OData type-cast for derived-only props.
+  if (/\/attachments(\/[^?]+)?(\?|$)/.test(url)) {
     const m = url.match(/[?&]\$select=([^&]+)/);
     if (m) out.push(decodeURIComponent(m[1]));
   }
@@ -226,6 +231,89 @@ describe('provider-microsoft/Message Mapping', () => {
       3,
       '/me/messages/msg-attachments/attachments?$select=id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId',
     );
+  });
+});
+
+describe('provider-microsoft/Attachment Download', () => {
+  it('Scenario: listAttachments fetches the attachment collection with the polymorphic $select cast', async () => {
+    const client = createSchemaValidatingClient([
+      {
+        value: [
+          {
+            id: 'att-pdf',
+            '@odata.type': '#microsoft.graph.fileAttachment',
+            name: 'contract.pdf',
+            contentType: 'application/pdf',
+            size: 245000,
+            isInline: false,
+          },
+        ],
+      },
+    ]);
+    const provider = new GraphEmailProvider(client);
+
+    const attachments = await provider.listAttachments('msg-1');
+
+    expect(attachments).toEqual([
+      {
+        id: 'att-pdf',
+        filename: 'contract.pdf',
+        mimeType: 'application/pdf',
+        size: 245000,
+        contentId: undefined,
+        isInline: false,
+      },
+    ]);
+    expect(client.get).toHaveBeenCalledWith(
+      '/me/messages/msg-1/attachments?$select=id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId',
+    );
+  });
+
+  it('Scenario: downloadAttachment decodes contentBytes and uses the fileAttachment $select cast', async () => {
+    const PAYLOAD = Buffer.from('hello world from a test attachment');
+    const client = createSchemaValidatingClient([
+      {
+        id: 'att-pdf',
+        '@odata.type': '#microsoft.graph.fileAttachment',
+        name: 'note.txt',
+        contentType: 'text/plain',
+        size: PAYLOAD.length,
+        contentBytes: PAYLOAD.toString('base64'),
+      },
+    ]);
+    const provider = new GraphEmailProvider(client);
+
+    const buf = await provider.downloadAttachment('msg-1', 'att-pdf');
+
+    expect(buf.equals(PAYLOAD)).toBe(true);
+    expect(client.get).toHaveBeenCalledWith(
+      '/me/messages/msg-1/attachments/att-pdf?$select=id,name,contentType,size,microsoft.graph.fileAttachment/contentBytes',
+    );
+  });
+
+  it('Scenario: downloadAttachment throws AttachmentNotSupportedError for itemAttachment (no contentBytes)', async () => {
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({
+        id: 'att-item',
+        '@odata.type': '#microsoft.graph.itemAttachment',
+        name: 'embedded.eml',
+        contentType: 'message/rfc822',
+        size: 1234,
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.downloadAttachment('msg-1', 'att-item')).rejects.toBeInstanceOf(AttachmentNotSupportedError);
+    await expect(provider.downloadAttachment('msg-1', 'att-item')).rejects.toThrow(/itemAttachment/);
+  });
+
+  it('Scenario: downloadAttachment surfaces 404 GraphApiError unchanged (action layer maps to PROVIDER_UNAVAILABLE)', async () => {
+    const client = createMockClient({
+      get: vi.fn().mockRejectedValue(new GraphApiError(404, '{"error":{"code":"ErrorItemNotFound"}}')),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.downloadAttachment('msg-1', 'att-missing')).rejects.toBeInstanceOf(GraphApiError);
   });
 });
 

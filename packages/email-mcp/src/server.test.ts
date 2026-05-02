@@ -178,8 +178,8 @@ describe('mcp-transport/Lazy Provider State', () => {
     // No init has been triggered — state is still 'pending'.
     const actions = await buildLazyActions(state, noAllowlist);
 
-    // 4 custom tools + 12 email-core actions = 16 tools, no auth performed.
-    expect(actions.length).toBe(16);
+    // 4 custom tools + 13 email-core actions = 17 tools, no auth performed.
+    expect(actions.length).toBe(17);
     expect(state.status).toBe('pending');
     expect(state.initPromise).toBeNull();
     expect(state.provider).toBeNull();
@@ -188,6 +188,7 @@ describe('mcp-transport/Lazy Provider State', () => {
     expect(tools.map(t => t.name)).toContain('list_emails');
     expect(tools.map(t => t.name)).toContain('get_mailbox_status');
     expect(tools.map(t => t.name)).toContain('list_attachments');
+    expect(tools.map(t => t.name)).toContain('download_attachment');
     expect(tools.map(t => t.name)).toContain('send_email');
   });
 
@@ -879,6 +880,79 @@ describe('mcp-transport/Lazy Provider State', () => {
         isInline: false,
       },
     ]);
+  });
+
+  it('Scenario: download_attachment uses the requested mailbox provider context', async () => {
+    const PAYLOAD = Buffer.from('hello attachment');
+    const workListAttachments = vi.fn().mockResolvedValue([]);
+    const workDownloadAttachment = vi.fn();
+    const personalListAttachments = vi.fn().mockResolvedValue([
+      { id: 'att-1', filename: 'note.txt', mimeType: 'text/plain', size: PAYLOAD.length, isInline: false },
+    ]);
+    const personalDownloadAttachment = vi.fn().mockResolvedValue(PAYLOAD);
+
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { listAttachments: workListAttachments, downloadAttachment: workDownloadAttachment } as never;
+    state.connectedMailbox = 'work@example.com';
+    state.connectedProvider = 'microsoft';
+    state.mailboxes = [
+      {
+        name: 'work',
+        emailAddress: 'work@example.com',
+        displayName: 'work@example.com',
+        providerType: 'microsoft',
+        provider: { listAttachments: workListAttachments, downloadAttachment: workDownloadAttachment } as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+      {
+        name: 'personal',
+        emailAddress: 'personal@example.com',
+        displayName: 'personal@example.com',
+        providerType: 'gmail',
+        provider: { listAttachments: personalListAttachments, downloadAttachment: personalDownloadAttachment } as never,
+        auth: null,
+        isDefault: false,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const downloadAttachment = actions.find(a => a.name === 'download_attachment')!;
+    const result = await downloadAttachment.run({}, {
+      mailbox: 'personal',
+      message_id: 'msg-1',
+      attachment_id: 'att-1',
+      max_size_mb: 5,
+    }) as { success: boolean; base64?: string };
+
+    expect(personalDownloadAttachment).toHaveBeenCalledWith('msg-1', 'att-1');
+    expect(workDownloadAttachment).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(Buffer.from(result.base64!, 'base64').equals(PAYLOAD)).toBe(true);
+  });
+
+  it('Scenario: download_attachment returns PROVIDER_UNAVAILABLE when init failed', async () => {
+    const state = createLazyProviderState();
+    state.status = 'error';
+    state.isDemo = true;
+    state.error = 'All configured mailboxes failed to authenticate';
+    state.initPromise = Promise.resolve();
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const downloadAttachment = actions.find(a => a.name === 'download_attachment')!;
+    const result = await downloadAttachment.run({}, {
+      message_id: 'msg-1',
+      attachment_id: 'att-1',
+      max_size_mb: 5,
+    }) as { success: boolean; error?: { code: string; message: string; recoverable: boolean } };
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('PROVIDER_UNAVAILABLE');
+    expect(result.error?.message).toMatch(/All configured mailboxes/);
   });
 
   it('Scenario: waitForInit returns immediately once a terminal state is reached', async () => {
