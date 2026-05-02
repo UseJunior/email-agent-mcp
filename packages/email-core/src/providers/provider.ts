@@ -93,6 +93,18 @@ export class ProviderError extends Error {
   }
 }
 
+// Thrown by providers when an attachment cannot be downloaded by this
+// implementation — e.g. Microsoft Graph item/reference attachments, which
+// require the /$value raw-bytes path. The download_attachment action remaps
+// this to a typed { code: 'NOT_SUPPORTED' } result instead of letting it
+// surface as PROVIDER_UNAVAILABLE.
+export class AttachmentNotSupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AttachmentNotSupportedError';
+  }
+}
+
 // Provider registry for dynamic discovery
 const providerRegistry = new Map<string, () => Promise<EmailProvider>>();
 

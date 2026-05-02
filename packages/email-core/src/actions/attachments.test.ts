@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MockEmailProvider } from '../testing/mock-provider.js';
-import { listAttachmentsAction, detectMimeType, validateAttachment, sanitizeFilename } from './attachments.js';
+import { listAttachmentsAction, downloadAttachmentAction, detectMimeType, validateAttachment, sanitizeFilename } from './attachments.js';
+import { AttachmentNotSupportedError } from '../providers/provider.js';
 import type { ActionContext } from './registry.js';
 
 let provider: MockEmailProvider;
@@ -38,6 +39,169 @@ describe('email-attachments/Download Attachments', () => {
       id: 'att2',
       isInline: true,
     });
+  });
+});
+
+describe('email-attachments/Download Attachment', () => {
+  const PDF_BYTES = Buffer.from('%PDF-1.4 fake pdf body for tests');
+
+  it('Scenario: Happy path returns sanitized filename, declared mimeType, and round-trippable base64', async () => {
+    provider.addMessage({
+      id: 'msg-dl',
+      hasAttachments: true,
+      attachments: [
+        { id: 'att-1', filename: 'Report (Final).pdf', mimeType: 'application/pdf', size: PDF_BYTES.length, isInline: false },
+      ],
+    });
+    provider.addAttachmentData('msg-dl', 'att-1', PDF_BYTES);
+
+    const result = await downloadAttachmentAction.run(ctx, {
+      message_id: 'msg-dl',
+      attachment_id: 'att-1',
+      max_size_mb: 5,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.mimeType).toBe('application/pdf');
+    expect(result.size).toBe(PDF_BYTES.length);
+    expect(result.filename).not.toContain('(');
+    expect(result.filename).toMatch(/\.pdf$/);
+    expect(Buffer.from(result.base64!, 'base64').equals(PDF_BYTES)).toBe(true);
+  });
+
+  it('Scenario: Pre-download size rejection — declared size exceeds cap, downloadAttachment is not called', async () => {
+    provider.addMessage({
+      id: 'msg-big',
+      hasAttachments: true,
+      attachments: [
+        { id: 'att-big', filename: 'huge.pdf', mimeType: 'application/pdf', size: 2 * 1024 * 1024, isInline: false },
+      ],
+    });
+    provider.addAttachmentData('msg-big', 'att-big', Buffer.alloc(2 * 1024 * 1024));
+    const downloadSpy = vi.spyOn(provider, 'downloadAttachment');
+
+    const result = await downloadAttachmentAction.run(ctx, {
+      message_id: 'msg-big',
+      attachment_id: 'att-big',
+      max_size_mb: 1,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('ATTACHMENT_TOO_LARGE');
+    expect(result.error?.message).toMatch(/exceeds max_size_mb=1/);
+    expect(downloadSpy).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Post-download size rejection — provider lies about size, actual buffer overruns the cap', async () => {
+    const declaredSize = 100;
+    const actualBuf = Buffer.alloc(2 * 1024 * 1024);
+    provider.addMessage({
+      id: 'msg-liar',
+      hasAttachments: true,
+      attachments: [
+        { id: 'att-liar', filename: 'liar.bin', mimeType: 'application/octet-stream', size: declaredSize, isInline: false },
+      ],
+    });
+    provider.addAttachmentData('msg-liar', 'att-liar', actualBuf);
+
+    const result = await downloadAttachmentAction.run(ctx, {
+      message_id: 'msg-liar',
+      attachment_id: 'att-liar',
+      max_size_mb: 1,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('ATTACHMENT_TOO_LARGE');
+    expect(result.error?.message).toMatch(new RegExp(`${actualBuf.length} bytes`));
+  });
+
+  it('Scenario: NOT_SUPPORTED when provider lacks downloadAttachment', async () => {
+    const stubCtx: ActionContext = { provider: { getMessage: async () => ({ attachments: [] }) } as never };
+
+    const result = await downloadAttachmentAction.run(stubCtx, {
+      message_id: 'msg-x',
+      attachment_id: 'att-x',
+      max_size_mb: 5,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('NOT_SUPPORTED');
+  });
+
+  it('Scenario: ATTACHMENT_NOT_FOUND when attachment id is missing from listAttachments', async () => {
+    provider.addMessage({
+      id: 'msg-empty',
+      hasAttachments: true,
+      attachments: [
+        { id: 'att-other', filename: 'other.pdf', mimeType: 'application/pdf', size: 10, isInline: false },
+      ],
+    });
+
+    const result = await downloadAttachmentAction.run(ctx, {
+      message_id: 'msg-empty',
+      attachment_id: 'att-missing',
+      max_size_mb: 5,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('ATTACHMENT_NOT_FOUND');
+  });
+
+  it('Scenario: NOT_SUPPORTED when provider throws AttachmentNotSupportedError during download (e.g. Graph itemAttachment)', async () => {
+    provider.addMessage({
+      id: 'msg-item',
+      hasAttachments: true,
+      attachments: [
+        { id: 'att-item', filename: 'embedded.eml', mimeType: 'message/rfc822', size: 1000, isInline: false },
+      ],
+    });
+    vi.spyOn(provider, 'downloadAttachment').mockRejectedValue(
+      new AttachmentNotSupportedError('Attachment att-item has @odata.type=#microsoft.graph.itemAttachment'),
+    );
+
+    const result = await downloadAttachmentAction.run(ctx, {
+      message_id: 'msg-item',
+      attachment_id: 'att-item',
+      max_size_mb: 5,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('NOT_SUPPORTED');
+    expect(result.error?.message).toMatch(/itemAttachment/);
+  });
+
+  it('Scenario: Network errors are NOT swallowed as ATTACHMENT_NOT_FOUND — must propagate so wrapAction returns PROVIDER_UNAVAILABLE', async () => {
+    vi.spyOn(provider, 'listAttachments').mockRejectedValue(new Error('Network unreachable'));
+
+    await expect(
+      downloadAttachmentAction.run(ctx, {
+        message_id: 'msg-any',
+        attachment_id: 'att-any',
+        max_size_mb: 5,
+      }),
+    ).rejects.toThrow('Network unreachable');
+  });
+
+  it('Scenario: Gmail synthetic part:* attachment IDs are passed through unchanged to the provider', async () => {
+    const PART_ID = 'part:1.0';
+    provider.addMessage({
+      id: 'msg-inline',
+      hasAttachments: true,
+      attachments: [
+        { id: PART_ID, filename: 'logo.png', mimeType: 'image/png', size: 4, isInline: true, contentId: 'image001' },
+      ],
+    });
+    provider.addAttachmentData('msg-inline', PART_ID, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const downloadSpy = vi.spyOn(provider, 'downloadAttachment');
+
+    const result = await downloadAttachmentAction.run(ctx, {
+      message_id: 'msg-inline',
+      attachment_id: PART_ID,
+      max_size_mb: 5,
+    });
+
+    expect(result.success).toBe(true);
+    expect(downloadSpy).toHaveBeenCalledWith('msg-inline', PART_ID);
   });
 });
 

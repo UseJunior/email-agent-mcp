@@ -11,7 +11,9 @@ import type {
   EmailReader,
   EmailSender,
   EmailCategorizer,
+  EmailAttachmentHandler,
 } from '@usejunior/email-core';
+import { AttachmentNotSupportedError } from '@usejunior/email-core';
 
 const BODY_SIZE_LIMIT = 3.5 * 1024 * 1024; // 3.5MB
 const SUBJECT_MAX_LENGTH = 255;
@@ -151,7 +153,7 @@ export class GraphApiError extends Error {
   }
 }
 
-export class GraphEmailProvider implements EmailReader, EmailSender, EmailCategorizer {
+export class GraphEmailProvider implements EmailReader, EmailSender, EmailCategorizer, EmailAttachmentHandler {
   private client: GraphApiClient;
   private basePath: string;
 
@@ -254,6 +256,43 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     }
 
     return { id: messageId, subject: message.subject, messages: [message], messageCount: 1 };
+  }
+
+  // EmailAttachmentHandler — cheap metadata-only fetch. The download_attachment
+  // action prefers this over getMessage to avoid pulling the full HTML body.
+  async listAttachments(messageId: string): Promise<EmailAttachment[]> {
+    const response = await this.client.get(
+      `${this.basePath}/messages/${messageId}/attachments?$select=${ATTACHMENT_SELECT}`,
+    );
+    return ((response.value ?? []) as GraphAttachment[]).map(a => ({
+      id: a.id,
+      filename: a.name ?? '',
+      mimeType: a.contentType ?? 'application/octet-stream',
+      size: a.size ?? 0,
+      isInline: a.isInline ?? false,
+      contentId: a.contentId,
+    }));
+  }
+
+  // Returns base64-decoded bytes for fileAttachment only. itemAttachment and
+  // referenceAttachment lack contentBytes and require the /$value raw-bytes
+  // endpoint, which is not yet wired into RealGraphApiClient — those throw
+  // AttachmentNotSupportedError so the action layer surfaces NOT_SUPPORTED
+  // instead of a generic provider failure.
+  //   fileAttachment: https://learn.microsoft.com/en-us/graph/api/resources/fileattachment
+  //   GET attachment: https://learn.microsoft.com/en-us/graph/api/attachment-get
+  async downloadAttachment(messageId: string, attachmentId: string): Promise<Buffer> {
+    const select = 'id,name,contentType,size,microsoft.graph.fileAttachment/contentBytes';
+    const response = await this.client.get(
+      `${this.basePath}/messages/${messageId}/attachments/${attachmentId}?$select=${select}`,
+    ) as unknown as GraphAttachment;
+    if (typeof response.contentBytes !== 'string') {
+      const odataType = response['@odata.type'] ?? 'unknown';
+      throw new AttachmentNotSupportedError(
+        `Attachment ${attachmentId} has @odata.type=${odataType}; only fileAttachment is supported in this version (item/reference attachments require /$value raw-bytes which is not yet implemented)`,
+      );
+    }
+    return Buffer.from(response.contentBytes, 'base64');
   }
 
   async applyLabels(messageId: string, labels: string[]): Promise<void> {
@@ -518,6 +557,7 @@ interface GraphAttachment {
   size?: number;
   isInline?: boolean;
   contentId?: string;
+  contentBytes?: string;
 }
 
 /** A single item in a delta response — may include @removed for tombstones */

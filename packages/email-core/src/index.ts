@@ -17,9 +17,11 @@ export type {
   EmailSender,
   EmailSubscriber,
   EmailCategorizer,
+  EmailAttachmentHandler,
   EmailProvider,
   AuthManager,
 } from './providers/provider.js';
+export { AttachmentNotSupportedError } from './providers/provider.js';
 export {
   isAllowedSender,
   loadReceiveAllowlist,
@@ -38,7 +40,7 @@ export { sendEmailAction } from './actions/send.js';
 export { replyToEmailAction } from './actions/reply.js';
 export { createDraftAction, sendDraftAction, updateDraftAction } from './actions/draft.js';
 export { getThreadAction } from './actions/conversation.js';
-export { listAttachmentsAction } from './actions/attachments.js';
+export { listAttachmentsAction, downloadAttachmentAction } from './actions/attachments.js';
 export { labelEmailAction, flagEmailAction, markReadAction, deleteEmailAction } from './actions/label.js';
 export { moveToFolderAction } from './actions/move.js';
 export { parseFrontmatter } from './content/frontmatter.js';
