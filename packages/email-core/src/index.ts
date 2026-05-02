@@ -18,10 +18,11 @@ export type {
   EmailSubscriber,
   EmailCategorizer,
   EmailAttachmentHandler,
+  DownloadedAttachment,
   EmailProvider,
   AuthManager,
 } from './providers/provider.js';
-export { AttachmentNotSupportedError } from './providers/provider.js';
+export { AttachmentNotSupportedError, AttachmentNotFoundError } from './providers/provider.js';
 export {
   isAllowedSender,
   loadReceiveAllowlist,

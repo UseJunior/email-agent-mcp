@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { GraphEmailProvider, GraphApiError, RealGraphApiClient, simplifySearchQuery, type GraphApiClient } from './email-graph-provider.js';
-import { AttachmentNotSupportedError } from '@usejunior/email-core';
+import { AttachmentNotSupportedError, AttachmentNotFoundError } from '@usejunior/email-core';
 
 // Linux CI runners do not provide libsecret, so auth imports must not load the real cache plugin.
 vi.mock('@azure/identity-cache-persistence', () => ({
@@ -283,12 +283,68 @@ describe('provider-microsoft/Attachment Download', () => {
     ]);
     const provider = new GraphEmailProvider(client);
 
-    const buf = await provider.downloadAttachment('msg-1', 'att-pdf');
+    const result = await provider.downloadAttachment('msg-1', 'att-pdf');
 
-    expect(buf.equals(PAYLOAD)).toBe(true);
+    expect(result.content.equals(PAYLOAD)).toBe(true);
+    expect(result.filename).toBe('note.txt');
+    expect(result.mimeType).toBe('text/plain');
+    expect(result.size).toBe(PAYLOAD.length);
     expect(client.get).toHaveBeenCalledWith(
       '/me/messages/msg-1/attachments/att-pdf?$select=id,name,contentType,size,microsoft.graph.fileAttachment/contentBytes',
     );
+  });
+
+  it('Scenario: downloadAttachment URL-encodes message and attachment ids that contain /, +, =', async () => {
+    const PAYLOAD = Buffer.from('encoded id payload');
+    const client = createSchemaValidatingClient([
+      {
+        id: 'AAA/BBB+CCC=',
+        '@odata.type': '#microsoft.graph.fileAttachment',
+        name: 'a.bin',
+        contentType: 'application/octet-stream',
+        size: PAYLOAD.length,
+        contentBytes: PAYLOAD.toString('base64'),
+      },
+    ]);
+    const provider = new GraphEmailProvider(client);
+
+    await provider.downloadAttachment('AAMkAGI/=msg+id', 'AAA/BBB+CCC=');
+
+    const calledWith = (client.get as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(calledWith).toContain('/messages/AAMkAGI%2F%3Dmsg%2Bid/attachments/AAA%2FBBB%2BCCC%3D');
+    expect(calledWith).not.toContain('AAMkAGI/=msg+id');
+  });
+
+  it('Scenario: listAttachments URL-encodes the message id', async () => {
+    const client = createSchemaValidatingClient([{ value: [] }]);
+    const provider = new GraphEmailProvider(client);
+
+    await provider.listAttachments('AAMkA/+=raw');
+
+    const calledWith = (client.get as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(calledWith).toContain('/messages/AAMkA%2F%2B%3Draw/attachments');
+  });
+
+  it('Scenario: getMessage URL-encodes the message id (verifies the codebase-wide encoder applies beyond download paths)', async () => {
+    // Cross-method check: the `encodeGraphPathId` helper must wrap IDs at every
+    // path-segment interpolation, not just on the new attachment endpoints.
+    // getMessage was a pre-existing call site and should also encode.
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({
+        id: 'AAA/BBB+id=',
+        subject: 'encoded',
+        from: { emailAddress: { address: 's@e.com' } },
+        toRecipients: [],
+        receivedDateTime: '2026-04-09T00:00:00Z',
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.getMessage('AAA/BBB+id=');
+
+    const calledWith = (client.get as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(calledWith).toContain('/messages/AAA%2FBBB%2Bid%3D');
+    expect(calledWith).not.toContain('/messages/AAA/BBB+id=');
   });
 
   it('Scenario: downloadAttachment throws AttachmentNotSupportedError for itemAttachment (no contentBytes)', async () => {
@@ -307,13 +363,55 @@ describe('provider-microsoft/Attachment Download', () => {
     await expect(provider.downloadAttachment('msg-1', 'att-item')).rejects.toThrow(/itemAttachment/);
   });
 
-  it('Scenario: downloadAttachment surfaces 404 GraphApiError unchanged (action layer maps to PROVIDER_UNAVAILABLE)', async () => {
+  it('Scenario: downloadAttachment maps Graph 404 to AttachmentNotFoundError (race-deleted)', async () => {
     const client = createMockClient({
       get: vi.fn().mockRejectedValue(new GraphApiError(404, '{"error":{"code":"ErrorItemNotFound"}}')),
     });
     const provider = new GraphEmailProvider(client);
 
-    await expect(provider.downloadAttachment('msg-1', 'att-missing')).rejects.toBeInstanceOf(GraphApiError);
+    await expect(provider.downloadAttachment('msg-1', 'att-missing')).rejects.toBeInstanceOf(AttachmentNotFoundError);
+  });
+
+  it('Scenario: downloadAttachment surfaces non-404 GraphApiError unchanged', async () => {
+    const client = createMockClient({
+      get: vi.fn().mockRejectedValue(new GraphApiError(500, '{"error":{"code":"InternalServerError"}}')),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.downloadAttachment('msg-1', 'att-x')).rejects.toBeInstanceOf(GraphApiError);
+  });
+
+  it('Scenario: downloadAttachment rejects malformed base64 in contentBytes', async () => {
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({
+        id: 'att-bad',
+        '@odata.type': '#microsoft.graph.fileAttachment',
+        name: 'bad.bin',
+        contentType: 'application/octet-stream',
+        size: 4,
+        contentBytes: '!!!not_base64$$$',
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.downloadAttachment('msg-1', 'att-bad')).rejects.toThrow(/invalid base64/);
+  });
+
+  it('Scenario: downloadAttachment rejects size mismatch between Graph-reported size and decoded length', async () => {
+    const PAYLOAD = Buffer.from('actual bytes');
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({
+        id: 'att-mismatch',
+        '@odata.type': '#microsoft.graph.fileAttachment',
+        name: 'mismatch.bin',
+        contentType: 'application/octet-stream',
+        size: 9999, // lies — actual decoded length is PAYLOAD.length
+        contentBytes: PAYLOAD.toString('base64'),
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.downloadAttachment('msg-1', 'att-mismatch')).rejects.toThrow(/does not match/);
   });
 });
 

@@ -12,11 +12,13 @@ import type {
 } from '../types.js';
 import {
   ProviderError,
+  AttachmentNotFoundError,
   type EmailReader,
   type EmailSender,
   type EmailSubscriber,
   type EmailCategorizer,
   type EmailAttachmentHandler,
+  type DownloadedAttachment,
 } from '../providers/provider.js';
 
 export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscriber, EmailCategorizer, EmailAttachmentHandler {
@@ -368,10 +370,17 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
     return msg.attachments ?? [];
   }
 
-  async downloadAttachment(messageId: string, attachmentId: string): Promise<Buffer> {
+  async downloadAttachment(messageId: string, attachmentId: string): Promise<DownloadedAttachment> {
     this.maybeThrow();
     const data = this.attachmentData.get(`${messageId}:${attachmentId}`);
-    if (!data) throw new Error(`Attachment not found: ${attachmentId}`);
-    return data;
+    if (!data) throw new AttachmentNotFoundError(`Attachment not found: ${attachmentId}`);
+    const msg = this.messages.find(m => m.id === messageId);
+    const meta = msg?.attachments?.find(a => a.id === attachmentId);
+    return {
+      content: data,
+      filename: meta?.filename ?? attachmentId,
+      mimeType: meta?.mimeType ?? 'application/octet-stream',
+      size: data.length,
+    };
   }
 }

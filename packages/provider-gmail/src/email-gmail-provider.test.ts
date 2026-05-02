@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { GmailEmailProvider, type GmailApiClient } from './email-gmail-provider.js';
+import { AttachmentNotFoundError } from '@usejunior/email-core';
 
 function createMockGmailClient(overrides: Partial<GmailApiClient> = {}): GmailApiClient {
   return {
@@ -234,14 +235,15 @@ describe('provider-gmail/NemoClaw Compatibility', () => {
 });
 
 describe('provider-gmail/Attachment Retrieval', () => {
-  it('Scenario: downloadAttachment fetches Gmail attachment bytes by attachment id', async () => {
+  it('Scenario: downloadAttachment fetches Gmail attachment bytes by attachment id and returns metadata', async () => {
     const client = createMockGmailClient();
     const provider = new GmailEmailProvider(client);
 
-    const bytes = await provider.downloadAttachment('msg-1', 'att-1');
+    const result = await provider.downloadAttachment('msg-1', 'att-1');
 
     expect(client.getAttachment).toHaveBeenCalledWith('msg-1', 'att-1');
-    expect(bytes.toString('utf-8')).toBe('attachment bytes');
+    expect(result.content.toString('utf-8')).toBe('attachment bytes');
+    expect(result.size).toBe(result.content.length);
   });
 
   it('Scenario: downloadAttachment falls back to inline part data for synthetic ids', async () => {
@@ -258,6 +260,7 @@ describe('provider-gmail/Attachment Retrieval', () => {
           parts: [
             {
               mimeType: 'image/png',
+              filename: 'logo.png',
               body: { data: Buffer.from('tiny-image').toString('base64url') },
               headers: [{ name: 'Content-ID', value: '<image002>' }],
             },
@@ -267,10 +270,96 @@ describe('provider-gmail/Attachment Retrieval', () => {
     });
     const provider = new GmailEmailProvider(client);
 
-    const bytes = await provider.downloadAttachment('msg-inline-body', 'part:0');
+    const result = await provider.downloadAttachment('msg-inline-body', 'part:0');
 
     expect(client.getAttachment).not.toHaveBeenCalled();
-    expect(bytes.toString('utf-8')).toBe('tiny-image');
+    expect(result.content.toString('utf-8')).toBe('tiny-image');
+    expect(result.filename).toBe('logo.png');
+    expect(result.mimeType).toBe('image/png');
+  });
+
+  it('Scenario: downloadAttachment falls back to Content-ID when an inline part has no filename', async () => {
+    // Mirrors collectPayloadContent's filename derivation — without this, the
+    // post-#67 contract reshape regressed CID-only inline parts to empty names.
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue({
+        id: 'msg-cid',
+        threadId: 'thread-cid',
+        payload: {
+          headers: [],
+          parts: [
+            {
+              mimeType: 'image/png',
+              body: { data: Buffer.from('cid-image').toString('base64url') },
+              headers: [{ name: 'Content-ID', value: '<image003>' }],
+            },
+          ],
+        },
+      }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const result = await provider.downloadAttachment('msg-cid', 'part:0');
+    expect(result.filename).toBe('image003');
+  });
+
+  it('Scenario: downloadAttachment falls back to attachment-<path> when neither filename nor Content-ID exists', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue({
+        id: 'msg-bare',
+        threadId: 'thread-bare',
+        payload: {
+          headers: [],
+          parts: [
+            {
+              mimeType: 'application/octet-stream',
+              body: { attachmentId: 'att-bare-1', size: 4 },
+              headers: [],
+            },
+          ],
+        },
+      }),
+      getAttachment: vi.fn().mockResolvedValue({ data: Buffer.from('bare').toString('base64url') }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const result = await provider.downloadAttachment('msg-bare', 'att-bare-1');
+    expect(result.filename).toBe('attachment-0');
+  });
+
+  it('Scenario: downloadAttachment maps Gmail 404 on the attachment endpoint to AttachmentNotFoundError', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue({
+        id: 'msg-1',
+        threadId: 'thread-1',
+        payload: { headers: [], parts: [{ mimeType: 'application/pdf', body: { attachmentId: 'att-gone' }, headers: [] }] },
+      }),
+      getAttachment: vi.fn().mockRejectedValue({ code: 404, message: 'Requested entity was not found' }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.downloadAttachment('msg-1', 'att-gone'))
+      .rejects.toBeInstanceOf(AttachmentNotFoundError);
+  });
+
+  it('Scenario: downloadAttachment maps Gmail 404 on the message endpoint to AttachmentNotFoundError (part:* synthetic id)', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockRejectedValue({ response: { status: 404 } }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.downloadAttachment('msg-deleted', 'part:0'))
+      .rejects.toBeInstanceOf(AttachmentNotFoundError);
+  });
+
+  it('Scenario: downloadAttachment propagates non-404 errors unchanged (action layer maps to PROVIDER_UNAVAILABLE)', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockRejectedValue({ code: 500, message: 'Internal error' }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.downloadAttachment('msg-1', 'att-1'))
+      .rejects.toMatchObject({ code: 500 });
   });
 });
 

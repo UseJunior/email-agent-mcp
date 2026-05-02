@@ -52,8 +52,85 @@ describe('mcp-transport/stdio Transport', () => {
 
     expect(result.content).toHaveLength(1);
     expect(result.content[0]!.type).toBe('text');
-    const parsed = JSON.parse(result.content[0]!.text);
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
     expect(parsed.emails).toBeDefined();
+  });
+
+  it('Scenario: download_attachment emits typed resource content alongside text metadata', async () => {
+    // Bytes go in a `resource` content item (typed binary), not stuffed inside
+    // the text JSON envelope. The text item still carries metadata so clients
+    // that only parse text still get filename/size/mimeType.
+    const PAYLOAD = Buffer.from('hello attachment bytes');
+    const downloadActions: EmailActionDef[] = [
+      {
+        name: 'download_attachment',
+        description: 'Download',
+        input: z.object({
+          message_id: z.string(),
+          attachment_id: z.string(),
+          mailbox: z.string().optional(),
+          max_size_mb: z.number().optional(),
+        }),
+        output: z.object({
+          success: z.boolean(),
+          base64: z.string().optional(),
+          mimeType: z.string().optional(),
+          filename: z.string().optional(),
+        }),
+        annotations: { readOnlyHint: true, destructiveHint: false },
+        run: async () => ({
+          success: true,
+          base64: PAYLOAD.toString('base64'),
+          mimeType: 'application/pdf',
+          filename: 'note.pdf',
+          original_filename: 'note.pdf',
+          size: PAYLOAD.length,
+        }),
+      },
+    ];
+
+    const result = await handleToolCall(downloadActions, {}, 'download_attachment', {
+      mailbox: 'work',
+      message_id: 'msg-1',
+      attachment_id: 'att-1',
+    });
+
+    expect(result.content).toHaveLength(2);
+    expect(result.content[0]!.type).toBe('text');
+    const metadata = JSON.parse((result.content[0] as { text: string }).text);
+    expect(metadata).not.toHaveProperty('base64');
+    expect(metadata.filename).toBe('note.pdf');
+    expect(metadata.mimeType).toBe('application/pdf');
+
+    expect(result.content[1]!.type).toBe('resource');
+    const resourceContent = result.content[1] as { resource: { uri: string; mimeType?: string; blob?: string } };
+    expect(resourceContent.resource.mimeType).toBe('application/pdf');
+    expect(resourceContent.resource.uri).toBe('attachment://work/msg-1/att-1');
+    expect(Buffer.from(resourceContent.resource.blob!, 'base64').equals(PAYLOAD)).toBe(true);
+  });
+
+  it('Scenario: download_attachment failure case still uses single text envelope', async () => {
+    const downloadActions: EmailActionDef[] = [
+      {
+        name: 'download_attachment',
+        description: 'Download',
+        input: z.object({ message_id: z.string(), attachment_id: z.string() }),
+        output: z.object({ success: z.boolean() }),
+        annotations: { readOnlyHint: true, destructiveHint: false },
+        run: async () => ({
+          success: false,
+          error: { code: 'NOT_SUPPORTED', message: 'no go', recoverable: false },
+        }),
+      },
+    ];
+
+    const result = await handleToolCall(downloadActions, {}, 'download_attachment', {
+      message_id: 'msg-1',
+      attachment_id: 'att-1',
+    });
+
+    expect(result.content).toHaveLength(1);
+    expect(result.content[0]!.type).toBe('text');
   });
 });
 
@@ -874,6 +951,7 @@ describe('mcp-transport/Lazy Provider State', () => {
       {
         id: 'att-1',
         filename: 'license.jpeg',
+        original_filename: 'license.jpeg',
         mimeType: 'image/jpeg',
         size: 692702,
         contentId: undefined,
@@ -889,7 +967,12 @@ describe('mcp-transport/Lazy Provider State', () => {
     const personalListAttachments = vi.fn().mockResolvedValue([
       { id: 'att-1', filename: 'note.txt', mimeType: 'text/plain', size: PAYLOAD.length, isInline: false },
     ]);
-    const personalDownloadAttachment = vi.fn().mockResolvedValue(PAYLOAD);
+    const personalDownloadAttachment = vi.fn().mockResolvedValue({
+      content: PAYLOAD,
+      filename: 'note.txt',
+      mimeType: 'text/plain',
+      size: PAYLOAD.length,
+    });
 
     const state = createLazyProviderState();
     state.status = 'connected';
@@ -1095,7 +1178,7 @@ describe('mcp-transport/Scalar Coercion at Boundary', () => {
       },
     ];
     const result = await handleToolCall(echoActions, {}, 'echo', { flag: 'true', n: '42' });
-    const parsed = JSON.parse(result.content[0]!.text);
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
     expect(parsed).toEqual({ flag: true, n: 42 });
   });
 
@@ -1136,7 +1219,7 @@ describe('mcp-transport/Scalar Coercion at Boundary', () => {
     expect(deleteMessage).not.toHaveBeenCalled();
 
     // The action should return a policy error indicating the missing consent.
-    const parsed = JSON.parse(result.content[0]!.text);
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
     expect(parsed.success).toBe(false);
     expect(parsed.error.message).toMatch(/user_explicitly_requested_deletion must be true/);
   });
@@ -1169,7 +1252,7 @@ describe('mcp-transport/Scalar Coercion at Boundary', () => {
     });
 
     expect(deleteMessage).toHaveBeenCalledWith('msg-1', false);
-    const parsed = JSON.parse(result.content[0]!.text);
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
     expect(parsed.success).toBe(true);
   });
 });

@@ -12,8 +12,9 @@ import type {
   EmailSender,
   EmailCategorizer,
   EmailAttachmentHandler,
+  DownloadedAttachment,
 } from '@usejunior/email-core';
-import { AttachmentNotSupportedError } from '@usejunior/email-core';
+import { AttachmentNotSupportedError, AttachmentNotFoundError } from '@usejunior/email-core';
 
 const BODY_SIZE_LIMIT = 3.5 * 1024 * 1024; // 3.5MB
 const SUBJECT_MAX_LENGTH = 255;
@@ -52,6 +53,13 @@ const DELTA_SELECT = '$select=subject,from,toRecipients,ccRecipients,receivedDat
 //   base attachment: https://learn.microsoft.com/en-us/graph/api/resources/attachment?view=graph-rest-1.0
 //   fileAttachment:  https://learn.microsoft.com/en-us/graph/api/resources/fileattachment?view=graph-rest-1.0
 const ATTACHMENT_SELECT = 'id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId';
+
+// Graph message and attachment IDs are base64url-flavored and routinely contain
+// `=`, `+`, `/`, `_`, `-`. Path segments must encode `+`, `/`, and `=` or Graph
+// returns 400/404. encodeURIComponent handles all three plus `?`, `#`, `&`.
+function encodeGraphPathId(id: string): string {
+  return encodeURIComponent(id);
+}
 
 /** Result from delta query, including messages and the deltaLink for persistence */
 export interface DeltaResult {
@@ -175,13 +183,14 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     if (filters.length > 0) params.set('$filter', filters.join(' and '));
 
     const folder = normalizeFolderId(opts.folder ?? 'inbox');
-    const url = `${this.basePath}/mailFolders/${folder}/messages?${params}`;
+    const url = `${this.basePath}/mailFolders/${encodeGraphPathId(folder)}/messages?${params}`;
     const response = await this.client.get(url);
     return ((response.value ?? []) as GraphMessage[]).map(mapGraphMessage);
   }
 
   async getMessage(id: string): Promise<EmailMessage> {
-    const expandedUrl = `${this.basePath}/messages/${id}?$expand=attachments($select=${ATTACHMENT_SELECT})`;
+    const encodedId = encodeGraphPathId(id);
+    const expandedUrl = `${this.basePath}/messages/${encodedId}?$expand=attachments($select=${ATTACHMENT_SELECT})`;
 
     try {
       const response = await this.client.get(expandedUrl) as unknown as GraphMessage;
@@ -192,9 +201,9 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       if (!(err instanceof GraphApiError) || err.status !== 400) throw err;
     }
 
-    const message = await this.client.get(`${this.basePath}/messages/${id}`) as unknown as GraphMessage;
+    const message = await this.client.get(`${this.basePath}/messages/${encodedId}`) as unknown as GraphMessage;
     const attachments = await this.client.get(
-      `${this.basePath}/messages/${id}/attachments?$select=${ATTACHMENT_SELECT}`,
+      `${this.basePath}/messages/${encodedId}/attachments?$select=${ATTACHMENT_SELECT}`,
     );
 
     return mapGraphMessage({
@@ -212,7 +221,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     if (offset) params.set('$skip', String(offset));
     const normalizedFolder = folder ? normalizeFolderId(folder) : undefined;
     const base = normalizedFolder
-      ? `${this.basePath}/mailFolders/${normalizedFolder}/messages`
+      ? `${this.basePath}/mailFolders/${encodeGraphPathId(normalizedFolder)}/messages`
       : `${this.basePath}/messages`;
 
     try {
@@ -258,11 +267,12 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     return { id: messageId, subject: message.subject, messages: [message], messageCount: 1 };
   }
 
-  // EmailAttachmentHandler — cheap metadata-only fetch. The download_attachment
-  // action prefers this over getMessage to avoid pulling the full HTML body.
+  // EmailAttachmentHandler — cheap metadata-only fetch. Used by callers that
+  // want metadata without bytes (e.g. `list_attachments`); downloadAttachment
+  // does its own single-call fetch and does not preflight through this method.
   async listAttachments(messageId: string): Promise<EmailAttachment[]> {
     const response = await this.client.get(
-      `${this.basePath}/messages/${messageId}/attachments?$select=${ATTACHMENT_SELECT}`,
+      `${this.basePath}/messages/${encodeGraphPathId(messageId)}/attachments?$select=${ATTACHMENT_SELECT}`,
     );
     return ((response.value ?? []) as GraphAttachment[]).map(a => ({
       id: a.id,
@@ -274,53 +284,90 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     }));
   }
 
-  // Returns base64-decoded bytes for fileAttachment only. itemAttachment and
+  // Returns bytes + fresh metadata for fileAttachment only. itemAttachment and
   // referenceAttachment lack contentBytes and require the /$value raw-bytes
   // endpoint, which is not yet wired into RealGraphApiClient — those throw
   // AttachmentNotSupportedError so the action layer surfaces NOT_SUPPORTED
-  // instead of a generic provider failure.
+  // instead of a generic provider failure. A 404 from Graph maps to
+  // AttachmentNotFoundError so race-deleted attachments surface uniformly.
   //   fileAttachment: https://learn.microsoft.com/en-us/graph/api/resources/fileattachment
   //   GET attachment: https://learn.microsoft.com/en-us/graph/api/attachment-get
-  async downloadAttachment(messageId: string, attachmentId: string): Promise<Buffer> {
+  async downloadAttachment(messageId: string, attachmentId: string): Promise<DownloadedAttachment> {
     const select = 'id,name,contentType,size,microsoft.graph.fileAttachment/contentBytes';
-    const response = await this.client.get(
-      `${this.basePath}/messages/${messageId}/attachments/${attachmentId}?$select=${select}`,
-    ) as unknown as GraphAttachment;
+    const url = `${this.basePath}/messages/${encodeGraphPathId(messageId)}/attachments/${encodeGraphPathId(attachmentId)}?$select=${select}`;
+    let response: GraphAttachment;
+    try {
+      response = await this.client.get(url) as unknown as GraphAttachment;
+    } catch (err) {
+      if (err instanceof GraphApiError && err.status === 404) {
+        throw new AttachmentNotFoundError(
+          `Attachment ${attachmentId} not found on message ${messageId}`,
+        );
+      }
+      throw err;
+    }
     if (typeof response.contentBytes !== 'string') {
       const odataType = response['@odata.type'] ?? 'unknown';
       throw new AttachmentNotSupportedError(
         `Attachment ${attachmentId} has @odata.type=${odataType}; only fileAttachment is supported in this version (item/reference attachments require /$value raw-bytes which is not yet implemented)`,
       );
     }
-    return Buffer.from(response.contentBytes, 'base64');
+    // Reject obviously malformed base64 before decode. Buffer.from silently
+    // strips invalid chars and can return truncated bytes, so guard explicitly.
+    // Strip whitespace first — some Graph backends emit MIME-style line-broken
+    // base64 in contentBytes, which is still valid; the regex below rejects
+    // genuinely garbage payloads like "!!!not_base64$$$".
+    const cleanedBytes = response.contentBytes.replace(/\s+/g, '');
+    if (!/^[A-Za-z0-9+/]*=*$/.test(cleanedBytes)) {
+      throw new GraphApiError(
+        500,
+        `Attachment ${attachmentId} contentBytes contains invalid base64 characters`,
+      );
+    }
+    const content = Buffer.from(cleanedBytes, 'base64');
+    // Compare decoded length to the size Graph reported on the same response.
+    // A mismatch signals truncation in transit or a malformed contentBytes
+    // payload — return a hard error rather than corrupt bytes.
+    if (typeof response.size === 'number' && content.length !== response.size) {
+      throw new GraphApiError(
+        500,
+        `Attachment ${attachmentId} decoded length ${content.length} does not match Graph-reported size ${response.size}`,
+      );
+    }
+    return {
+      content,
+      filename: response.name ?? '',
+      mimeType: response.contentType ?? 'application/octet-stream',
+      size: response.size ?? content.length,
+    };
   }
 
   async applyLabels(messageId: string, labels: string[]): Promise<void> {
     const existingCategories = await this.getMessageCategories(messageId);
     const categories = [...new Set([...existingCategories, ...labels])];
-    await this.client.patch(`${this.basePath}/messages/${messageId}`, { categories });
+    await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(messageId)}`, { categories });
   }
 
   async removeLabels(messageId: string, labels: string[]): Promise<void> {
     const labelsToRemove = new Set(labels);
     const existingCategories = await this.getMessageCategories(messageId);
     const categories = existingCategories.filter(label => !labelsToRemove.has(label));
-    await this.client.patch(`${this.basePath}/messages/${messageId}`, { categories });
+    await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(messageId)}`, { categories });
   }
 
   async setFlag(messageId: string, flagged: boolean): Promise<void> {
-    await this.client.patch(`${this.basePath}/messages/${messageId}`, {
+    await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(messageId)}`, {
       flag: { flagStatus: flagged ? 'flagged' : 'notFlagged' },
     });
   }
 
   async setReadState(messageId: string, isRead: boolean): Promise<void> {
-    await this.client.patch(`${this.basePath}/messages/${messageId}`, { isRead });
+    await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(messageId)}`, { isRead });
   }
 
   async moveToFolder(messageId: string, folder: string): Promise<string> {
     // Graph POST /move returns the moved message with a NEW id
-    const result = await this.client.post(`${this.basePath}/messages/${messageId}/move`, {
+    const result = await this.client.post(`${this.basePath}/messages/${encodeGraphPathId(messageId)}/move`, {
       destinationId: normalizeFolderId(folder),
     });
     return result.id ?? messageId;
@@ -328,7 +375,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
 
   async deleteMessage(messageId: string, hard = false): Promise<void> {
     if (hard) {
-      await this.client.post(`${this.basePath}/messages/${messageId}/permanentDelete`);
+      await this.client.post(`${this.basePath}/messages/${encodeGraphPathId(messageId)}/permanentDelete`);
       return;
     }
 
@@ -357,7 +404,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     // endpoints preserve embedded images, CID references, and the auto-quoted thread.
     try {
       const draftId = await this.prepareReplyDraft(messageId, body, opts);
-      await this.client.post(`${this.basePath}/messages/${draftId}/send`, {});
+      await this.client.post(`${this.basePath}/messages/${encodeGraphPathId(draftId)}/send`, {});
       return { success: true, messageId: draftId };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to send reply';
@@ -377,7 +424,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   }
 
   async sendDraft(draftId: string): Promise<SendResult> {
-    await this.client.post(`${this.basePath}/messages/${draftId}/send`, {});
+    await this.client.post(`${this.basePath}/messages/${encodeGraphPathId(draftId)}/send`, {});
     return { success: true, messageId: draftId };
   }
 
@@ -409,7 +456,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   ): Promise<string> {
     const endpoint = opts?.replyAll === false ? 'createReply' : 'createReplyAll';
     const draft = await this.client.post(
-      `${this.basePath}/messages/${messageId}/${endpoint}`,
+      `${this.basePath}/messages/${encodeGraphPathId(messageId)}/${endpoint}`,
       {},
     );
     if (!draft.id) throw new Error(`${endpoint} did not return a draft id`);
@@ -421,7 +468,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     // Fallback GET when the POST response lacks a usable HTML body. Graph defaults
     // to HTML on `Get message` so no Prefer header is needed.
     if (typeof draftBody?.content !== 'string' || draftBody.contentType?.toLowerCase() !== 'html') {
-      const fetched = await this.client.get(`${this.basePath}/messages/${draft.id}`);
+      const fetched = await this.client.get(`${this.basePath}/messages/${encodeGraphPathId(draft.id)}`);
       draftBody = fetched.body as { contentType?: string; content?: string } | undefined;
       draftCc = (fetched.ccRecipients as GraphRecipient[] | undefined) ?? [];
       draftBcc = (fetched.bccRecipients as GraphRecipient[] | undefined) ?? [];
@@ -443,7 +490,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     const bccMerged = mergeRecipients(draftBcc, opts?.bcc ?? []);
     if (bccMerged.length > 0) patch.bccRecipients = bccMerged;
 
-    await this.client.patch(`${this.basePath}/messages/${draft.id}`, patch);
+    await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(draft.id)}`, patch);
     return draft.id;
   }
 
@@ -456,7 +503,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     if (msg.to) patch.toRecipients = msg.to.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
     if (msg.cc) patch.ccRecipients = msg.cc.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
 
-    await this.client.patch(`${this.basePath}/messages/${draftId}`, patch);
+    await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(draftId)}`, patch);
     return { success: true, draftId };
   }
 
@@ -522,7 +569,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
 
   private async getMessageCategories(messageId: string): Promise<string[]> {
     const response = await this.client.get(
-      `${this.basePath}/messages/${messageId}?$select=categories`,
+      `${this.basePath}/messages/${encodeGraphPathId(messageId)}?$select=categories`,
     ) as { categories?: unknown };
 
     return Array.isArray(response.categories)
