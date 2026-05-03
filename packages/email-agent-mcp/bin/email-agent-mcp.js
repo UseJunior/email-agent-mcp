@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { runCli } from '@usejunior/email-mcp';
+import { runCliDirect } from '@usejunior/email-mcp';
 
-runCli(process.argv.slice(2)).catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// runCliDirect sets process.exitCode (not process.exit) so `serve` can stay
+// alive for the MCP stdio handshake while one-shot subcommands like `call`
+// propagate their non-zero exit codes to the shell.
+runCliDirect(process.argv.slice(2));

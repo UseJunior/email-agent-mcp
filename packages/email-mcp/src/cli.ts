@@ -573,17 +573,15 @@ function printJsonResult(value: unknown): void {
  *   3 — tool returned a typed failure ({ success: false, error: ... }) or threw
  */
 export async function runCall(opts: CliOptions): Promise<number> {
-  const { createLazyProviderState, buildLazyActions, ensureProvider, waitForInit, executeTool, getActionInputJsonSchema } =
+  const { createLazyProviderState, buildLazyActions, ensureProvider, executeTool, getActionInputJsonSchema } =
     await import('./server.js');
-  const { loadSendAllowlist, getSendAllowlistPath, WatchedAllowlist } = await import('@usejunior/email-core');
+  const { loadSendAllowlist, getSendAllowlistPath } = await import('@usejunior/email-core');
 
   // Match `serve`'s allowlist setup, but DON'T spawn a watcher in a one-shot
-  // process — load once and snapshot.
+  // process — load once and snapshot. (`serve` uses `WatchedAllowlist` for
+  // hot-reload; `call` exits before any reload could fire.)
   const sendAllowlistPath = getSendAllowlistPath();
-  const sendAllowlistWatcher = new WatchedAllowlist(sendAllowlistPath, loadSendAllowlist);
-  await sendAllowlistWatcher.start();
-  const snapshot = sendAllowlistWatcher.config;
-  sendAllowlistWatcher.close();
+  const snapshot = await loadSendAllowlist(sendAllowlistPath);
   const getSendAllowlist = () => snapshot;
 
   const state = createLazyProviderState();
@@ -628,10 +626,10 @@ export async function runCall(opts: CliOptions): Promise<number> {
     return 2;
   }
 
-  // Eagerly initialize the provider — no demo-mode fallback for one-shot CLI
+  // Eagerly initialize the provider — no demo-mode fallback for one-shot CLI.
+  // ensureProvider() awaits init internally, so no separate waitForInit() needed.
   try {
     await ensureProvider(state);
-    await waitForInit(state);
   } catch (err) {
     console.error(`Error: provider initialization failed — ${err instanceof Error ? err.message : String(err)}`);
     return 3;
@@ -642,6 +640,7 @@ export async function runCall(opts: CliOptions): Promise<number> {
   }
 
   // Execute
+  const { z } = await import('zod');
   try {
     const { result } = await executeTool(actions, {}, opts.callTool, args);
     printJsonResult(result);
@@ -651,9 +650,13 @@ export async function runCall(opts: CliOptions): Promise<number> {
     }
     return 0;
   } catch (err) {
-    // Zod parse errors and unknown-tool errors land here; treat schema errors as 2, runtime errors as 3
+    // ZodError = schema validation failure (CLI/user error); everything else is runtime
+    if (err instanceof z.ZodError) {
+      console.error(`Error: ${err.message}`);
+      return 2;
+    }
     const message = err instanceof Error ? err.message : String(err);
-    if (message.startsWith('Unknown tool:') || /^\[?{?"?(issues|code|expected|received)/.test(message)) {
+    if (message.startsWith('Unknown tool:')) {
       console.error(`Error: ${message}`);
       return 2;
     }

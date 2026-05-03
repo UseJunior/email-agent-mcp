@@ -367,6 +367,22 @@ describe('cli/Direct entrypoint lifecycle', () => {
       expect.stringContaining('MCP server started'),
     );
   });
+
+  it('Scenario: Direct entrypoint propagates non-zero exit code from runCli to process.exitCode', async () => {
+    // Regression: the bin script previously discarded runCli's return value, so
+    // `email-agent-mcp call <bogus>` returned exit 0 to the shell even though
+    // runCall correctly returned 2. The fix routes the bin through runCliDirect
+    // which sets process.exitCode. This test pins that propagation in place.
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await runCliDirect(['bogus-command']);
+
+    expect(process.exitCode).toBe(2);
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Unknown command'),
+    );
+  });
 });
 
 describe('cli/Watch Subcommand', () => {
