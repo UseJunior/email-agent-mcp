@@ -497,7 +497,31 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   async updateDraft(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult> {
     const patch: Record<string, unknown> = {};
     if (msg.body !== undefined || msg.bodyHtml !== undefined) {
-      patch.body = buildGraphBody(msg.bodyHtml, msg.body ?? '');
+      // For reply drafts, GET the existing body so we can preserve Graph's auto-quoted
+      // thread (divider + From/Sent/To/Subject + prior message). Replacing the body
+      // wholesale via PATCH would drop the quoted history that prepareReplyDraft set up.
+      // For non-reply drafts (no quoted-thread anatomy), this falls through to the
+      // normal buildGraphBody path so behavior is unchanged.
+      // $select=body narrows the response — we only need the body field here.
+      const current = await this.client.get(
+        `${this.basePath}/messages/${encodeGraphPathId(draftId)}?$select=body`,
+      );
+      const currentBody = current.body as { contentType?: string; content?: string } | undefined;
+      const currentContent = typeof currentBody?.content === 'string' ? currentBody.content : '';
+      const currentIsHtml = currentBody?.contentType?.toLowerCase() === 'html';
+      const region = currentIsHtml ? findGraphQuotedReplyRegion(currentContent) : null;
+
+      if (region) {
+        const callerFragment = msg.bodyHtml !== undefined
+          ? stripHtmlBodyWrappers(msg.bodyHtml)
+          : wrapPlainTextAsHtml(msg.body ?? '');
+        const merged = currentContent.slice(0, region.bodyOpenEnd)
+          + callerFragment
+          + currentContent.slice(region.dividerStart);
+        patch.body = { contentType: 'HTML', content: truncateBody(merged) };
+      } else {
+        patch.body = buildGraphBody(msg.bodyHtml, msg.body ?? '');
+      }
     }
     if (msg.subject !== undefined) patch.subject = msg.subject.slice(0, SUBJECT_MAX_LENGTH);
     if (msg.to) patch.toRecipients = msg.to.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
@@ -782,13 +806,45 @@ function wrapPlainTextAsHtml(text: string): string {
  *
  * Defensive fallback (no `<body>` tag): concatenate fragment + content.
  */
+/**
+ * Locate the splice region in a Graph reply draft body.
+ *
+ * Returns null when the content is not a recognizable Graph reply (no `<body>` tag,
+ * or `<body>` without a following `<hr>` divider). Returns the anchors otherwise:
+ * - `bodyOpenEnd`: index of the first character after the `<body ...>` opening tag
+ * - `dividerStart`: index of the first `<hr ...>` that follows
+ *
+ * Both create-path (`mergeQuotedReplyHtml`, inserts at `bodyOpenEnd`) and update-path
+ * (`updateDraft`, replaces `bodyOpenEnd..dividerStart`) share this anatomy parser so
+ * detection and splicing always agree on what counts as a reply draft.
+ */
+function findGraphQuotedReplyRegion(
+  content: string,
+): { bodyOpenEnd: number; dividerStart: number } | null {
+  const bodyMatch = content.match(/<body[^>]*>/i);
+  if (!bodyMatch || bodyMatch.index === undefined) return null;
+  const bodyOpenEnd = bodyMatch.index + bodyMatch[0].length;
+  const dividerMatch = content.slice(bodyOpenEnd).match(/<hr\b[^>]*>/i);
+  if (!dividerMatch || dividerMatch.index === undefined) return null;
+  return { bodyOpenEnd, dividerStart: bodyOpenEnd + dividerMatch.index };
+}
+
+/**
+ * Merge a caller-supplied HTML fragment into Graph's auto-quoted reply document so
+ * that Graph's `From:/Sent:/To:/Subject:` divider and the prior thread are preserved.
+ *
+ * Insertion strategy: place the fragment immediately after the `<body>` opening tag.
+ * Graph's response begins with an `<hr>` right after `<body>`, so the caller's content
+ * naturally appears above that divider — no need to add our own.
+ *
+ * Defensive fallback (no recognizable Graph anatomy): concatenate fragment + content.
+ */
 function mergeQuotedReplyHtml(draftContent: string, callerFragment: string): string {
-  const bodyTagMatch = draftContent.match(/<body[^>]*>/i);
-  if (!bodyTagMatch || bodyTagMatch.index === undefined) {
-    return callerFragment + draftContent;
-  }
-  const insertAt = bodyTagMatch.index + bodyTagMatch[0].length;
-  return draftContent.slice(0, insertAt) + callerFragment + draftContent.slice(insertAt);
+  const region = findGraphQuotedReplyRegion(draftContent);
+  if (!region) return callerFragment + draftContent;
+  return draftContent.slice(0, region.bodyOpenEnd)
+    + callerFragment
+    + draftContent.slice(region.bodyOpenEnd);
 }
 
 /**
