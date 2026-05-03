@@ -139,6 +139,18 @@ The system SHALL provide a `call` subcommand that invokes a single MCP tool in a
 - **WHEN** stdout is piped (not a TTY)
 - **THEN** the JSON is emitted compactly so downstream tools like `jq` consume it cleanly
 
+#### Scenario: call --mailbox is merged into tool input args
+- **WHEN** `email-agent-mcp call <tool> --mailbox <id> --args '<json>'` is run
+- **AND** the JSON args do NOT already contain a `mailbox` field
+- **THEN** the system forwards `--mailbox` into the tool input as `args.mailbox` so mailbox-sensitive tools route to the requested account
+- **AND** when args ALREADY contain a `mailbox` field, the in-args value wins (the CLI flag does not clobber explicit args)
+
+#### Scenario: call get_mailbox_status reports state without requiring provider readiness
+- **WHEN** `email-agent-mcp call get_mailbox_status` is run
+- **AND** the provider is not configured, still warming up, or in an error state
+- **THEN** the system bypasses the eager-init gate and runs the diagnostic tool
+- **AND** the result reflects the actual state (`pending` / `not configured` / `error` / `connected`) instead of exiting with a provider-init error
+
 ### Requirement: Exit Codes
 
 The system SHALL use standard exit codes: 0 for success, 1 for runtime errors (e.g., serve startup failure), 2 for usage / invalid-argument errors, and 3 for `call` tool-failure results.

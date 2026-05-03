@@ -1058,6 +1058,139 @@ describe('cli/Call Subcommand Exit Codes', () => {
   });
 });
 
+describe('cli/Call Subcommand Mailbox Routing', () => {
+  it('Scenario: call --mailbox is merged into tool input args', async () => {
+    // Regression: peer review caught that --mailbox was parsed but never
+    // forwarded to executeTool, which meant `call delete_email --mailbox
+    // personal --args '{}'` silently targeted the default mailbox. The fix
+    // merges opts.mailbox into args when args.mailbox isn't already set.
+    const { z } = await import('zod');
+    const capturedInputs: Array<{ mailbox?: string }> = [];
+    const recordingAction = {
+      name: 'records_mailbox',
+      description: 'test stub that records its input mailbox',
+      input: z.object({ mailbox: z.string().optional() }),
+      output: z.object({ ok: z.boolean() }),
+      annotations: {},
+      run: async (_ctx: unknown, input: { mailbox?: string }) => {
+        capturedInputs.push(input);
+        return { ok: true };
+      },
+    };
+    const noopState = { status: 'connected', mailboxes: [], defaultMailboxName: null };
+
+    vi.doMock('./server.js', async () => {
+      const actual = await vi.importActual<typeof import('./server.js')>('./server.js');
+      return {
+        ...actual,
+        createLazyProviderState: () => noopState,
+        buildLazyActions: async () => [recordingAction],
+        ensureProvider: async () => undefined,
+      };
+    });
+    try {
+      const { runCall } = await import('./cli.js');
+      const exitCode = await runCall({
+        command: 'call',
+        callTool: 'records_mailbox',
+        callArgs: '{}',
+        mailbox: 'personal',
+      });
+      expect(exitCode).toBe(0);
+      expect(capturedInputs[0]?.mailbox).toBe('personal');
+    } finally {
+      vi.doUnmock('./server.js');
+    }
+  });
+
+  it('Scenario: call --mailbox does not clobber a mailbox already in --args', async () => {
+    const { z } = await import('zod');
+    const capturedInputs: Array<{ mailbox?: string }> = [];
+    const recordingAction = {
+      name: 'records_mailbox_2',
+      description: 'test stub',
+      input: z.object({ mailbox: z.string().optional() }),
+      output: z.object({ ok: z.boolean() }),
+      annotations: {},
+      run: async (_ctx: unknown, input: { mailbox?: string }) => {
+        capturedInputs.push(input);
+        return { ok: true };
+      },
+    };
+    const noopState = { status: 'connected', mailboxes: [], defaultMailboxName: null };
+
+    vi.doMock('./server.js', async () => {
+      const actual = await vi.importActual<typeof import('./server.js')>('./server.js');
+      return {
+        ...actual,
+        createLazyProviderState: () => noopState,
+        buildLazyActions: async () => [recordingAction],
+        ensureProvider: async () => undefined,
+      };
+    });
+    try {
+      const { runCall } = await import('./cli.js');
+      // --args has a mailbox; --mailbox flag should NOT overwrite it
+      const exitCode = await runCall({
+        command: 'call',
+        callTool: 'records_mailbox_2',
+        callArgs: '{"mailbox":"work"}',
+        mailbox: 'personal',
+      });
+      expect(exitCode).toBe(0);
+      expect(capturedInputs[0]?.mailbox).toBe('work');
+    } finally {
+      vi.doUnmock('./server.js');
+    }
+  });
+});
+
+describe('cli/Call Subcommand Diagnostic Tools', () => {
+  it('Scenario: call get_mailbox_status reports state without requiring provider readiness', async () => {
+    // Regression: the eager-init gate previously short-circuited get_mailbox_status
+    // before it could run, even though that tool is intentionally non-blocking and
+    // designed to report `pending`/`not_configured`/`error` states. The fix skips
+    // ensureProvider when the tool name is `get_mailbox_status`.
+    const { z } = await import('zod');
+    let ranWithoutInit = false;
+    const statusAction = {
+      name: 'get_mailbox_status',
+      description: 'diagnostic stub',
+      input: z.object({}),
+      output: z.object({ status: z.string() }),
+      annotations: {},
+      run: async () => {
+        ranWithoutInit = true;
+        return { status: 'not configured' };
+      },
+    };
+    const errorState = { status: 'error', error: 'simulated init failure', mailboxes: [], defaultMailboxName: null };
+
+    vi.doMock('./server.js', async () => {
+      const actual = await vi.importActual<typeof import('./server.js')>('./server.js');
+      return {
+        ...actual,
+        createLazyProviderState: () => errorState,
+        buildLazyActions: async () => [statusAction],
+        // ensureProvider would normally throw here — verify we never call it
+        ensureProvider: async () => { throw new Error('should not be called for get_mailbox_status'); },
+      };
+    });
+    try {
+      const { runCall } = await import('./cli.js');
+      const exitCode = await runCall({
+        command: 'call',
+        callTool: 'get_mailbox_status',
+        callArgs: '{}',
+      });
+      expect(ranWithoutInit).toBe(true);
+      expect(exitCode).toBe(0);
+    } finally {
+      vi.doUnmock('./server.js');
+    }
+  });
+});
+
 describe('cli/Call Subcommand Output Formatting', () => {
   it('Scenario: call output is pretty-printed to TTY and compact when piped', async () => {
     const { formatJsonForOutput } = await import('./cli.js');

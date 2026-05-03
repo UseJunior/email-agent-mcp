@@ -626,17 +626,32 @@ export async function runCall(opts: CliOptions): Promise<number> {
     return 2;
   }
 
-  // Eagerly initialize the provider — no demo-mode fallback for one-shot CLI.
-  // ensureProvider() awaits init internally, so no separate waitForInit() needed.
-  try {
-    await ensureProvider(state);
-  } catch (err) {
-    console.error(`Error: provider initialization failed — ${err instanceof Error ? err.message : String(err)}`);
-    return 3;
+  // The general-purpose `--mailbox` flag (also used by `serve`/`watch`) routes
+  // mailbox-sensitive tools to a specific account. If the caller passed it AND
+  // didn't already encode it in --args, forward it into the tool input — without
+  // this merge, `call delete_email --mailbox personal --args '{...}'` would
+  // silently target the default mailbox.
+  if (opts.mailbox && args['mailbox'] === undefined) {
+    args['mailbox'] = opts.mailbox;
   }
-  if (state.status === 'error') {
-    console.error(`Error: provider error — ${state.error ?? 'unknown'}`);
-    return 3;
+
+  // `get_mailbox_status` is intentionally non-blocking: it inspects state.status
+  // (pending/connecting/not_configured/error) and reports it as the result. Skip
+  // the eager-init gate for this tool so it can serve as a diagnostic even when
+  // the provider isn't ready.
+  if (opts.callTool !== 'get_mailbox_status') {
+    // Eagerly initialize the provider — no demo-mode fallback for one-shot CLI.
+    // ensureProvider() awaits init internally, so no separate waitForInit() needed.
+    try {
+      await ensureProvider(state);
+    } catch (err) {
+      console.error(`Error: provider initialization failed — ${err instanceof Error ? err.message : String(err)}`);
+      return 3;
+    }
+    if (state.status === 'error') {
+      console.error(`Error: provider error — ${state.error ?? 'unknown'}`);
+      return 3;
+    }
   }
 
   // Execute
