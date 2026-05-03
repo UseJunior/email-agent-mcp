@@ -25,6 +25,13 @@ export interface CliOptions {
   clientId?: string;
   clientSecret?: string;
   pollInterval?: number; // seconds
+  // `call` subcommand options
+  callTool?: string;          // first positional after `call` — the tool name
+  callArgs?: string;          // raw JSON string from --args
+  callArgsFile?: string;      // path passed via --args-file
+  callArgsStdin?: boolean;    // read JSON args from stdin
+  callList?: boolean;         // --list — enumerate tools
+  callSchema?: boolean;       // --schema — print input schema for a tool
 }
 
 // NemoClaw egress domains for all providers
@@ -394,10 +401,37 @@ export function parseCliArgs(args: string[]): CliOptions {
       opts.pollInterval = parseInt(args[++i]!, 10);
       continue;
     }
+    // `call` subcommand flags
+    if (arg === '--args' && i + 1 < args.length) {
+      opts.callArgs = args[++i];
+      continue;
+    }
+    if (arg === '--args-file' && i + 1 < args.length) {
+      opts.callArgsFile = args[++i];
+      continue;
+    }
+    if (arg === '--args-stdin') {
+      opts.callArgsStdin = true;
+      continue;
+    }
+    if (arg === '--list') {
+      opts.callList = true;
+      continue;
+    }
+    if (arg === '--schema') {
+      opts.callSchema = true;
+      continue;
+    }
 
     // First positional arg is the command
     if (!opts.command && !arg.startsWith('-')) {
       opts.command = arg;
+      continue;
+    }
+    // Second positional (only meaningful for `call`) is the tool name
+    if (opts.command === 'call' && !opts.callTool && !arg.startsWith('-')) {
+      opts.callTool = arg;
+      continue;
     }
   }
 
@@ -434,6 +468,8 @@ export async function runCli(args: string[]): Promise<number> {
       return await runStatus();
     case 'token':
       return await runToken(opts);
+    case 'call':
+      return await runCall(opts);
     case 'help':
       printHelp();
       return 0;
@@ -471,6 +507,158 @@ async function runServe(_opts: CliOptions): Promise<number> {
   } catch (err) {
     console.error('Error starting MCP server:', err instanceof Error ? err.message : err);
     return 1;
+  }
+}
+
+/**
+ * Read JSON args for `call` from --args, --args-file, or --args-stdin.
+ * Returns the parsed object, or `{}` when no source is provided. Throws on
+ * source conflict or JSON parse failure (caller maps to exit code 2).
+ */
+async function readCallArgs(opts: CliOptions): Promise<Record<string, unknown>> {
+  const sources = [opts.callArgs !== undefined, opts.callArgsFile !== undefined, opts.callArgsStdin === true]
+    .filter(Boolean).length;
+  if (sources > 1) {
+    throw new Error('Pass at most one of --args, --args-file, --args-stdin');
+  }
+
+  let raw: string | undefined;
+  if (opts.callArgs !== undefined) {
+    raw = opts.callArgs;
+  } else if (opts.callArgsFile !== undefined) {
+    raw = await readFile(opts.callArgsFile, 'utf-8');
+  } else if (opts.callArgsStdin) {
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    raw = Buffer.concat(chunks).toString('utf-8').trim();
+  }
+
+  if (!raw) return {};
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`Invalid JSON args: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Args must be a JSON object');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * Format a JSON value for CLI output. Pretty-prints with 2-space indentation
+ * when the destination is a TTY (human session); emits compact JSON when piped
+ * so downstream tools like `jq` consume it cleanly. Exported for testability.
+ */
+export function formatJsonForOutput(value: unknown, isTty: boolean): string {
+  return isTty ? JSON.stringify(value, null, 2) : JSON.stringify(value);
+}
+
+function printJsonResult(value: unknown): void {
+  process.stdout.write(formatJsonForOutput(value, !!process.stdout.isTTY) + '\n');
+}
+
+/**
+ * Run a single tool invocation as a one-shot CLI command. Eagerly initializes
+ * the provider (no demo-mode fallback) so auth failures surface as exit codes
+ * rather than masquerading as `connecting` results.
+ *
+ * Exit codes:
+ *   0 — tool ran and returned a non-failure result
+ *   2 — CLI/argument/schema/unknown-tool error
+ *   3 — tool returned a typed failure ({ success: false, error: ... }) or threw
+ */
+export async function runCall(opts: CliOptions): Promise<number> {
+  const { createLazyProviderState, buildLazyActions, ensureProvider, waitForInit, executeTool, getActionInputJsonSchema } =
+    await import('./server.js');
+  const { loadSendAllowlist, getSendAllowlistPath, WatchedAllowlist } = await import('@usejunior/email-core');
+
+  // Match `serve`'s allowlist setup, but DON'T spawn a watcher in a one-shot
+  // process — load once and snapshot.
+  const sendAllowlistPath = getSendAllowlistPath();
+  const sendAllowlistWatcher = new WatchedAllowlist(sendAllowlistPath, loadSendAllowlist);
+  await sendAllowlistWatcher.start();
+  const snapshot = sendAllowlistWatcher.config;
+  sendAllowlistWatcher.close();
+  const getSendAllowlist = () => snapshot;
+
+  const state = createLazyProviderState();
+  const actions = await buildLazyActions(state, getSendAllowlist);
+
+  // --list: enumerate tools and exit
+  if (opts.callList) {
+    const summary = actions.map(a => ({
+      name: a.name,
+      description: a.description,
+      annotations: a.annotations ?? {},
+    }));
+    printJsonResult(summary);
+    return 0;
+  }
+
+  if (!opts.callTool) {
+    console.error('Error: `call` requires a tool name. Usage: email-agent-mcp call <tool> [--args \'<json>\' | --args-file <path> | --args-stdin]');
+    console.error('       email-agent-mcp call --list                # enumerate tools');
+    console.error('       email-agent-mcp call <tool> --schema       # print input schema');
+    return 2;
+  }
+
+  const action = actions.find(a => a.name === opts.callTool);
+  if (!action) {
+    console.error(`Error: unknown tool "${opts.callTool}". Run \`email-agent-mcp call --list\` to see available tools.`);
+    return 2;
+  }
+
+  // --schema: print input JSON Schema and exit
+  if (opts.callSchema) {
+    printJsonResult(getActionInputJsonSchema(action));
+    return 0;
+  }
+
+  // Read args
+  let args: Record<string, unknown>;
+  try {
+    args = await readCallArgs(opts);
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    return 2;
+  }
+
+  // Eagerly initialize the provider — no demo-mode fallback for one-shot CLI
+  try {
+    await ensureProvider(state);
+    await waitForInit(state);
+  } catch (err) {
+    console.error(`Error: provider initialization failed — ${err instanceof Error ? err.message : String(err)}`);
+    return 3;
+  }
+  if (state.status === 'error') {
+    console.error(`Error: provider error — ${state.error ?? 'unknown'}`);
+    return 3;
+  }
+
+  // Execute
+  try {
+    const { result } = await executeTool(actions, {}, opts.callTool, args);
+    printJsonResult(result);
+    // Map typed-failure results to exit code 3 so shell consumers can detect failure
+    if (result !== null && typeof result === 'object' && (result as { success?: unknown }).success === false) {
+      return 3;
+    }
+    return 0;
+  } catch (err) {
+    // Zod parse errors and unknown-tool errors land here; treat schema errors as 2, runtime errors as 3
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.startsWith('Unknown tool:') || /^\[?{?"?(issues|code|expected|received)/.test(message)) {
+      console.error(`Error: ${message}`);
+      return 2;
+    }
+    console.error(`Error: ${message}`);
+    return 3;
   }
 }
 
@@ -1175,6 +1363,8 @@ COMMANDS:
   email-agent-mcp status       Show account + connection health
   email-agent-mcp token        Print a Graph API bearer token to stdout
   email-agent-mcp serve        Force MCP server mode
+  email-agent-mcp call <tool>  Invoke a single MCP tool one-shot (no long-lived server)
+                              See \`call\` examples below
   email-agent-mcp help         Show this help
 
 OPTIONS:
@@ -1188,6 +1378,25 @@ OPTIONS:
   --provider <name>      Auth provider (microsoft, gmail)
   --client-id <id>       OAuth client ID override
   --client-secret <val>  OAuth client secret override (used for Gmail configure)
+
+CALL OPTIONS (used with \`call <tool>\`):
+  --args '<json>'        Inline JSON args for the tool
+  --args-file <path>     Read JSON args from a file
+  --args-stdin           Read JSON args from stdin
+  --list                 (with \`call\`) List available tools and exit
+  --schema               Print the input JSON Schema for the named tool
+
+CALL EXAMPLES:
+  email-agent-mcp call --list
+  email-agent-mcp call list_emails --schema
+  email-agent-mcp call list_emails --args '{"limit":5,"unread":true}'
+  echo '{"limit":5}' | email-agent-mcp call list_emails --args-stdin
+  email-agent-mcp call list_emails --args '{"limit":5}' | jq '.emails[].subject'
+
+CALL EXIT CODES:
+  0  Tool ran and returned a non-failure result
+  2  CLI / argument / unknown-tool / schema-validation error
+  3  Tool returned a typed failure ({success:false,...}) or threw at runtime
 `.trim());
 }
 

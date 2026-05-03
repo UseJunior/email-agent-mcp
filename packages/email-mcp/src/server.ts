@@ -215,14 +215,23 @@ export function coerceArgsForZod(schema: z.ZodType, args: unknown): unknown {
 }
 
 /**
- * Handle an MCP tool call by dispatching to the right action.
+ * Execute a tool by dispatching to the right action and returning the raw
+ * action result (no transport-specific wrapping).
+ *
+ * Both transports (`serve` via `handleToolCall`, and `call` via the CLI) run
+ * inputs through this single primitive so they share parsing, coercion, and
+ * dispatch behavior. Transport-specific formatting (MCP envelopes, CLI JSON
+ * output) is layered on top by the caller.
+ *
+ * Returns `{ result, input }` so callers that need the parsed input later
+ * (e.g., to format MCP `resource` URIs) don't have to re-parse.
  */
-export async function handleToolCall(
+export async function executeTool(
   actions: EmailActionDef[],
   ctx: unknown,
   toolName: string,
   args: Record<string, unknown>,
-): Promise<McpToolCallResult> {
+): Promise<{ result: unknown; input: unknown }> {
   const action = actions.find(a => a.name === toolName);
   if (!action) {
     throw new Error(`Unknown tool: ${toolName}`);
@@ -231,6 +240,20 @@ export async function handleToolCall(
   const coerced = coerceArgsForZod(action.input, args);
   const input = action.input.parse(coerced);
   const result = await action.run(ctx, input);
+  return { result, input };
+}
+
+/**
+ * Handle an MCP tool call by dispatching via `executeTool` and wrapping the
+ * raw result in the MCP `content` envelope.
+ */
+export async function handleToolCall(
+  actions: EmailActionDef[],
+  ctx: unknown,
+  toolName: string,
+  args: Record<string, unknown>,
+): Promise<McpToolCallResult> {
+  const { result, input } = await executeTool(actions, ctx, toolName, args);
 
   // download_attachment returns base64 inline. To avoid stuffing megabytes of
   // base64 inside the JSON-stringified text envelope (which agents have to
@@ -272,6 +295,14 @@ export async function handleToolCall(
   return {
     content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
   };
+}
+
+/**
+ * Public Zod-to-JSON-Schema helper exposed for the `call <tool> --schema` CLI
+ * surface. Mirrors the conversion used by `actionsToMcpTools` for `tools/list`.
+ */
+export function getActionInputJsonSchema(action: EmailActionDef): Record<string, unknown> {
+  return zodToJsonSchema(action.input);
 }
 
 /**

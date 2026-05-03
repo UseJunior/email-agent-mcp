@@ -4,6 +4,8 @@ import { deleteEmailAction } from '@usejunior/email-core';
 import {
   actionsToMcpTools,
   handleToolCall,
+  executeTool,
+  getActionInputJsonSchema,
   getServerManifest,
   createLazyProviderState,
   waitForInit,
@@ -33,6 +35,42 @@ const testActions: EmailActionDef[] = [
     run: async (_ctx, _input) => ({ success: true }),
   },
 ];
+
+describe('mcp-transport/executeTool primitive', () => {
+  it('Scenario: executeTool returns raw action result without MCP envelope', async () => {
+    // Both `serve` (via handleToolCall) and `call` (via the CLI) dispatch through
+    // executeTool. The raw shape MUST be free of MCP transport formatting so the
+    // CLI can emit it directly while handleToolCall layers the envelope on top.
+    const { result, input } = await executeTool(testActions, {}, 'list_emails', { unread: true });
+    expect(result).toEqual({ emails: [{ id: 'msg-1' }] });
+    expect(input).toEqual({ unread: true });
+  });
+
+  it('Scenario: executeTool throws on unknown tool', async () => {
+    await expect(executeTool(testActions, {}, 'nonexistent', {}))
+      .rejects.toThrow(/Unknown tool/);
+  });
+
+  it('Scenario: handleToolCall wraps executeTool result in MCP content envelope', async () => {
+    // Regression: handleToolCall must continue to produce the MCP `content` envelope
+    // after the executeTool extraction.
+    const result = await handleToolCall(testActions, {}, 'list_emails', { unread: true });
+    expect(result.content).toHaveLength(1);
+    expect(result.content[0]!.type).toBe('text');
+    const parsed = JSON.parse((result.content[0] as { text: string }).text);
+    expect(parsed.emails).toEqual([{ id: 'msg-1' }]);
+  });
+
+  it('Scenario: getActionInputJsonSchema returns JSON Schema for `call <tool> --schema`', () => {
+    const action = testActions.find(a => a.name === 'send_email')!;
+    const schema = getActionInputJsonSchema(action);
+    expect(schema['type']).toBe('object');
+    const properties = schema['properties'] as Record<string, unknown>;
+    expect(properties['to']).toBeDefined();
+    expect(properties['subject']).toBeDefined();
+    expect(properties['body']).toBeDefined();
+  });
+});
 
 describe('mcp-transport/Action to Tool Mapping', () => {
   it('Scenario: Auto-registration', () => {

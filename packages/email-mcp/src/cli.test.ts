@@ -946,6 +946,121 @@ describe('cli/TTY-Aware Default Behavior', () => {
   });
 });
 
+describe('cli/Call Subcommand Argument Parsing', () => {
+  it('Scenario: call invokes a tool with --args JSON and prints raw result to stdout', () => {
+    const opts = parseCliArgs(['call', 'list_emails', '--args', '{"limit":5}']);
+    expect(opts.command).toBe('call');
+    expect(opts.callTool).toBe('list_emails');
+    expect(opts.callArgs).toBe('{"limit":5}');
+  });
+
+  it('Scenario: call --list enumerates available tools', () => {
+    const opts = parseCliArgs(['call', '--list']);
+    expect(opts.command).toBe('call');
+    expect(opts.callList).toBe(true);
+    expect(opts.callTool).toBeUndefined();
+  });
+
+  it('Scenario: call <tool> --schema prints input schema', () => {
+    const opts = parseCliArgs(['call', 'send_email', '--schema']);
+    expect(opts.command).toBe('call');
+    expect(opts.callTool).toBe('send_email');
+    expect(opts.callSchema).toBe(true);
+  });
+
+  it('Scenario: call accepts --args-file as an alternative to inline JSON', () => {
+    const opts = parseCliArgs(['call', 'send_email', '--args-file', '/tmp/args.json']);
+    expect(opts.callTool).toBe('send_email');
+    expect(opts.callArgsFile).toBe('/tmp/args.json');
+  });
+
+  it('Scenario: call accepts --args-stdin as an alternative to inline JSON', () => {
+    const opts = parseCliArgs(['call', 'send_email', '--args-stdin']);
+    expect(opts.callTool).toBe('send_email');
+    expect(opts.callArgsStdin).toBe(true);
+  });
+});
+
+describe('cli/Call Subcommand Exit Codes', () => {
+  it('Scenario: call exits with 2 on invalid args / unknown tool', async () => {
+    // Unknown tool — runCall errors out before provider init
+    const exitCode = await runCli(['call', 'no_such_tool_exists', '--args', '{}']);
+    expect(exitCode).toBe(2);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('unknown tool'),
+    );
+  });
+
+  it('Scenario: call exits with 2 on malformed --args JSON', async () => {
+    // Malformed JSON in --args — readCallArgs throws before provider init
+    const exitCode = await runCli(['call', 'list_emails', '--args', 'not-json']);
+    expect(exitCode).toBe(2);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid JSON args'),
+    );
+  });
+
+  it('Scenario: call exits with 2 when no tool name is provided', async () => {
+    const exitCode = await runCli(['call']);
+    expect(exitCode).toBe(2);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('requires a tool name'),
+    );
+  });
+
+  it('Scenario: call exits with 3 on tool failure', async () => {
+    // Inject a stub action that returns a typed failure object via vi.doMock,
+    // then verify runCall maps that to exit code 3 (distinct from CLI errors at 2).
+    const { z } = await import('zod');
+    const failingAction = {
+      name: 'always_fails',
+      description: 'test stub',
+      input: z.object({}),
+      output: z.object({ success: z.boolean() }),
+      annotations: {},
+      run: async () => ({ success: false, error: { code: 'TEST_FAILURE', message: 'stubbed' } }),
+    };
+    const noopState = { status: 'connected', mailboxes: [], defaultMailboxName: null };
+
+    vi.doMock('./server.js', async () => {
+      const actual = await vi.importActual<typeof import('./server.js')>('./server.js');
+      return {
+        ...actual,
+        createLazyProviderState: () => noopState,
+        buildLazyActions: async () => [failingAction],
+        ensureProvider: async () => undefined,
+        waitForInit: async () => undefined,
+      };
+    });
+    try {
+      const { runCall } = await import('./cli.js');
+      const exitCode = await runCall({ command: 'call', callTool: 'always_fails', callArgs: '{}' });
+      expect(exitCode).toBe(3);
+    } finally {
+      vi.doUnmock('./server.js');
+    }
+  });
+});
+
+describe('cli/Call Subcommand Output Formatting', () => {
+  it('Scenario: call output is pretty-printed to TTY and compact when piped', async () => {
+    const { formatJsonForOutput } = await import('./cli.js');
+    const value = { emails: [{ id: '1' }, { id: '2' }] };
+
+    // TTY: pretty-printed with newlines and 2-space indent
+    const tty = formatJsonForOutput(value, true);
+    expect(tty).toContain('\n');
+    expect(tty).toContain('  ');
+    expect(JSON.parse(tty)).toEqual(value);
+
+    // Pipe: compact, no newlines, jq-friendly
+    const piped = formatJsonForOutput(value, false);
+    expect(piped).not.toContain('\n');
+    expect(piped).toBe(JSON.stringify(value));
+    expect(JSON.parse(piped)).toEqual(value);
+  });
+});
+
 describe('cli/Exit Codes', () => {
   it('Scenario: Configuration error', async () => {
     // WHEN email-agent-mcp serve fails due to missing configuration
