@@ -107,9 +107,53 @@ The system SHALL provide `--version` and `--help` flags with diagnostic output.
 - **WHEN** `email-agent-mcp --version` is run
 - **THEN** the system prints the package version
 
+### Requirement: Call Subcommand
+
+The system SHALL provide a `call` subcommand that invokes a single MCP tool in a one-shot CLI process. Each invocation runs in a fresh process so source-code changes take effect without restarting any long-lived MCP host. Tool input may be supplied as inline JSON, a file path, or stdin.
+
+#### Scenario: call invokes a tool with --args JSON and prints raw result to stdout
+- **WHEN** `email-agent-mcp call <tool> --args '<json>'` is run
+- **THEN** the system eagerly initializes the provider, dispatches to the tool via the same `executeTool` primitive used by `serve`, and prints the raw action result as JSON on stdout
+- **AND** the result is NOT wrapped in any MCP transport envelope
+
+#### Scenario: call --list enumerates available tools
+- **WHEN** `email-agent-mcp call --list` is run
+- **THEN** the system prints a JSON array of `{name, description, annotations}` for every registered tool
+
+#### Scenario: call <tool> --schema prints input schema
+- **WHEN** `email-agent-mcp call <tool> --schema` is run
+- **THEN** the system prints the input JSON Schema for that tool (the same schema returned by MCP `tools/list`)
+
+#### Scenario: call exits with 2 on invalid args / unknown tool
+- **WHEN** `email-agent-mcp call` is invoked with an unknown tool name, malformed JSON args, or schema validation failure
+- **THEN** the process exits with code 2 and writes a clear error message to stderr
+
+#### Scenario: call exits with 3 on tool failure
+- **WHEN** the dispatched tool throws or returns a typed failure object (`{ success: false, error: ... }`)
+- **THEN** the process exits with code 3 (distinct from CLI/argument errors at code 2)
+
+#### Scenario: call output is pretty-printed to TTY and compact when piped
+- **WHEN** the result is written to stdout
+- **AND** stdout is a TTY (human session)
+- **THEN** the JSON is pretty-printed with 2-space indentation
+- **WHEN** stdout is piped (not a TTY)
+- **THEN** the JSON is emitted compactly so downstream tools like `jq` consume it cleanly
+
+#### Scenario: call --mailbox is merged into tool input args
+- **WHEN** `email-agent-mcp call <tool> --mailbox <id> --args '<json>'` is run
+- **AND** the JSON args do NOT already contain a `mailbox` field
+- **THEN** the system forwards `--mailbox` into the tool input as `args.mailbox` so mailbox-sensitive tools route to the requested account
+- **AND** when args ALREADY contain a `mailbox` field, the in-args value wins (the CLI flag does not clobber explicit args)
+
+#### Scenario: call get_mailbox_status reports state without requiring provider readiness
+- **WHEN** `email-agent-mcp call get_mailbox_status` is run
+- **AND** the provider is not configured, still warming up, or in an error state
+- **THEN** the system bypasses the eager-init gate and runs the diagnostic tool
+- **AND** the result reflects the actual state (`pending` / `not configured` / `error` / `connected`) instead of exiting with a provider-init error
+
 ### Requirement: Exit Codes
 
-The system SHALL use standard exit codes: 0 for success, 1 for errors, 2 for usage errors.
+The system SHALL use standard exit codes: 0 for success, 1 for runtime errors (e.g., serve startup failure), 2 for usage / invalid-argument errors, and 3 for `call` tool-failure results.
 
 #### Scenario: Configuration error
 - **WHEN** `email-agent-mcp serve` fails due to missing configuration

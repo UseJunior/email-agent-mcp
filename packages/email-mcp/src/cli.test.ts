@@ -367,6 +367,22 @@ describe('cli/Direct entrypoint lifecycle', () => {
       expect.stringContaining('MCP server started'),
     );
   });
+
+  it('Scenario: Direct entrypoint propagates non-zero exit code from runCli to process.exitCode', async () => {
+    // Regression: the bin script previously discarded runCli's return value, so
+    // `email-agent-mcp call <bogus>` returned exit 0 to the shell even though
+    // runCall correctly returned 2. The fix routes the bin through runCliDirect
+    // which sets process.exitCode. This test pins that propagation in place.
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+
+    await runCliDirect(['bogus-command']);
+
+    expect(process.exitCode).toBe(2);
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Unknown command'),
+    );
+  });
 });
 
 describe('cli/Watch Subcommand', () => {
@@ -943,6 +959,254 @@ describe('cli/TTY-Aware Default Behavior', () => {
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('Unknown command'),
     );
+  });
+});
+
+describe('cli/Call Subcommand Argument Parsing', () => {
+  it('Scenario: call invokes a tool with --args JSON and prints raw result to stdout', () => {
+    const opts = parseCliArgs(['call', 'list_emails', '--args', '{"limit":5}']);
+    expect(opts.command).toBe('call');
+    expect(opts.callTool).toBe('list_emails');
+    expect(opts.callArgs).toBe('{"limit":5}');
+  });
+
+  it('Scenario: call --list enumerates available tools', () => {
+    const opts = parseCliArgs(['call', '--list']);
+    expect(opts.command).toBe('call');
+    expect(opts.callList).toBe(true);
+    expect(opts.callTool).toBeUndefined();
+  });
+
+  it('Scenario: call <tool> --schema prints input schema', () => {
+    const opts = parseCliArgs(['call', 'send_email', '--schema']);
+    expect(opts.command).toBe('call');
+    expect(opts.callTool).toBe('send_email');
+    expect(opts.callSchema).toBe(true);
+  });
+
+  it('Scenario: call accepts --args-file as an alternative to inline JSON', () => {
+    const opts = parseCliArgs(['call', 'send_email', '--args-file', '/tmp/args.json']);
+    expect(opts.callTool).toBe('send_email');
+    expect(opts.callArgsFile).toBe('/tmp/args.json');
+  });
+
+  it('Scenario: call accepts --args-stdin as an alternative to inline JSON', () => {
+    const opts = parseCliArgs(['call', 'send_email', '--args-stdin']);
+    expect(opts.callTool).toBe('send_email');
+    expect(opts.callArgsStdin).toBe(true);
+  });
+});
+
+describe('cli/Call Subcommand Exit Codes', () => {
+  it('Scenario: call exits with 2 on invalid args / unknown tool', async () => {
+    // Unknown tool — runCall errors out before provider init
+    const exitCode = await runCli(['call', 'no_such_tool_exists', '--args', '{}']);
+    expect(exitCode).toBe(2);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('unknown tool'),
+    );
+  });
+
+  it('Scenario: call exits with 2 on malformed --args JSON', async () => {
+    // Malformed JSON in --args — readCallArgs throws before provider init
+    const exitCode = await runCli(['call', 'list_emails', '--args', 'not-json']);
+    expect(exitCode).toBe(2);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid JSON args'),
+    );
+  });
+
+  it('Scenario: call exits with 2 when no tool name is provided', async () => {
+    const exitCode = await runCli(['call']);
+    expect(exitCode).toBe(2);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('requires a tool name'),
+    );
+  });
+
+  it('Scenario: call exits with 3 on tool failure', async () => {
+    // Inject a stub action that returns a typed failure object via vi.doMock,
+    // then verify runCall maps that to exit code 3 (distinct from CLI errors at 2).
+    const { z } = await import('zod');
+    const failingAction = {
+      name: 'always_fails',
+      description: 'test stub',
+      input: z.object({}),
+      output: z.object({ success: z.boolean() }),
+      annotations: {},
+      run: async () => ({ success: false, error: { code: 'TEST_FAILURE', message: 'stubbed' } }),
+    };
+    const noopState = { status: 'connected', mailboxes: [], defaultMailboxName: null };
+
+    vi.doMock('./server.js', async () => {
+      const actual = await vi.importActual<typeof import('./server.js')>('./server.js');
+      return {
+        ...actual,
+        createLazyProviderState: () => noopState,
+        buildLazyActions: async () => [failingAction],
+        ensureProvider: async () => undefined,
+        waitForInit: async () => undefined,
+      };
+    });
+    try {
+      const { runCall } = await import('./cli.js');
+      const exitCode = await runCall({ command: 'call', callTool: 'always_fails', callArgs: '{}' });
+      expect(exitCode).toBe(3);
+    } finally {
+      vi.doUnmock('./server.js');
+    }
+  });
+});
+
+describe('cli/Call Subcommand Mailbox Routing', () => {
+  it('Scenario: call --mailbox is merged into tool input args', async () => {
+    // Regression: peer review caught that --mailbox was parsed but never
+    // forwarded to executeTool, which meant `call delete_email --mailbox
+    // personal --args '{}'` silently targeted the default mailbox. The fix
+    // merges opts.mailbox into args when args.mailbox isn't already set.
+    const { z } = await import('zod');
+    const capturedInputs: Array<{ mailbox?: string }> = [];
+    const recordingAction = {
+      name: 'records_mailbox',
+      description: 'test stub that records its input mailbox',
+      input: z.object({ mailbox: z.string().optional() }),
+      output: z.object({ ok: z.boolean() }),
+      annotations: {},
+      run: async (_ctx: unknown, input: { mailbox?: string }) => {
+        capturedInputs.push(input);
+        return { ok: true };
+      },
+    };
+    const noopState = { status: 'connected', mailboxes: [], defaultMailboxName: null };
+
+    vi.doMock('./server.js', async () => {
+      const actual = await vi.importActual<typeof import('./server.js')>('./server.js');
+      return {
+        ...actual,
+        createLazyProviderState: () => noopState,
+        buildLazyActions: async () => [recordingAction],
+        ensureProvider: async () => undefined,
+      };
+    });
+    try {
+      const { runCall } = await import('./cli.js');
+      const exitCode = await runCall({
+        command: 'call',
+        callTool: 'records_mailbox',
+        callArgs: '{}',
+        mailbox: 'personal',
+      });
+      expect(exitCode).toBe(0);
+      expect(capturedInputs[0]?.mailbox).toBe('personal');
+    } finally {
+      vi.doUnmock('./server.js');
+    }
+  });
+
+  it('Scenario: call --mailbox does not clobber a mailbox already in --args', async () => {
+    const { z } = await import('zod');
+    const capturedInputs: Array<{ mailbox?: string }> = [];
+    const recordingAction = {
+      name: 'records_mailbox_2',
+      description: 'test stub',
+      input: z.object({ mailbox: z.string().optional() }),
+      output: z.object({ ok: z.boolean() }),
+      annotations: {},
+      run: async (_ctx: unknown, input: { mailbox?: string }) => {
+        capturedInputs.push(input);
+        return { ok: true };
+      },
+    };
+    const noopState = { status: 'connected', mailboxes: [], defaultMailboxName: null };
+
+    vi.doMock('./server.js', async () => {
+      const actual = await vi.importActual<typeof import('./server.js')>('./server.js');
+      return {
+        ...actual,
+        createLazyProviderState: () => noopState,
+        buildLazyActions: async () => [recordingAction],
+        ensureProvider: async () => undefined,
+      };
+    });
+    try {
+      const { runCall } = await import('./cli.js');
+      // --args has a mailbox; --mailbox flag should NOT overwrite it
+      const exitCode = await runCall({
+        command: 'call',
+        callTool: 'records_mailbox_2',
+        callArgs: '{"mailbox":"work"}',
+        mailbox: 'personal',
+      });
+      expect(exitCode).toBe(0);
+      expect(capturedInputs[0]?.mailbox).toBe('work');
+    } finally {
+      vi.doUnmock('./server.js');
+    }
+  });
+});
+
+describe('cli/Call Subcommand Diagnostic Tools', () => {
+  it('Scenario: call get_mailbox_status reports state without requiring provider readiness', async () => {
+    // Regression: the eager-init gate previously short-circuited get_mailbox_status
+    // before it could run, even though that tool is intentionally non-blocking and
+    // designed to report `pending`/`not_configured`/`error` states. The fix skips
+    // ensureProvider when the tool name is `get_mailbox_status`.
+    const { z } = await import('zod');
+    let ranWithoutInit = false;
+    const statusAction = {
+      name: 'get_mailbox_status',
+      description: 'diagnostic stub',
+      input: z.object({}),
+      output: z.object({ status: z.string() }),
+      annotations: {},
+      run: async () => {
+        ranWithoutInit = true;
+        return { status: 'not configured' };
+      },
+    };
+    const errorState = { status: 'error', error: 'simulated init failure', mailboxes: [], defaultMailboxName: null };
+
+    vi.doMock('./server.js', async () => {
+      const actual = await vi.importActual<typeof import('./server.js')>('./server.js');
+      return {
+        ...actual,
+        createLazyProviderState: () => errorState,
+        buildLazyActions: async () => [statusAction],
+        // ensureProvider would normally throw here — verify we never call it
+        ensureProvider: async () => { throw new Error('should not be called for get_mailbox_status'); },
+      };
+    });
+    try {
+      const { runCall } = await import('./cli.js');
+      const exitCode = await runCall({
+        command: 'call',
+        callTool: 'get_mailbox_status',
+        callArgs: '{}',
+      });
+      expect(ranWithoutInit).toBe(true);
+      expect(exitCode).toBe(0);
+    } finally {
+      vi.doUnmock('./server.js');
+    }
+  });
+});
+
+describe('cli/Call Subcommand Output Formatting', () => {
+  it('Scenario: call output is pretty-printed to TTY and compact when piped', async () => {
+    const { formatJsonForOutput } = await import('./cli.js');
+    const value = { emails: [{ id: '1' }, { id: '2' }] };
+
+    // TTY: pretty-printed with newlines and 2-space indent
+    const tty = formatJsonForOutput(value, true);
+    expect(tty).toContain('\n');
+    expect(tty).toContain('  ');
+    expect(JSON.parse(tty)).toEqual(value);
+
+    // Pipe: compact, no newlines, jq-friendly
+    const piped = formatJsonForOutput(value, false);
+    expect(piped).not.toContain('\n');
+    expect(piped).toBe(JSON.stringify(value));
+    expect(JSON.parse(piped)).toEqual(value);
   });
 });
 
