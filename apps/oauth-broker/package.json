@@ -1,0 +1,17 @@
+{
+  "name": "email-agent-mcp-oauth-broker",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Vercel OAuth broker for email-agent-mcp Gmail provider — relays code/refresh exchanges so the client_secret never leaves the server.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@vercel/kv": "^3.0.0"
+  },
+  "devDependencies": {
+    "@vercel/node": "^5.0.0",
+    "typescript": "^5.4.0"
+  }
+}
