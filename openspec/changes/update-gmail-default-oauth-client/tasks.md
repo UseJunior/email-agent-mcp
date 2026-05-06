@@ -1,0 +1,12 @@
+- [x] Update OpenSpec deltas for CLI, mailbox config, and Gmail provider broker behavior
+- [x] Add `apps/oauth-broker` Vercel app with start / callback / tickets / refresh routes
+- [x] Add broker-mode support to `GmailAuthManager` (startBrokerSession, pickUpTicket, broker-aware refresh)
+- [x] Discriminate saved Gmail mailbox metadata by `source: 'byok' | 'broker'`
+- [x] Replace bundled-secret resolver in `runGmailConfigure` with broker-default + BYOK paths
+- [x] Add `--broker-url` / `AGENT_EMAIL_GMAIL_BROKER_URL` plumbing
+- [x] Reject partial BYOK credentials with a clear error
+- [x] Preserve saved-metadata precedence for reconnect (issue #44 regression)
+- [x] Update wizard intro and Gmail provider README to describe broker as default
+- [x] Add tests covering: broker default for new mailbox, BYOK explicit credentials, partial-BYOK error, saved-metadata reuse for both modes
+- [x] Run `openspec validate update-gmail-default-oauth-client --strict`
+- [x] Run targeted package tests (`@usejunior/email-mcp` cli + `@usejunior/provider-gmail`)

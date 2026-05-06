@@ -60,6 +60,10 @@ const gmailMockState = vi.hoisted(() => ({
   refreshToken: 'mock-refresh-token' as string | undefined,
   refreshError: null as Error | Record<string, unknown> | null,
   tokenHealthWarning: undefined as string | undefined,
+  brokerSessionArgs: null as null | Record<string, unknown>,
+  brokerSessionUrl: 'https://broker.example.com/api/start?session=mock-session-id',
+  pickUpTicketArgs: null as null | Record<string, unknown>,
+  lastConstructorConfig: null as null | Record<string, unknown>,
 }));
 
 const promptMockState = vi.hoisted(() => ({
@@ -223,7 +227,9 @@ vi.mock('@usejunior/provider-gmail', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
 
   class MockGmailAuthManager {
-    constructor(_config: Record<string, unknown>) {}
+    constructor(config: Record<string, unknown>) {
+      gmailMockState.lastConstructorConfig = config;
+    }
     async connect() {}
     async generateCodeVerifierAsync() {
       return { codeVerifier: 'mock-code-verifier', codeChallenge: 'mock-code-challenge' };
@@ -234,6 +240,13 @@ vi.mock('@usejunior/provider-gmail', async (importOriginal) => {
     }
     async exchangeCode(code: string, options: Record<string, unknown>) {
       gmailMockState.exchangeCodeArgs = { code, options };
+    }
+    startBrokerSession(opts?: Record<string, unknown>) {
+      gmailMockState.brokerSessionArgs = opts ?? null;
+      return { sessionId: 'mock-session-id', authorizationUrl: gmailMockState.brokerSessionUrl };
+    }
+    async pickUpTicket(sessionId: string, opts?: Record<string, unknown>) {
+      gmailMockState.pickUpTicketArgs = { sessionId, opts: opts ?? null };
     }
     getRefreshToken() {
       return gmailMockState.refreshToken;
@@ -430,27 +443,53 @@ describe('cli/Configure Subcommand', () => {
     expect(opts.provider).toBe('microsoft');
   });
 
-  it('Gmail configure returns an error when credentials are missing', async () => {
-    // Isolate from the user's real ~/.email-agent-mcp so resolveGmailOAuthClient's
-    // saved-metadata lookup does not pick up a default mailbox from the host machine.
-    const tmpHome = await mkdtemp(join(tmpdir(), 'email-agent-mcp-missing-creds-'));
+  it('Gmail configure routes a brand-new mailbox through the OAuth broker (no client_secret on disk)', async () => {
+    // Isolate from the user's real ~/.email-agent-mcp so the saved-metadata
+    // lookup does not pick up a default mailbox from the host machine.
+    const tmpHome = await mkdtemp(join(tmpdir(), 'email-agent-mcp-broker-'));
     const originalHome = process.env['EMAIL_AGENT_MCP_HOME'];
     const originalClientId = process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'];
     const originalClientSecret = process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'];
+    const originalBrokerUrl = process.env['AGENT_EMAIL_GMAIL_BROKER_URL'];
     process.env['EMAIL_AGENT_MCP_HOME'] = tmpHome;
     delete process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'];
     delete process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'];
+    process.env['AGENT_EMAIL_GMAIL_BROKER_URL'] = 'https://broker.test.example.com';
+    const originalProfileEmail = gmailMockState.profileEmail;
+    gmailMockState.profileEmail = 'fresh-user@gmail.com';
     try {
-      const exitCode = await runCli(['configure', '--provider', 'gmail']);
-      expect(exitCode).toBe(1);
+      gmailMockState.enableConfigureMock = true;
+      const exitCode = await runCli([
+        'configure',
+        '--provider',
+        'gmail',
+        '--mailbox',
+        'fresh-user@gmail.com',
+      ]);
+      expect(exitCode).toBe(0);
       expect(console.error).toHaveBeenCalledWith(
-        expect.stringContaining('Missing Gmail OAuth client ID'),
+        expect.stringContaining('Using OAuth broker: https://broker.test.example.com'),
       );
+      // Bundled secret has been fully removed — saved metadata must be
+      // broker-shaped with no clientSecret on disk.
+      expect(gmailMockState.savedMetadata).toMatchObject({
+        provider: 'gmail',
+        source: 'broker',
+        brokerUrl: 'https://broker.test.example.com',
+      });
+      expect(gmailMockState.savedMetadata?.['clientSecret']).toBeUndefined();
+      expect(gmailMockState.lastConstructorConfig).toMatchObject({
+        brokerUrl: 'https://broker.test.example.com',
+      });
+      expect(gmailMockState.pickUpTicketArgs).not.toBeNull();
     } finally {
       if (originalHome === undefined) delete process.env['EMAIL_AGENT_MCP_HOME'];
       else process.env['EMAIL_AGENT_MCP_HOME'] = originalHome;
       if (originalClientId !== undefined) process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'] = originalClientId;
       if (originalClientSecret !== undefined) process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'] = originalClientSecret;
+      if (originalBrokerUrl === undefined) delete process.env['AGENT_EMAIL_GMAIL_BROKER_URL'];
+      else process.env['AGENT_EMAIL_GMAIL_BROKER_URL'] = originalBrokerUrl;
+      gmailMockState.profileEmail = originalProfileEmail;
       await rm(tmpHome, { recursive: true, force: true });
     }
   });
@@ -657,25 +696,24 @@ describe('cli/Gmail Configure', () => {
     expect(httpMockState.lastResponseBody).toContain('Authentication complete');
   });
 
-  it('Scenario: Gmail configure can prompt for missing OAuth credentials in TTY mode', async () => {
-    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
-    promptMockState.textResult = 'prompt-client-id';
-    promptMockState.passwordResult = 'prompt-client-secret';
+  it('Scenario: Gmail configure rejects partial BYOK credentials with a clear error', async () => {
+    // Half-credentials are an obvious user mistake — fail fast rather
+    // than silently dropping into broker mode (which would consent to a
+    // different OAuth client than the user provided a clientId for).
+    const exitCode = await runCli([
+      'configure',
+      '--provider',
+      'gmail',
+      '--mailbox',
+      'personal',
+      '--client-id',
+      'half-only-id',
+    ]);
 
-    try {
-      const exitCode = await runCli(['configure', '--provider', 'gmail', '--mailbox', 'personal']);
-
-      expect(exitCode).toBe(0);
-      expect(gmailMockState.savedMetadata).toMatchObject({
-        mailboxName: 'personal',
-        emailAddress: 'steven.obiajulu@gmail.com',
-        clientId: 'prompt-client-id',
-        clientSecret: 'prompt-client-secret',
-      });
-      expect(gmailMockState.authUrlOptions?.['loginHint']).toBeUndefined();
-    } finally {
-      Object.defineProperty(process.stdout, 'isTTY', { value: false, configurable: true });
-    }
+    expect(exitCode).toBe(1);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Gmail BYOK requires BOTH'),
+    );
   });
 
   it('Scenario: Gmail configure fails when the OAuth callback state does not match', async () => {
