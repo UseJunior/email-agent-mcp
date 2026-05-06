@@ -1,11 +1,30 @@
-// Gmail OAuth2 authentication
+// Gmail OAuth2 authentication.
+//
+// Two modes:
+//   - 'byok'    — caller supplied clientId+clientSecret; auth talks to
+//                 Google directly using google-auth-library's OAuth2Client.
+//   - 'broker'  — caller supplied a brokerUrl; auth never holds the
+//                 client_secret. Code exchange and refresh are relayed
+//                 through the broker (see apps/oauth-broker).
+//
+// In both modes API calls go directly from the user's machine to Gmail
+// with the locally-held access token. Email content never reaches the
+// broker.
 import { CodeChallengeMethod, OAuth2Client } from 'google-auth-library';
+import { randomBytes } from 'node:crypto';
 import type { AuthManager } from '@usejunior/email-core';
 
+export type GmailAuthMode = 'byok' | 'broker';
+
 export interface GmailAuthConfig {
-  clientId: string;
+  /** Bring-your-own-key fields. Both required for `byok` mode. */
+  clientId?: string;
   clientSecret?: string;
   redirectUri?: string;
+
+  /** Broker mode. Mutually exclusive with clientSecret. */
+  brokerUrl?: string;
+
   mailboxName?: string;
   lastInteractiveAuthAt?: string;
 }
@@ -22,6 +41,20 @@ export interface GmailAuthUrlOptions {
 export interface GmailExchangeCodeOptions {
   codeVerifier?: string;
   redirectUri?: string;
+}
+
+export interface GmailBrokerSession {
+  sessionId: string;
+  authorizationUrl: string;
+}
+
+export interface GmailPickUpOptions {
+  /** Polling interval, default 1500ms. */
+  intervalMs?: number;
+  /** Total timeout. Default 5 min — matches the broker's ticket TTL. */
+  timeoutMs?: number;
+  /** Abort signal forwarded into the polling loop. */
+  signal?: AbortSignal;
 }
 
 export interface GmailProfile {
@@ -108,6 +141,14 @@ export function formatGmailAuthError(err: unknown, mailboxName: string): string 
   return collectAuthErrorStrings(err)[0] ?? (err instanceof Error ? err.message : String(err));
 }
 
+interface BrokerTokenResponse {
+  access_token: string;
+  refresh_token?: string;
+  expires_in?: number;
+  scope?: string;
+  token_type?: string;
+}
+
 export class GmailAuthManager implements AuthManager {
   private oauth2Client: OAuth2Client;
   private accessToken?: string;
@@ -115,25 +156,63 @@ export class GmailAuthManager implements AuthManager {
   private expiresAt?: number;
   private readonly mailboxName: string;
   private readonly lastInteractiveAuthAt?: string;
+  private readonly mode: GmailAuthMode;
+  private readonly brokerUrl?: string;
   private needsReauth = false;
   private reconnectPromise: Promise<boolean> | null = null;
 
   constructor(private readonly _config: GmailAuthConfig) {
+    if (_config.brokerUrl && _config.clientSecret) {
+      throw new Error(
+        'GmailAuthManager: brokerUrl and clientSecret are mutually exclusive. Use one mode at a time.',
+      );
+    }
+    if (!_config.brokerUrl && !(_config.clientId && _config.clientSecret)) {
+      throw new Error(
+        'GmailAuthManager: provide either brokerUrl (broker mode) or both clientId and clientSecret (byok mode).',
+      );
+    }
+
+    this.mode = _config.brokerUrl ? 'broker' : 'byok';
+    this.brokerUrl = _config.brokerUrl?.replace(/\/$/, '');
+
     this.oauth2Client = new OAuth2Client(
-      this._config.clientId,
-      this._config.clientSecret,
-      this._config.redirectUri ?? 'urn:ietf:wg:oauth:2.0:oob',
+      _config.clientId,
+      _config.clientSecret,
+      _config.redirectUri ?? 'urn:ietf:wg:oauth:2.0:oob',
     );
-    this.mailboxName = this._config.mailboxName ?? 'gmail';
-    this.lastInteractiveAuthAt = this._config.lastInteractiveAuthAt;
+
+    if (this.mode === 'broker') {
+      // Override the library's auto-refresh path so it never hits Google's
+      // token endpoint without a secret. Refreshes go through the broker.
+      // Cast: refreshHandler is on the type but its signature expects the
+      // full credential shape returned to the library.
+      (this.oauth2Client as unknown as {
+        refreshHandler: () => Promise<{ access_token: string; expiry_date?: number }>;
+      }).refreshHandler = async () => {
+        await this.brokerRefresh();
+        return {
+          access_token: this.accessToken!,
+          expiry_date: this.expiresAt,
+        };
+      };
+    }
+
+    this.mailboxName = _config.mailboxName ?? 'gmail';
+    this.lastInteractiveAuthAt = _config.lastInteractiveAuthAt;
   }
 
-  get clientId(): string { return this._config.clientId; }
+  get clientId(): string | undefined { return this._config.clientId; }
+  get authMode(): GmailAuthMode { return this.mode; }
+  get broker(): string | undefined { return this.brokerUrl; }
 
   /** Returns the underlying OAuth2Client for use with Gmail API. */
   getOAuth2Client(): OAuth2Client { return this.oauth2Client; }
 
   async generateCodeVerifierAsync(): Promise<{ codeVerifier: string; codeChallenge?: string }> {
+    if (this.mode === 'broker') {
+      throw new Error('generateCodeVerifierAsync is only available in byok mode.');
+    }
     return await this.oauth2Client.generateCodeVerifierAsync();
   }
 
@@ -142,7 +221,7 @@ export class GmailAuthManager implements AuthManager {
    *
    * Accepts `access_token` and optionally `refresh_token`. If a refresh_token
    * is provided, the OAuth2Client is configured so that token refresh works
-   * automatically via Google's token endpoint.
+   * automatically — via Google's token endpoint (byok) or the broker.
    */
   async connect(credentials: Record<string, string>): Promise<void> {
     const accessToken = credentials['access_token'];
@@ -150,8 +229,7 @@ export class GmailAuthManager implements AuthManager {
 
     if (!accessToken && !refreshTokenVal) {
       throw new Error(
-        'Gmail OAuth2 connect requires at least an access_token or refresh_token. ' +
-        'Use GmailAuthManager.generateAuthUrl() to initiate the OAuth2 consent flow.',
+        'Gmail OAuth2 connect requires at least an access_token or refresh_token.',
       );
     }
 
@@ -167,11 +245,13 @@ export class GmailAuthManager implements AuthManager {
   }
 
   /**
-   * Generate an OAuth2 authorization URL for the installed-app consent flow.
-   * The user visits this URL, grants access, and receives an authorization code
-   * which can be exchanged via `exchangeCode()`.
+   * Build the consent-flow URL for byok mode. In broker mode use
+   * {@link startBrokerSession} instead.
    */
   generateAuthUrl(options: GmailAuthUrlOptions = {}): string {
+    if (this.mode === 'broker') {
+      throw new Error('generateAuthUrl is only available in byok mode. Use startBrokerSession.');
+    }
     return this.oauth2Client.generateAuthUrl({
       access_type: 'offline',
       include_granted_scopes: true,
@@ -186,10 +266,13 @@ export class GmailAuthManager implements AuthManager {
   }
 
   /**
-   * Exchange an authorization code (from the consent flow) for tokens.
-   * Calls `connect()` internally with the resulting tokens.
+   * Exchange an authorization code for tokens. Byok mode only — broker
+   * users hand the code off to the broker via {@link pickUpTicket}.
    */
   async exchangeCode(code: string, options: GmailExchangeCodeOptions = {}): Promise<void> {
+    if (this.mode === 'broker') {
+      throw new Error('exchangeCode is only available in byok mode. Use pickUpTicket.');
+    }
     const { tokens } = await this.oauth2Client.getToken({
       code,
       codeVerifier: options.codeVerifier,
@@ -203,6 +286,63 @@ export class GmailAuthManager implements AuthManager {
     this.needsReauth = false;
   }
 
+  /**
+   * Begin a broker-mediated authorization session. The CLI generates the
+   * session ID locally so the broker only learns it via the auth URL.
+   */
+  startBrokerSession(opts: { loginHint?: string } = {}): GmailBrokerSession {
+    if (this.mode !== 'broker') {
+      throw new Error('startBrokerSession is only available in broker mode.');
+    }
+    const sessionId = randomBytes(32)
+      .toString('base64')
+      .replace(/=/g, '')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_');
+
+    const params = new URLSearchParams({ session: sessionId });
+    if (opts.loginHint) params.set('login_hint', opts.loginHint);
+    return {
+      sessionId,
+      authorizationUrl: `${this.brokerUrl}/api/start?${params.toString()}`,
+    };
+  }
+
+  /**
+   * Poll the broker's ticket endpoint until tokens land or the timeout
+   * expires. Calls {@link connect} on success.
+   */
+  async pickUpTicket(sessionId: string, opts: GmailPickUpOptions = {}): Promise<void> {
+    if (this.mode !== 'broker') {
+      throw new Error('pickUpTicket is only available in broker mode.');
+    }
+    const interval = Math.max(500, opts.intervalMs ?? 1500);
+    const deadline = Date.now() + Math.max(interval, opts.timeoutMs ?? 5 * 60 * 1000);
+    const url = `${this.brokerUrl}/api/tickets/${encodeURIComponent(sessionId)}`;
+
+    while (Date.now() < deadline) {
+      if (opts.signal?.aborted) throw new Error('pickUpTicket aborted');
+      const res = await fetch(url, { signal: opts.signal });
+      if (res.status === 200) {
+        const tokens = (await res.json()) as BrokerTokenResponse;
+        await this.connect({
+          access_token: tokens.access_token,
+          ...(tokens.refresh_token ? { refresh_token: tokens.refresh_token } : {}),
+        });
+        if (typeof tokens.expires_in === 'number') {
+          this.expiresAt = Date.now() + tokens.expires_in * 1000;
+        }
+        return;
+      }
+      if (res.status !== 404) {
+        const body = await safeReadText(res);
+        throw new Error(`Broker ticket pickup failed (${res.status}): ${body}`);
+      }
+      await sleep(interval, opts.signal);
+    }
+    throw new Error('Broker ticket pickup timed out — user did not complete consent.');
+  }
+
   async refresh(): Promise<void> {
     if (!this.refreshToken) {
       this.needsReauth = true;
@@ -210,11 +350,14 @@ export class GmailAuthManager implements AuthManager {
     }
 
     try {
-      // Use the OAuth2Client's built-in refresh mechanism
-      const { credentials } = await this.oauth2Client.refreshAccessToken();
-      this.accessToken = credentials.access_token ?? undefined;
-      this.expiresAt = credentials.expiry_date ?? Date.now() + 3600000;
-      this.needsReauth = false;
+      if (this.mode === 'broker') {
+        await this.brokerRefresh();
+      } else {
+        const { credentials } = await this.oauth2Client.refreshAccessToken();
+        this.accessToken = credentials.access_token ?? undefined;
+        this.expiresAt = credentials.expiry_date ?? Date.now() + 3600000;
+        this.needsReauth = false;
+      }
     } catch (err) {
       if (isGmailReauthError(err)) {
         this.needsReauth = true;
@@ -223,12 +366,49 @@ export class GmailAuthManager implements AuthManager {
     }
   }
 
+  private async brokerRefresh(): Promise<void> {
+    if (!this.refreshToken) throw new Error('No refresh token');
+    const res = await fetch(`${this.brokerUrl}/api/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: this.refreshToken }),
+    });
+    if (!res.ok) {
+      const body = await safeReadText(res);
+      const err: Error & { error?: string } = new Error(`Broker refresh failed (${res.status}): ${body}`);
+      // Surface upstream invalid_grant so isGmailReauthError() recognises it.
+      if (/invalid_grant/i.test(body)) err.error = 'invalid_grant';
+      throw err;
+    }
+    const tokens = (await res.json()) as BrokerTokenResponse;
+    this.accessToken = tokens.access_token;
+    if (tokens.refresh_token) this.refreshToken = tokens.refresh_token;
+    this.expiresAt = Date.now() + (tokens.expires_in ?? 3600) * 1000;
+    this.oauth2Client.setCredentials({
+      access_token: this.accessToken,
+      refresh_token: this.refreshToken,
+    });
+    this.needsReauth = false;
+  }
+
   async disconnect(): Promise<void> {
-    if (this.accessToken) {
+    if (this.mode === 'byok' && this.accessToken) {
       try {
         await this.oauth2Client.revokeToken(this.accessToken);
       } catch {
-        // Best-effort revocation; token may already be invalid
+        // Best-effort revocation; token may already be invalid.
+      }
+    }
+    // Broker mode: revocation needs Google's revoke endpoint, which still
+    // works with just the access token (no client_secret needed).
+    if (this.mode === 'broker' && this.accessToken) {
+      try {
+        await fetch(
+          `https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(this.accessToken)}`,
+          { method: 'POST' },
+        );
+      } catch {
+        // Best-effort.
       }
     }
     this.oauth2Client.setCredentials({});
@@ -306,4 +486,23 @@ export class GmailAuthManager implements AuthManager {
 
     return await response.json() as GmailProfile;
   }
+}
+
+async function safeReadText(res: Response): Promise<string> {
+  try { return await res.text(); } catch { return ''; }
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('aborted'));
+    const t = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(t);
+      reject(new Error('aborted'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }

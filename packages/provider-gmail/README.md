@@ -4,20 +4,32 @@ Gmail setup for `email-agent-mcp`.
 
 ## Status
 
-The Gmail provider supports read/search/thread/draft/send flows through the MCP server. The recommended path is `email-agent-mcp configure --provider gmail`, which starts a local browser OAuth flow and writes the mailbox metadata for you. Manual token-file setup still works when you already have a refresh token.
+The Gmail provider supports read/search/thread/draft/send flows through the MCP server. First-time setup goes through a hosted OAuth broker so users do not have to register their own Google Cloud project. Power users can still bring their own OAuth client.
 
-## 1. Create Google OAuth credentials
+## 1. Run the interactive CLI flow
 
-Create an OAuth client in Google Cloud Console:
+```bash
+npx tsx packages/email-mcp/src/cli.ts configure \
+  --provider gmail \
+  --mailbox personal
+```
 
-1. Enable the Gmail API for your project.
-2. Create an OAuth client ID.
-3. Use a desktop-app client if you want the simplest local flow.
-4. Record the `client_id` and `client_secret`.
+That opens Google's consent screen via the hosted broker (`https://oauth.usejunior.com` by default). The broker holds the OAuth `client_secret` server-side, completes the code exchange, and hands the resulting tokens back to the CLI. **Email content never touches the broker** — Gmail API calls go directly from your machine to Google with the locally-held access token.
 
-## 2. Run the interactive CLI flow
+To point at a self-hosted broker (for example, your own Vercel deployment of `apps/oauth-broker`), set:
 
-With your Google OAuth client ready, run:
+```bash
+npx tsx packages/email-mcp/src/cli.ts configure \
+  --provider gmail \
+  --mailbox personal \
+  --broker-url https://my-broker.example.com
+```
+
+Or `export AGENT_EMAIL_GMAIL_BROKER_URL=https://my-broker.example.com`.
+
+## 2. Bring-your-own-key (BYOK) path
+
+If you want to authenticate against your own Google OAuth client (dedicated quota, your privacy policy, your verification status), pass both halves of the credentials:
 
 ```bash
 npx tsx packages/email-mcp/src/cli.ts configure \
@@ -27,7 +39,7 @@ npx tsx packages/email-mcp/src/cli.ts configure \
   --client-secret YOUR_GOOGLE_CLIENT_SECRET
 ```
 
-You can also provide the OAuth client through environment variables:
+Or via env vars:
 
 ```bash
 export AGENT_EMAIL_GMAIL_CLIENT_ID=YOUR_GOOGLE_CLIENT_ID
@@ -35,7 +47,15 @@ export AGENT_EMAIL_GMAIL_CLIENT_SECRET=YOUR_GOOGLE_CLIENT_SECRET
 npx tsx packages/email-mcp/src/cli.ts configure --provider gmail --mailbox personal
 ```
 
-The CLI prints a Google authorization URL, listens on a local `127.0.0.1` callback, saves the mailbox metadata under `~/.email-agent-mcp/tokens/`, and auto-adds the authenticated address to `send-allowlist.json`.
+To create the client in Google Cloud Console:
+
+1. Enable the Gmail API for your project.
+2. Create an OAuth client ID of type "Desktop app".
+3. Record the `client_id` and `client_secret`.
+
+The BYOK path runs the full local-loopback OAuth dance (`http://127.0.0.1`); no broker is involved.
+
+The CLI saves mailbox metadata under `~/.email-agent-mcp/tokens/` and auto-adds the authenticated address to `send-allowlist.json`. Saved metadata is **never** rewritten with a different OAuth client on subsequent runs — re-running `configure` for an existing mailbox reuses whatever was saved (broker URL or BYOK credentials).
 
 ## 3. Manual refresh-token path
 
@@ -48,7 +68,7 @@ The simplest path is Google's OAuth 2.0 Playground using your own client credent
 5. Exchange the authorization code for tokens.
 6. Copy the returned `refresh_token`.
 
-`email-agent-mcp` only needs the refresh token on disk. Access tokens are refreshed automatically by `google-auth-library`.
+`email-agent-mcp` only needs the refresh token on disk. Access tokens are refreshed automatically — through the broker for broker-mode mailboxes, directly via `google-auth-library` for BYOK mailboxes.
 
 ## 4. Write the mailbox metadata file
 
@@ -62,15 +82,30 @@ Path:
 ~/.email-agent-mcp/tokens/steven-obiajulu-at-gmail-com.json
 ```
 
-Contents:
+BYOK contents:
 
 ```json
 {
   "provider": "gmail",
+  "source": "byok",
   "mailboxName": "personal",
   "emailAddress": "steven.obiajulu@gmail.com",
   "clientId": "YOUR_GOOGLE_CLIENT_ID",
   "clientSecret": "YOUR_GOOGLE_CLIENT_SECRET",
+  "refreshToken": "YOUR_GOOGLE_REFRESH_TOKEN",
+  "lastInteractiveAuthAt": "2026-04-08T12:00:00.000Z"
+}
+```
+
+Broker contents (no `clientSecret` on disk — refreshes go through the broker):
+
+```json
+{
+  "provider": "gmail",
+  "source": "broker",
+  "mailboxName": "personal",
+  "emailAddress": "steven.obiajulu@gmail.com",
+  "brokerUrl": "https://oauth.usejunior.com",
   "refreshToken": "YOUR_GOOGLE_REFRESH_TOKEN",
   "lastInteractiveAuthAt": "2026-04-08T12:00:00.000Z"
 }
