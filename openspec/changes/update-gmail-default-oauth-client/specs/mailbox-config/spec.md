@@ -15,6 +15,11 @@ The system SHALL provide a `configure_mailbox` action that connects a named mail
 - **AND** for `'byok'` the metadata stores the user-supplied `clientId` and `clientSecret` plus the `refreshToken`
 - **AND** for `'broker'` the metadata stores the `brokerUrl` plus the `refreshToken` and SHALL NOT store any `clientSecret` on disk
 
-#### Scenario: Pre-broker metadata is parsed as BYOK
-- **WHEN** the system loads a Gmail mailbox metadata file written before the broker change (no `source` field, but with `clientId` and `clientSecret`)
+#### Scenario: Pre-broker metadata is parsed as BYOK only when unambiguous
+- **WHEN** the system loads a Gmail mailbox metadata file written before the broker change (no `source` field) that has both `clientId` and `clientSecret` and NO `brokerUrl`
 - **THEN** the system treats it as `source: 'byok'` for the purposes of subsequent loads and reconnects
+
+#### Scenario: Ambiguous mixed-shape metadata is rejected
+- **WHEN** the system loads a Gmail mailbox metadata file that contains BOTH `clientSecret` and `brokerUrl`
+- **THEN** the system refuses to interpret the record (returns null) and leaves the mailbox unconfigured, forcing the user to re-run configure
+- **AND** `source: 'broker'` records that lack `brokerUrl`, and `source: 'byok'` records that lack `clientSecret`, are likewise rejected

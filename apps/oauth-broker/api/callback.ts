@@ -1,47 +1,66 @@
-// GET /api/callback?code=...&state=<session>
+// GET /api/callback?code=...&state=<session_id>
+//   or  /api/callback?error=access_denied&state=<session_id>
 //
-// Google's redirect lands here. We exchange the code for tokens (using
-// the server-held client_secret), park them under the session ID, and
-// show a friendly "return to your terminal" page. The CLI is polling
-// /api/tickets/:session and will pick them up.
+// Google's redirect target. Exchanges the code for tokens (using the
+// server-held client_secret), advances the session to 'ready', then
+// renders a friendly "return to your terminal" page. The CLI is
+// polling /api/tickets/claim.
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { exchangeCode } from '../lib/google.js';
 import { getStore } from '../lib/store.js';
-
-const SESSION_RE = /^[A-Za-z0-9_-]{32,128}$/;
+import { ID_RE } from '../lib/http.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (req.method !== 'GET') {
     res.status(405).json({ error: 'method_not_allowed' });
     return;
   }
+  res.setHeader('Cache-Control', 'no-store');
 
+  const state = typeof req.query['state'] === 'string' ? req.query['state'] : '';
   const error = typeof req.query['error'] === 'string' ? req.query['error'] : undefined;
+  const code = typeof req.query['code'] === 'string' ? req.query['code'] : '';
+
+  if (!ID_RE.test(state)) {
+    renderTerminalPage(res, 400, 'Invalid OAuth callback: malformed state.');
+    return;
+  }
+
+  // Mark the session terminally failed for explicit user-facing reasons
+  // — this is what gives the CLI a distinguishable signal beyond "still
+  // pending".
   if (error) {
+    await getStore().setFailed(state, 'denied', `User cancelled or denied: ${error}`);
     renderTerminalPage(res, 400, `Authentication cancelled or denied: ${error}`);
     return;
   }
 
-  const code = typeof req.query['code'] === 'string' ? req.query['code'] : '';
-  const state = typeof req.query['state'] === 'string' ? req.query['state'] : '';
-  if (!code || !SESSION_RE.test(state)) {
-    renderTerminalPage(res, 400, 'Invalid OAuth callback: missing code or malformed state.');
+  if (!code) {
+    await getStore().setFailed(state, 'exchange_failed', 'Google callback did not include a code.');
+    renderTerminalPage(res, 400, 'Invalid OAuth callback: missing code.');
     return;
   }
 
   try {
     const tokens = await exchangeCode(code);
-    await getStore().put(state, {
-      accessToken: tokens.access_token,
-      refreshToken: tokens.refresh_token,
-      expiresIn: tokens.expires_in,
+    const advanced = await getStore().setReady(state, {
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      expires_in: tokens.expires_in,
       scope: tokens.scope,
-      tokenType: tokens.token_type,
+      token_type: tokens.token_type,
     });
+    if (!advanced) {
+      // Session was missing, expired, or already advanced — nothing the
+      // user can do at this point.
+      renderTerminalPage(res, 410, 'This authentication session has expired. Re-run configure.');
+      return;
+    }
     renderTerminalPage(res, 200, 'Authentication complete. You can return to your terminal.');
   } catch (err) {
     const message = err instanceof Error ? err.message : 'token exchange failed';
+    await getStore().setFailed(state, 'exchange_failed', message);
     renderTerminalPage(res, 502, `Authentication failed: ${message}`);
   }
 }

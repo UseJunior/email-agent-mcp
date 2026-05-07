@@ -11,7 +11,7 @@
 // with the locally-held access token. Email content never reaches the
 // broker.
 import { CodeChallengeMethod, OAuth2Client } from 'google-auth-library';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { AuthManager } from '@usejunior/email-core';
 
 export type GmailAuthMode = 'byok' | 'broker';
@@ -44,7 +44,11 @@ export interface GmailExchangeCodeOptions {
 }
 
 export interface GmailBrokerSession {
+  /** Public correlation handle (passes through URLs / `state`). */
   sessionId: string;
+  /** Private claim credential (kept on the CLI; never in any URL). */
+  pickupSecret: string;
+  /** Browser entry point. */
   authorizationUrl: string;
 }
 
@@ -183,19 +187,24 @@ export class GmailAuthManager implements AuthManager {
     );
 
     if (this.mode === 'broker') {
-      // Override the library's auto-refresh path so it never hits Google's
-      // token endpoint without a secret. Refreshes go through the broker.
-      // Cast: refreshHandler is on the type but its signature expects the
-      // full credential shape returned to the library.
-      (this.oauth2Client as unknown as {
-        refreshHandler: () => Promise<{ access_token: string; expiry_date?: number }>;
-      }).refreshHandler = async () => {
+      // Route refresh through the broker — never hit Google's token endpoint
+      // without the client_secret. google-auth-library 8.9+ exposes
+      // `refreshHandler` for exactly this. The library only consults the
+      // handler when (a) refresh_token is absent from credentials AND
+      // (b) the access token is missing/expired, so the rest of the file
+      // takes care to keep refresh_token off `oauth2Client.credentials` and
+      // to always populate `expiry_date`.
+      this.oauth2Client.refreshHandler = async () => {
         await this.brokerRefresh();
         return {
-          access_token: this.accessToken!,
-          expiry_date: this.expiresAt,
+          access_token: this.accessToken ?? '',
+          expiry_date: this.expiresAt ?? Date.now() + 3600_000,
         };
       };
+      // If a Gmail API call still comes back 401 (e.g. clock skew lets a
+      // pre-emptive refresh through but Google rejects), let the library
+      // re-enter the handler instead of giving up.
+      this.oauth2Client.forceRefreshOnFailure = true;
     }
 
     this.mailboxName = _config.mailboxName ?? 'gmail';
@@ -222,8 +231,15 @@ export class GmailAuthManager implements AuthManager {
    * Accepts `access_token` and optionally `refresh_token`. If a refresh_token
    * is provided, the OAuth2Client is configured so that token refresh works
    * automatically — via Google's token endpoint (byok) or the broker.
+   *
+   * Broker-mode invariant: refresh_token MUST NOT live on `oauth2Client.credentials`.
+   * If it does, google-auth-library prefers `refreshAccessTokenAsync()` on 401
+   * (oauth2client.js:227,274,430), bypassing our `refreshHandler` and trying to
+   * exchange against Google's token endpoint without the secret. We hold the
+   * refresh token on this instance instead and route refreshes through the
+   * broker exclusively.
    */
-  async connect(credentials: Record<string, string>): Promise<void> {
+  async connect(credentials: Record<string, string>, options: { expiresInSeconds?: number } = {}): Promise<void> {
     const accessToken = credentials['access_token'];
     const refreshTokenVal = credentials['refresh_token'];
 
@@ -233,14 +249,31 @@ export class GmailAuthManager implements AuthManager {
       );
     }
 
-    this.oauth2Client.setCredentials({
-      access_token: accessToken,
-      refresh_token: refreshTokenVal,
-    });
+    // Compute expiry. Only assert one when we actually have an access_token —
+    // otherwise leave it undefined and trigger a refresh on first use.
+    let expiryDate: number | undefined;
+    if (accessToken) {
+      const ttlMs = (options.expiresInSeconds ?? 3600) * 1000;
+      expiryDate = Date.now() + ttlMs;
+    }
+
+    if (this.mode === 'broker') {
+      // Only the access_token (+ expiry) goes into the library. The refresh
+      // token is held by us and only ever sent to the broker.
+      this.oauth2Client.setCredentials(
+        accessToken ? { access_token: accessToken, expiry_date: expiryDate } : {},
+      );
+    } else {
+      this.oauth2Client.setCredentials({
+        access_token: accessToken,
+        refresh_token: refreshTokenVal,
+        expiry_date: expiryDate,
+      });
+    }
 
     this.accessToken = accessToken;
     this.refreshToken = refreshTokenVal;
-    this.expiresAt = Date.now() + 3600000; // 1 hour default
+    this.expiresAt = expiryDate;
     this.needsReauth = false;
   }
 
@@ -290,55 +323,113 @@ export class GmailAuthManager implements AuthManager {
    * Begin a broker-mediated authorization session. The CLI generates the
    * session ID locally so the broker only learns it via the auth URL.
    */
-  startBrokerSession(opts: { loginHint?: string } = {}): GmailBrokerSession {
+  /**
+   * Begin a broker-mediated authorization session.
+   *
+   * Two random secrets are generated locally:
+   *   - `sessionId`     — public correlation handle, ends up in the
+   *                       browser URL and Google's `state` param. A leak
+   *                       only lets an observer see *that* a session
+   *                       exists; it does NOT let them claim tokens.
+   *   - `pickupSecret`  — private claim credential. Only its SHA-256
+   *                       hash is sent to the broker. The raw secret
+   *                       never appears in any URL.
+   *
+   * The CLI must register the session at /api/sessions before opening
+   * the browser; otherwise /api/start will 410.
+   */
+  async startBrokerSession(opts: { loginHint?: string } = {}): Promise<GmailBrokerSession> {
     if (this.mode !== 'broker') {
       throw new Error('startBrokerSession is only available in broker mode.');
     }
-    const sessionId = randomBytes(32)
-      .toString('base64')
-      .replace(/=/g, '')
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_');
+    const sessionId = randomUrlSafe(32);
+    const pickupSecret = randomUrlSafe(32);
+    const pickupHash = createHash('sha256').update(pickupSecret).digest('hex');
+
+    const registerRes = await fetch(`${this.brokerUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        pickup_hash: pickupHash,
+        ...(opts.loginHint ? { login_hint: opts.loginHint } : {}),
+      }),
+    });
+    if (!registerRes.ok) {
+      const body = await safeReadText(registerRes);
+      throw new Error(`Broker session registration failed (${registerRes.status}): ${body}`);
+    }
 
     const params = new URLSearchParams({ session: sessionId });
-    if (opts.loginHint) params.set('login_hint', opts.loginHint);
     return {
       sessionId,
+      pickupSecret,
       authorizationUrl: `${this.brokerUrl}/api/start?${params.toString()}`,
     };
   }
 
   /**
-   * Poll the broker's ticket endpoint until tokens land or the timeout
-   * expires. Calls {@link connect} on success.
+   * Poll the broker's ticket endpoint until tokens land, the user
+   * cancels, or the timeout expires. Distinguishes between the
+   * possible failure states so callers can surface actionable errors.
    */
-  async pickUpTicket(sessionId: string, opts: GmailPickUpOptions = {}): Promise<void> {
+  async pickUpTicket(
+    session: { sessionId: string; pickupSecret: string },
+    opts: GmailPickUpOptions = {},
+  ): Promise<void> {
     if (this.mode !== 'broker') {
       throw new Error('pickUpTicket is only available in broker mode.');
     }
     const interval = Math.max(500, opts.intervalMs ?? 1500);
     const deadline = Date.now() + Math.max(interval, opts.timeoutMs ?? 5 * 60 * 1000);
-    const url = `${this.brokerUrl}/api/tickets/${encodeURIComponent(sessionId)}`;
+    const url = `${this.brokerUrl}/api/tickets/claim`;
 
     while (Date.now() < deadline) {
       if (opts.signal?.aborted) throw new Error('pickUpTicket aborted');
-      const res = await fetch(url, { signal: opts.signal });
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: session.sessionId,
+          pickup_secret: session.pickupSecret,
+        }),
+        signal: opts.signal,
+      });
+
       if (res.status === 200) {
         const tokens = (await res.json()) as BrokerTokenResponse;
-        await this.connect({
-          access_token: tokens.access_token,
-          ...(tokens.refresh_token ? { refresh_token: tokens.refresh_token } : {}),
-        });
-        if (typeof tokens.expires_in === 'number') {
-          this.expiresAt = Date.now() + tokens.expires_in * 1000;
-        }
+        await this.connect(
+          {
+            access_token: tokens.access_token,
+            ...(tokens.refresh_token ? { refresh_token: tokens.refresh_token } : {}),
+          },
+          typeof tokens.expires_in === 'number' ? { expiresInSeconds: tokens.expires_in } : {},
+        );
         return;
       }
-      if (res.status !== 404) {
-        const body = await safeReadText(res);
-        throw new Error(`Broker ticket pickup failed (${res.status}): ${body}`);
+
+      if (res.status === 202) {
+        await sleep(interval, opts.signal);
+        continue;
       }
-      await sleep(interval, opts.signal);
+
+      // Terminal: surface a useful message instead of generic timeout text.
+      const body = await safeReadText(res);
+      let parsed: { status?: string; error?: string; error_description?: string } = {};
+      try { parsed = JSON.parse(body) as typeof parsed; } catch { /* ignore */ }
+
+      if (res.status === 403) {
+        throw new Error('Broker rejected the pickup secret — auth was likely intercepted. Re-run configure.');
+      }
+      if (res.status === 410) {
+        const reason = parsed.status ?? 'expired';
+        const detail = parsed.error_description ? ` (${parsed.error_description})` : '';
+        throw new Error(`Broker session ${reason}${detail}. Re-run configure.`);
+      }
+      if (res.status === 404) {
+        throw new Error('Broker has no record of this session. Re-run configure.');
+      }
+      throw new Error(`Broker ticket claim failed (${res.status}): ${body}`);
     }
     throw new Error('Broker ticket pickup timed out — user did not complete consent.');
   }
@@ -384,9 +475,11 @@ export class GmailAuthManager implements AuthManager {
     this.accessToken = tokens.access_token;
     if (tokens.refresh_token) this.refreshToken = tokens.refresh_token;
     this.expiresAt = Date.now() + (tokens.expires_in ?? 3600) * 1000;
+    // Broker mode: keep refresh_token off the OAuth2Client. Setting it would
+    // re-enable refreshAccessTokenAsync() and bypass our refreshHandler on 401.
     this.oauth2Client.setCredentials({
       access_token: this.accessToken,
-      refresh_token: this.refreshToken,
+      expiry_date: this.expiresAt,
     });
     this.needsReauth = false;
   }
@@ -486,6 +579,14 @@ export class GmailAuthManager implements AuthManager {
 
     return await response.json() as GmailProfile;
   }
+}
+
+function randomUrlSafe(bytes: number): string {
+  return randomBytes(bytes)
+    .toString('base64')
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
 }
 
 async function safeReadText(res: Response): Promise<string> {

@@ -11,7 +11,12 @@ The system SHALL provide a `configure` subcommand (aliased as `setup`) with an i
 #### Scenario: Direct Gmail configure (broker default)
 - **WHEN** `email-agent-mcp configure --provider gmail` is run without `--client-id`, `--client-secret`, or Gmail BYOK env vars, and the mailbox has no prior saved metadata
 - **THEN** the system contacts the OAuth broker (default `https://oauth.usejunior.com`, override via `--broker-url` or `AGENT_EMAIL_GMAIL_BROKER_URL`)
-- **AND** opens the broker's authorization URL in the browser, polls the broker's ticket endpoint for tokens, and persists mailbox metadata with `source: 'broker'` once consent completes
+- **AND** registers a session at `POST /api/sessions` with a locally-generated `session_id` and the SHA-256 hash of a locally-generated `pickup_secret`
+- **AND** opens the broker's authorization URL in the browser, polls `POST /api/tickets/claim` (presenting the raw `pickup_secret` for proof of ownership), and persists mailbox metadata with `source: 'broker'` once consent completes
+
+#### Scenario: Broker URL must be https (or http loopback)
+- **WHEN** `--broker-url` or `AGENT_EMAIL_GMAIL_BROKER_URL` is set to a non-https URL that is not `http://localhost`, `http://127.0.0.1`, or `http://[::1]`
+- **THEN** the system refuses to use it and surfaces a configuration error
 
 #### Scenario: Direct Gmail configure (BYOK)
 - **WHEN** `email-agent-mcp configure --provider gmail` is run with both `--client-id` and `--client-secret` (or both `AGENT_EMAIL_GMAIL_CLIENT_ID` and `AGENT_EMAIL_GMAIL_CLIENT_SECRET`)

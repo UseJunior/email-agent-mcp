@@ -57,6 +57,7 @@ describe('provider-gmail/OAuth2 Authentication', () => {
     expect(auth.getOAuth2Client().setCredentials).toHaveBeenCalledWith({
       access_token: 'gmail-token',
       refresh_token: 'gmail-refresh',
+      expiry_date: expect.any(Number),
     });
 
     await auth.refresh();

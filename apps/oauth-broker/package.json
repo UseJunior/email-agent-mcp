@@ -7,11 +7,20 @@
   "engines": {
     "node": ">=20"
   },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc --noEmit",
+    "test": "vitest",
+    "test:run": "vitest run"
+  },
   "dependencies": {
     "@vercel/kv": "^3.0.0"
   },
   "devDependencies": {
+    "@types/node": "^25.5.0",
     "@vercel/node": "^5.0.0",
-    "typescript": "^5.4.0"
+    "@vitest/coverage-v8": "^4.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^4.0.0"
   }
 }

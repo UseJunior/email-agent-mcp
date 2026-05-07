@@ -8,7 +8,11 @@ The defensible way to remove the friction is the same pattern commercial AI emai
 
 ## What Changes
 
-- Add a Vercel-deployable OAuth broker app under `apps/oauth-broker` with four routes (`/api/start`, `/api/callback`, `/api/tickets/:id`, `/api/refresh`) that hold the Gmail OAuth `client_id` + `client_secret` server-side and relay the dance.
+- Add a Vercel-deployable OAuth broker app under `apps/oauth-broker` with five routes (`POST /api/sessions`, `GET /api/start`, `GET /api/callback`, `POST /api/tickets/claim`, `POST /api/refresh`) that hold the Gmail OAuth `client_id` + `client_secret` server-side and relay the dance.
+- Split the public `session_id` (visible in URLs and Google's `state`) from a private `pickup_secret` only the CLI knows; the broker stores SHA-256 of the secret and verifies it in constant time at claim time. URL leakage alone cannot steal tokens.
+- Track session state on the broker (`pending` | `ready` | `consumed` | `denied` | `exchange_failed` | `expired`) so the CLI can surface actionable errors instead of mistaking "user clicked deny" for "still pending".
+- Use atomic Redis `GETDEL` (or single-threaded delete on the in-memory dev backend) for one-shot token claim — concurrent claims with the same correct secret cannot both succeed.
+- Refuse to start in production without Redis attached (`KV_REST_API_URL` must be set when `VERCEL_ENV=production` or `BROKER_REQUIRE_KV=true`).
 - Make broker mode the default for Gmail configure when no BYOK credentials are supplied. The bundled client_secret pattern is **removed** — the CLI no longer ships any Google client_secret.
 - Keep BYO-client (`--client-id` + `--client-secret`) as a first-class path for users who want their own quota / verification status.
 - Add `--broker-url` flag and `AGENT_EMAIL_GMAIL_BROKER_URL` env var so users can self-host the broker.

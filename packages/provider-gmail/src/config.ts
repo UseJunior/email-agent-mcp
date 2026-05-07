@@ -73,22 +73,37 @@ function normalizeGmailMailboxMetadata(value: unknown): GmailMailboxMetadata | n
         : undefined,
   };
 
-  // Inferred discriminator for backward-compat: pre-broker metadata had
-  // no `source` field; treat any record with clientId+clientSecret as
-  // BYOK.
   const declared = value['source'];
   const source: GmailAuthSource | undefined =
     declared === 'byok' || declared === 'broker' ? declared : undefined;
 
-  const brokerUrl = value['brokerUrl'];
-  if (source === 'broker' || (!source && typeof brokerUrl === 'string')) {
-    if (typeof brokerUrl !== 'string') return null;
+  const brokerUrl = typeof value['brokerUrl'] === 'string' ? (value['brokerUrl'] as string) : undefined;
+  const clientId = typeof value['clientId'] === 'string' ? (value['clientId'] as string) : undefined;
+  const clientSecret = typeof value['clientSecret'] === 'string' ? (value['clientSecret'] as string) : undefined;
+
+  // Reject ambiguous mixed-shape records: they could equally describe
+  // either mode, and we never want to silently pick one. A mailbox file
+  // that has both a brokerUrl AND clientSecret is most likely corrupted;
+  // forcing a re-configure is safer than guessing.
+  const hasByokFields = clientId !== undefined && clientSecret !== undefined;
+  const hasBrokerField = brokerUrl !== undefined;
+  if (hasByokFields && hasBrokerField) return null;
+
+  if (source === 'broker') {
+    if (!hasBrokerField) return null;
     return { ...base, source: 'broker', brokerUrl };
   }
+  if (source === 'byok') {
+    if (!hasByokFields) return null;
+    return { ...base, source: 'byok', clientId, clientSecret };
+  }
 
-  const clientId = value['clientId'];
-  const clientSecret = value['clientSecret'];
-  if (typeof clientId === 'string' && typeof clientSecret === 'string') {
+  // Backward-compat: pre-broker metadata had no `source` field. Only
+  // infer BYOK if the BYOK fields are present AND no broker field has
+  // been written by a newer version. Records with only brokerUrl and
+  // no `source` are rejected — if a future format change adds an
+  // explicit broker `source`, those files will be valid then.
+  if (hasByokFields && !hasBrokerField) {
     return { ...base, source: 'byok', clientId, clientSecret };
   }
 

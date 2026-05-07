@@ -963,12 +963,11 @@ type GmailAuthSetup =
   | { mode: 'broker'; brokerUrl: string; source: 'explicit' | 'saved' | 'default' };
 
 async function resolveGmailAuthSetup(opts: CliOptions): Promise<GmailAuthSetup> {
-  const explicitClientId = opts.clientId
-    ?? process.env['AGENT_EMAIL_GMAIL_CLIENT_ID']
-    ?? process.env['GOOGLE_CLIENT_ID'];
-  const explicitClientSecret = opts.clientSecret
-    ?? process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET']
-    ?? process.env['GOOGLE_CLIENT_SECRET'];
+  // Only honour our namespaced env vars. Fallback to GOOGLE_CLIENT_ID /
+  // GOOGLE_CLIENT_SECRET would silently collide with other developer
+  // tools (gcloud, oauth2l, etc.) on the same shell.
+  const explicitClientId = opts.clientId ?? process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'];
+  const explicitClientSecret = opts.clientSecret ?? process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'];
   const explicitBroker = opts.brokerUrl ?? process.env['AGENT_EMAIL_GMAIL_BROKER_URL'];
 
   // 1. Explicit BYOK wins. Forces broker→BYOK migration on re-run.
@@ -983,7 +982,7 @@ async function resolveGmailAuthSetup(opts: CliOptions): Promise<GmailAuthSetup> 
 
   // 2. Explicit broker URL wins over saved.
   if (explicitBroker) {
-    return { mode: 'broker', brokerUrl: explicitBroker, source: 'explicit' };
+    return { mode: 'broker', brokerUrl: validateBrokerUrl(explicitBroker), source: 'explicit' };
   }
 
   // 3. Reuse whatever was previously saved for this mailbox — preserves
@@ -996,11 +995,29 @@ async function resolveGmailAuthSetup(opts: CliOptions): Promise<GmailAuthSetup> 
     return { mode: 'byok', clientId: saved.clientId, clientSecret: saved.clientSecret, source: 'saved' };
   }
   if (saved?.source === 'broker') {
-    return { mode: 'broker', brokerUrl: saved.brokerUrl, source: 'saved' };
+    return { mode: 'broker', brokerUrl: validateBrokerUrl(saved.brokerUrl), source: 'saved' };
   }
 
   // 4. New mailbox, no creds → broker default.
   return { mode: 'broker', brokerUrl: '', source: 'default' };
+}
+
+function validateBrokerUrl(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`Invalid broker URL: ${url}`);
+  }
+  // Allow https:// for production and http:// only for loopback so
+  // `vercel dev` and self-hosted localhost setups work.
+  const isLoopback = ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname);
+  if (parsed.protocol === 'https:' || (parsed.protocol === 'http:' && isLoopback)) {
+    return parsed.origin + parsed.pathname.replace(/\/$/, '');
+  }
+  throw new Error(
+    `Broker URL must be https:// (or http:// on loopback for local dev). Got: ${url}`,
+  );
 }
 
 async function runGmailConfigure(opts: CliOptions): Promise<number> {
@@ -1018,8 +1035,9 @@ async function runGmailConfigure(opts: CliOptions): Promise<number> {
   console.error(`[email-agent-mcp] Configuring mailbox "${mailboxName}" with Gmail`);
 
   if (setup.mode === 'broker') {
-    const brokerUrl = (setup.brokerUrl || DEFAULT_GMAIL_BROKER_URL).replace(/\/$/, '');
+    const brokerUrl = validateBrokerUrl(setup.brokerUrl || DEFAULT_GMAIL_BROKER_URL);
     console.error(`[email-agent-mcp] Using OAuth broker: ${brokerUrl}`);
+    console.error('[email-agent-mcp] The broker holds the OAuth client_secret server-side; this CLI never sees it.');
     console.error('[email-agent-mcp] To bring your own OAuth client instead, pass --client-id and --client-secret.');
     console.error('');
     return await runGmailBrokerConfigure({
@@ -1103,16 +1121,20 @@ async function runGmailBrokerConfigure(args: {
     mailboxName,
   });
 
-  const session = auth.startBrokerSession({
+  const session = await auth.startBrokerSession({
     loginHint: mailboxName.includes('@') ? mailboxName : undefined,
   });
 
   console.error('[email-agent-mcp] Open this URL in your browser to authorize Gmail access:');
   console.error(`  ${session.authorizationUrl}`);
-  console.error('[email-agent-mcp] After consenting, this CLI picks the tokens up directly from the broker.');
+  console.error('[email-agent-mcp] You are authorizing the OAuth client operated by the broker above.');
+  console.error('[email-agent-mcp] Future token refreshes will go through that broker.');
   console.error('');
 
-  await auth.pickUpTicket(session.sessionId);
+  await auth.pickUpTicket({
+    sessionId: session.sessionId,
+    pickupSecret: session.pickupSecret,
+  });
 
   const refreshToken = auth.getRefreshToken();
   if (!refreshToken) {
