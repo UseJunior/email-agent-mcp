@@ -24,6 +24,7 @@ export interface CliOptions {
   provider?: string;
   clientId?: string;
   clientSecret?: string;
+  brokerUrl?: string;
   pollInterval?: number; // seconds
   // `call` subcommand options
   callTool?: string;          // first positional after `call` — the tool name
@@ -149,13 +150,21 @@ async function getGmailReauthWarning(summary: ConfiguredMailboxSummary): Promise
     if (!metadata) return undefined;
 
     const mailboxRef = metadata.emailAddress ?? metadata.mailboxName;
-    const auth = new gmail.GmailAuthManager({
-      clientId: metadata.clientId,
-      clientSecret: metadata.clientSecret,
-      redirectUri: metadata.redirectUri,
-      mailboxName: mailboxRef,
-      lastInteractiveAuthAt: metadata.lastInteractiveAuthAt,
-    });
+    const auth = new gmail.GmailAuthManager(
+      metadata.source === 'broker'
+        ? {
+            brokerUrl: metadata.brokerUrl,
+            mailboxName: mailboxRef,
+            lastInteractiveAuthAt: metadata.lastInteractiveAuthAt,
+          }
+        : {
+            clientId: metadata.clientId,
+            clientSecret: metadata.clientSecret,
+            redirectUri: metadata.redirectUri,
+            mailboxName: mailboxRef,
+            lastInteractiveAuthAt: metadata.lastInteractiveAuthAt,
+          },
+    );
 
     await auth.connect({ refresh_token: metadata.refreshToken });
     await auth.refresh();
@@ -395,6 +404,10 @@ export function parseCliArgs(args: string[]): CliOptions {
     }
     if (arg === '--client-secret' && i + 1 < args.length) {
       opts.clientSecret = args[++i];
+      continue;
+    }
+    if (arg === '--broker-url' && i + 1 < args.length) {
+      opts.brokerUrl = args[++i];
       continue;
     }
     if (arg === '--poll-interval' && i + 1 < args.length) {
@@ -945,89 +958,108 @@ export async function runWatch(opts: CliOptions): Promise<number> {
   });
 }
 
-async function resolveGmailOAuthClient(opts: CliOptions): Promise<{ clientId: string; clientSecret: string }> {
-  let clientId = opts.clientId
-    ?? process.env['AGENT_EMAIL_GMAIL_CLIENT_ID']
-    ?? process.env['GOOGLE_CLIENT_ID'];
-  let clientSecret = opts.clientSecret
-    ?? process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET']
-    ?? process.env['GOOGLE_CLIENT_SECRET'];
+type GmailAuthSetup =
+  | { mode: 'byok'; clientId: string; clientSecret: string; source: 'explicit' | 'saved' }
+  | { mode: 'broker'; brokerUrl: string; source: 'explicit' | 'saved' | 'default' };
 
-  if (!clientId || !clientSecret) {
-    const mailboxIdentifier = opts.mailbox ?? 'default';
-    const { loadGmailMailboxMetadata } = await import('@usejunior/provider-gmail');
-    const saved = await loadGmailMailboxMetadata(mailboxIdentifier);
-    if (saved) {
-      clientId ??= saved.clientId;
-      clientSecret ??= saved.clientSecret;
-    }
+async function resolveGmailAuthSetup(opts: CliOptions): Promise<GmailAuthSetup> {
+  // Only honour our namespaced env vars. Fallback to GOOGLE_CLIENT_ID /
+  // GOOGLE_CLIENT_SECRET would silently collide with other developer
+  // tools (gcloud, oauth2l, etc.) on the same shell.
+  const explicitClientId = opts.clientId ?? process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'];
+  const explicitClientSecret = opts.clientSecret ?? process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'];
+  const explicitBroker = opts.brokerUrl ?? process.env['AGENT_EMAIL_GMAIL_BROKER_URL'];
+
+  // 1. Explicit BYOK wins. Forces broker→BYOK migration on re-run.
+  if (explicitClientId && explicitClientSecret) {
+    return { mode: 'byok', clientId: explicitClientId, clientSecret: explicitClientSecret, source: 'explicit' };
   }
-
-  if ((!clientId || !clientSecret) && process.stdout.isTTY) {
-    const p = await import('@clack/prompts');
-
-    if (!clientId) {
-      const input = await p.text({
-        message: 'Enter the Google OAuth client ID for Gmail',
-        placeholder: 'xxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.apps.googleusercontent.com',
-      });
-      if (p.isCancel(input)) {
-        throw new Error('Gmail configuration cancelled');
-      }
-      clientId = input.trim();
-    }
-
-    if (!clientSecret) {
-      const input = await p.password({
-        message: 'Enter the Google OAuth client secret for Gmail',
-        mask: '▪',
-      });
-      if (p.isCancel(input)) {
-        throw new Error('Gmail configuration cancelled');
-      }
-      clientSecret = input.trim();
-    }
-  }
-
-  if (!clientId) {
+  if (explicitClientId || explicitClientSecret) {
     throw new Error(
-      'Missing Gmail OAuth client ID. Pass --client-id or set AGENT_EMAIL_GMAIL_CLIENT_ID.',
+      'Gmail BYOK requires BOTH --client-id and --client-secret (or AGENT_EMAIL_GMAIL_CLIENT_ID and AGENT_EMAIL_GMAIL_CLIENT_SECRET). To use the hosted broker instead, omit both.',
     );
   }
 
-  if (!clientSecret) {
-    throw new Error(
-      'Missing Gmail OAuth client secret. Pass --client-secret or set AGENT_EMAIL_GMAIL_CLIENT_SECRET.',
-    );
+  // 2. Explicit broker URL wins over saved.
+  if (explicitBroker) {
+    return { mode: 'broker', brokerUrl: validateBrokerUrl(explicitBroker), source: 'explicit' };
   }
 
-  return {
-    clientId,
-    clientSecret,
-  };
+  // 3. Reuse whatever was previously saved for this mailbox — preserves
+  //    #44 reconnect behaviour and lets returning BYOK users skip the
+  //    broker path silently.
+  const mailboxIdentifier = opts.mailbox ?? 'default';
+  const { loadGmailMailboxMetadata } = await import('@usejunior/provider-gmail');
+  const saved = await loadGmailMailboxMetadata(mailboxIdentifier);
+  if (saved?.source === 'byok') {
+    return { mode: 'byok', clientId: saved.clientId, clientSecret: saved.clientSecret, source: 'saved' };
+  }
+  if (saved?.source === 'broker') {
+    return { mode: 'broker', brokerUrl: validateBrokerUrl(saved.brokerUrl), source: 'saved' };
+  }
+
+  // 4. New mailbox, no creds → broker default.
+  return { mode: 'broker', brokerUrl: '', source: 'default' };
+}
+
+function validateBrokerUrl(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`Invalid broker URL: ${url}`);
+  }
+  // Allow https:// for production and http:// only for loopback so
+  // `vercel dev` and self-hosted localhost setups work.
+  const isLoopback = ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname);
+  if (parsed.protocol === 'https:' || (parsed.protocol === 'http:' && isLoopback)) {
+    return parsed.origin + parsed.pathname.replace(/\/$/, '');
+  }
+  throw new Error(
+    `Broker URL must be https:// (or http:// on loopback for local dev). Got: ${url}`,
+  );
 }
 
 async function runGmailConfigure(opts: CliOptions): Promise<number> {
   const mailboxName = opts.mailbox ?? 'default';
-  const { clientId, clientSecret } = await resolveGmailOAuthClient(opts);
+  const setup = await resolveGmailAuthSetup(opts);
 
+  const provider = await import('@usejunior/provider-gmail');
   const {
-    GMAIL_OAUTH_SCOPES,
     GmailAuthManager,
     saveGmailMailboxMetadata,
     toFilesystemSafeKey,
-  } = await import('@usejunior/provider-gmail');
+    DEFAULT_GMAIL_BROKER_URL,
+  } = provider;
 
   console.error(`[email-agent-mcp] Configuring mailbox "${mailboxName}" with Gmail`);
-  console.error(`[email-agent-mcp] OAuth client ID: ${clientId}`);
+
+  if (setup.mode === 'broker') {
+    const brokerUrl = validateBrokerUrl(setup.brokerUrl || DEFAULT_GMAIL_BROKER_URL);
+    console.error(`[email-agent-mcp] Using OAuth broker: ${brokerUrl}`);
+    console.error('[email-agent-mcp] The broker holds the OAuth client_secret server-side; this CLI never sees it.');
+    console.error('[email-agent-mcp] To bring your own OAuth client instead, pass --client-id and --client-secret.');
+    console.error('');
+    return await runGmailBrokerConfigure({
+      mailboxName,
+      brokerUrl,
+      provider,
+    });
+  }
+
+  console.error(`[email-agent-mcp] OAuth client ID: ${setup.clientId}`);
   console.error('');
 
-  const auth = new GmailAuthManager({ clientId, clientSecret });
+  const auth = new GmailAuthManager({
+    clientId: setup.clientId,
+    clientSecret: setup.clientSecret,
+    mailboxName,
+  });
   const { redirectUri, waitForCallback } = await startLoopbackOAuthListener();
   const { codeVerifier, codeChallenge } = await auth.generateCodeVerifierAsync();
   const state = randomUUID();
   const authUrl = auth.generateAuthUrl({
-    scopes: GMAIL_OAUTH_SCOPES,
+    scopes: provider.GMAIL_OAUTH_SCOPES,
     redirectUri,
     state,
     codeChallenge,
@@ -1063,14 +1095,80 @@ async function runGmailConfigure(opts: CliOptions): Promise<number> {
   const lastInteractiveAuthAt = new Date().toISOString();
   await saveGmailMailboxMetadata({
     provider: 'gmail',
+    source: 'byok',
     mailboxName,
     emailAddress,
-    clientId,
-    clientSecret,
+    clientId: setup.clientId,
+    clientSecret: setup.clientSecret,
     refreshToken,
     lastInteractiveAuthAt,
   });
 
+  await finalizeGmailMailbox(emailAddress, toFilesystemSafeKey);
+  return 0;
+}
+
+async function runGmailBrokerConfigure(args: {
+  mailboxName: string;
+  brokerUrl: string;
+  provider: typeof import('@usejunior/provider-gmail');
+}): Promise<number> {
+  const { mailboxName, brokerUrl, provider } = args;
+  const { GmailAuthManager, saveGmailMailboxMetadata, toFilesystemSafeKey } = provider;
+
+  const auth = new GmailAuthManager({
+    brokerUrl,
+    mailboxName,
+  });
+
+  const session = await auth.startBrokerSession({
+    loginHint: mailboxName.includes('@') ? mailboxName : undefined,
+  });
+
+  console.error('[email-agent-mcp] Open this URL in your browser to authorize Gmail access:');
+  console.error(`  ${session.authorizationUrl}`);
+  console.error('[email-agent-mcp] You are authorizing the OAuth client operated by the broker above.');
+  console.error('[email-agent-mcp] Future token refreshes will go through that broker.');
+  console.error('');
+
+  await auth.pickUpTicket({
+    sessionId: session.sessionId,
+    pickupSecret: session.pickupSecret,
+  });
+
+  const refreshToken = auth.getRefreshToken();
+  if (!refreshToken) {
+    throw new Error(
+      'Broker did not return a refresh token. Ensure the OAuth client requests offline access, then retry.',
+    );
+  }
+
+  const profile = await auth.fetchProfile();
+  const emailAddress = profile.emailAddress;
+  if (!emailAddress) {
+    throw new Error('Gmail profile did not include an email address');
+  }
+
+  await ensureGmailProfileMatchesIntent(mailboxName, emailAddress);
+
+  await saveGmailMailboxMetadata({
+    provider: 'gmail',
+    source: 'broker',
+    mailboxName,
+    emailAddress,
+    brokerUrl,
+    refreshToken,
+    lastInteractiveAuthAt: new Date().toISOString(),
+  });
+
+  await finalizeGmailMailbox(emailAddress, toFilesystemSafeKey);
+  return 0;
+}
+
+async function finalizeGmailMailbox(
+  emailAddress: string,
+  toFilesystemSafeKey: (email: string) => string,
+): Promise<void> {
   try {
     await addEmailToSendAllowlist(emailAddress);
     console.error(`[email-agent-mcp] Send allowlist: ${emailAddress} (outbound email enabled to this address)`);
@@ -1087,8 +1185,6 @@ async function runGmailConfigure(opts: CliOptions): Promise<number> {
   console.error('To start the MCP server, run:');
   console.error('   npx tsx packages/email-mcp/src/cli.ts serve   # from source');
   console.error('   npx email-agent-mcp serve             # after npm publish');
-
-  return 0;
 }
 
 export function inferProviderFromMailbox(

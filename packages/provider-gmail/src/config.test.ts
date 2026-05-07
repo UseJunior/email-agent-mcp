@@ -15,6 +15,7 @@ let tempHome: string;
 function gmailMailbox(overrides: Partial<GmailMailboxMetadata> = {}): GmailMailboxMetadata {
   return {
     provider: 'gmail',
+    source: 'byok',
     mailboxName: 'personal',
     emailAddress: 'steven.obiajulu@gmail.com',
     clientId: 'gmail-client',
@@ -22,7 +23,7 @@ function gmailMailbox(overrides: Partial<GmailMailboxMetadata> = {}): GmailMailb
     refreshToken: 'gmail-refresh',
     lastInteractiveAuthAt: '2026-04-08T12:00:00.000Z',
     ...overrides,
-  };
+  } as GmailMailboxMetadata;
 }
 
 beforeEach(async () => {
@@ -90,5 +91,82 @@ describe('provider-gmail/Config Discovery', () => {
 
     expect(saved.provider).toBe('gmail');
     expect(saved.emailAddress).toBe('Steven.Obiajulu+mail@gmail.com');
+  });
+});
+
+describe('provider-gmail/Metadata source discrimination', () => {
+  async function writeRaw(filename: string, body: Record<string, unknown>): Promise<void> {
+    await writeFile(join(tempHome, 'tokens', filename), JSON.stringify(body, null, 2) + '\n');
+  }
+
+  it('parses pre-broker (no source field) BYOK records as source=byok', async () => {
+    await writeRaw('legacy.json', {
+      provider: 'gmail',
+      mailboxName: 'legacy',
+      emailAddress: 'legacy-user@gmail.com',
+      clientId: 'old-client',
+      clientSecret: 'old-secret',
+      refreshToken: 'old-refresh',
+    });
+    const loaded = await loadGmailMailboxMetadata('legacy');
+    expect(loaded?.source).toBe('byok');
+    if (loaded?.source !== 'byok') throw new Error('expected byok');
+    expect(loaded.clientId).toBe('old-client');
+  });
+
+  it('parses broker-source records with brokerUrl', async () => {
+    await writeRaw('broker.json', {
+      provider: 'gmail',
+      source: 'broker',
+      mailboxName: 'broker-user',
+      emailAddress: 'broker-user@gmail.com',
+      brokerUrl: 'https://oauth.example.com',
+      refreshToken: 'broker-refresh',
+    });
+    const loaded = await loadGmailMailboxMetadata('broker-user');
+    expect(loaded?.source).toBe('broker');
+    if (loaded?.source !== 'broker') throw new Error('expected broker');
+    expect(loaded.brokerUrl).toBe('https://oauth.example.com');
+    // No accidental BYOK fields surface on a broker record.
+    expect((loaded as unknown as { clientSecret?: string }).clientSecret).toBeUndefined();
+  });
+
+  it('rejects ambiguous records that mix BYOK and broker fields', async () => {
+    // Could equally describe either mode; refuse to guess and force a re-configure.
+    await writeRaw('ambiguous.json', {
+      provider: 'gmail',
+      mailboxName: 'ambiguous',
+      emailAddress: 'ambiguous@gmail.com',
+      clientId: 'mixed-client',
+      clientSecret: 'mixed-secret',
+      brokerUrl: 'https://oauth.example.com',
+      refreshToken: 'mixed-refresh',
+    });
+    const loaded = await loadGmailMailboxMetadata('ambiguous');
+    expect(loaded).toBeNull();
+  });
+
+  it('rejects no-source records that only carry brokerUrl', async () => {
+    await writeRaw('partial-broker.json', {
+      provider: 'gmail',
+      mailboxName: 'partial',
+      emailAddress: 'partial@gmail.com',
+      brokerUrl: 'https://oauth.example.com',
+      refreshToken: 'partial-refresh',
+    });
+    const loaded = await loadGmailMailboxMetadata('partial');
+    expect(loaded).toBeNull();
+  });
+
+  it('rejects source=broker records that lack brokerUrl', async () => {
+    await writeRaw('bad-broker.json', {
+      provider: 'gmail',
+      source: 'broker',
+      mailboxName: 'bad',
+      emailAddress: 'bad@gmail.com',
+      refreshToken: 'bad-refresh',
+    });
+    const loaded = await loadGmailMailboxMetadata('bad');
+    expect(loaded).toBeNull();
   });
 });

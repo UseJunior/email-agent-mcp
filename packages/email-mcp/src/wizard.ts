@@ -14,7 +14,7 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
   p.intro('🦞 email-agent-mcp — Email connectivity for AI agents');
 
   p.note(
-    'Outlook: interactive setup\nGmail:   interactive setup (Google OAuth client required)',
+    'Outlook: interactive setup\nGmail:   interactive setup',
     'Email Accounts',
   );
 
@@ -33,9 +33,14 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
 
   if (provider === 'gmail') {
     p.note(
-      'Gmail setup uses a Google OAuth client and a local browser callback on 127.0.0.1.\n' +
-      'Provide the client via --client-id / --client-secret or the env vars\n' +
-      'AGENT_EMAIL_GMAIL_CLIENT_ID and AGENT_EMAIL_GMAIL_CLIENT_SECRET.\n' +
+      'Gmail setup opens Google in your browser and consent goes to a hosted\n' +
+      'OAuth broker. The broker holds the OAuth client_secret server-side, so\n' +
+      'no Google credentials are bundled into this CLI or written to disk. After\n' +
+      'consent, your refresh token is stored locally; Gmail API calls go directly\n' +
+      'from your machine to Google.\n' +
+      '\n' +
+      'To use your own OAuth client instead, pass --client-id and --client-secret\n' +
+      '(or set AGENT_EMAIL_GMAIL_CLIENT_ID and AGENT_EMAIL_GMAIL_CLIENT_SECRET).\n' +
       `Credentials stored at ${getAgentEmailHome()}/tokens/`,
       'How Gmail auth works',
     );

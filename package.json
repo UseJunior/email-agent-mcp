@@ -5,7 +5,8 @@
   "description": "Local email connectivity for AI agents — MCP server for Microsoft 365 and manual-token Gmail setup",
   "type": "module",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "apps/*"
   ],
   "engines": {
     "node": ">=20"

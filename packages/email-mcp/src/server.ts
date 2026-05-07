@@ -557,13 +557,21 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
       const displayName = metadata.emailAddress ?? metadata.mailboxName;
       const mailboxRef = metadata.emailAddress ?? metadata.mailboxName;
       try {
-        const auth = new GmailAuthManager({
-          clientId: metadata.clientId,
-          clientSecret: metadata.clientSecret,
-          redirectUri: metadata.redirectUri,
-          mailboxName: mailboxRef,
-          lastInteractiveAuthAt: metadata.lastInteractiveAuthAt,
-        });
+        const auth = new GmailAuthManager(
+          metadata.source === 'broker'
+            ? {
+                brokerUrl: metadata.brokerUrl,
+                mailboxName: mailboxRef,
+                lastInteractiveAuthAt: metadata.lastInteractiveAuthAt,
+              }
+            : {
+                clientId: metadata.clientId,
+                clientSecret: metadata.clientSecret,
+                redirectUri: metadata.redirectUri,
+                mailboxName: mailboxRef,
+                lastInteractiveAuthAt: metadata.lastInteractiveAuthAt,
+              },
+        );
         await auth.connect({ refresh_token: metadata.refreshToken });
         await auth.refresh();
 
@@ -585,7 +593,11 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
           status: 'connected',
         });
 
-        console.error(`[email-agent-mcp] Connected to Gmail mailbox "${displayName}" (${metadata.clientId})`);
+        const sourceLabel =
+          metadata.source === 'broker'
+            ? `via broker ${metadata.brokerUrl}`
+            : `client ${metadata.clientId}`;
+        console.error(`[email-agent-mcp] Connected to Gmail mailbox "${displayName}" (${sourceLabel})`);
       } catch (err) {
         failedMailboxes.push({
           name: metadata.mailboxName,

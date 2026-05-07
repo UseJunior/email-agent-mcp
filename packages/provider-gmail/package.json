@@ -20,7 +20,8 @@
   },
   "dependencies": {
     "@googleapis/gmail": "^4.0.0",
-    "@usejunior/email-core": "^0.1.8"
+    "@usejunior/email-core": "^0.1.8",
+    "google-auth-library": "^8.9.0"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

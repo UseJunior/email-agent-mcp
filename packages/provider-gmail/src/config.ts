@@ -2,16 +2,29 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
-export interface GmailMailboxMetadata {
+export type GmailAuthSource = 'byok' | 'broker';
+
+interface GmailMailboxMetadataBase {
   provider: 'gmail';
   mailboxName: string;
   emailAddress: string;
-  clientId: string;
-  clientSecret: string;
   refreshToken: string;
   redirectUri?: string;
   lastInteractiveAuthAt?: string;
 }
+
+export interface GmailByokMailboxMetadata extends GmailMailboxMetadataBase {
+  source: 'byok';
+  clientId: string;
+  clientSecret: string;
+}
+
+export interface GmailBrokerMailboxMetadata extends GmailMailboxMetadataBase {
+  source: 'broker';
+  brokerUrl: string;
+}
+
+export type GmailMailboxMetadata = GmailByokMailboxMetadata | GmailBrokerMailboxMetadata;
 
 export function getConfigDir(): string {
   const base = process.env['EMAIL_AGENT_MCP_HOME'] ?? join(homedir(), '.email-agent-mcp');
@@ -30,20 +43,71 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function isGmailMailboxMetadata(value: unknown): value is GmailMailboxMetadata {
-  if (!isRecord(value)) return false;
+function normalizeGmailMailboxMetadata(value: unknown): GmailMailboxMetadata | null {
+  if (!isRecord(value)) return null;
 
   const provider = value['provider'];
-  if (provider !== undefined && provider !== 'gmail') return false;
+  if (provider !== undefined && provider !== 'gmail') return null;
+  if ('authenticationRecord' in value) return null;
 
-  return (
-    typeof value['mailboxName'] === 'string' &&
-    typeof value['emailAddress'] === 'string' &&
-    typeof value['clientId'] === 'string' &&
-    typeof value['clientSecret'] === 'string' &&
-    typeof value['refreshToken'] === 'string' &&
-    !('authenticationRecord' in value)
-  );
+  const mailboxName = value['mailboxName'];
+  const emailAddress = value['emailAddress'];
+  const refreshToken = value['refreshToken'];
+  if (
+    typeof mailboxName !== 'string' ||
+    typeof emailAddress !== 'string' ||
+    typeof refreshToken !== 'string'
+  ) {
+    return null;
+  }
+
+  const base: GmailMailboxMetadataBase = {
+    provider: 'gmail',
+    mailboxName,
+    emailAddress,
+    refreshToken,
+    redirectUri: typeof value['redirectUri'] === 'string' ? (value['redirectUri'] as string) : undefined,
+    lastInteractiveAuthAt:
+      typeof value['lastInteractiveAuthAt'] === 'string'
+        ? (value['lastInteractiveAuthAt'] as string)
+        : undefined,
+  };
+
+  const declared = value['source'];
+  const source: GmailAuthSource | undefined =
+    declared === 'byok' || declared === 'broker' ? declared : undefined;
+
+  const brokerUrl = typeof value['brokerUrl'] === 'string' ? (value['brokerUrl'] as string) : undefined;
+  const clientId = typeof value['clientId'] === 'string' ? (value['clientId'] as string) : undefined;
+  const clientSecret = typeof value['clientSecret'] === 'string' ? (value['clientSecret'] as string) : undefined;
+
+  // Reject ambiguous mixed-shape records: they could equally describe
+  // either mode, and we never want to silently pick one. A mailbox file
+  // that has both a brokerUrl AND clientSecret is most likely corrupted;
+  // forcing a re-configure is safer than guessing.
+  const hasByokFields = clientId !== undefined && clientSecret !== undefined;
+  const hasBrokerField = brokerUrl !== undefined;
+  if (hasByokFields && hasBrokerField) return null;
+
+  if (source === 'broker') {
+    if (!hasBrokerField) return null;
+    return { ...base, source: 'broker', brokerUrl };
+  }
+  if (source === 'byok') {
+    if (!hasByokFields) return null;
+    return { ...base, source: 'byok', clientId, clientSecret };
+  }
+
+  // Backward-compat: pre-broker metadata had no `source` field. Only
+  // infer BYOK if the BYOK fields are present AND no broker field has
+  // been written by a newer version. Records with only brokerUrl and
+  // no `source` are rejected — if a future format change adds an
+  // explicit broker `source`, those files will be valid then.
+  if (hasByokFields && !hasBrokerField) {
+    return { ...base, source: 'byok', clientId, clientSecret };
+  }
+
+  return null;
 }
 
 function sortByRecency(
@@ -67,15 +131,9 @@ export async function listConfiguredGmailMailboxes(): Promise<GmailMailboxMetada
   for (const file of files) {
     try {
       const raw = await readFile(join(getConfigDir(), file), 'utf-8');
-      const parsed = JSON.parse(raw) as unknown;
-      if (isGmailMailboxMetadata(parsed)) {
-        entries.push({
-          filename: file,
-          metadata: {
-            ...parsed,
-            provider: 'gmail',
-          },
-        });
+      const parsed = normalizeGmailMailboxMetadata(JSON.parse(raw) as unknown);
+      if (parsed) {
+        entries.push({ filename: file, metadata: parsed });
       }
     } catch {
       // Skip unreadable or invalid files.
@@ -108,13 +166,8 @@ export async function loadGmailMailboxMetadata(identifier: string): Promise<Gmai
   for (const candidate of candidatePaths) {
     try {
       const raw = await readFile(join(getConfigDir(), candidate), 'utf-8');
-      const parsed = JSON.parse(raw) as unknown;
-      if (isGmailMailboxMetadata(parsed)) {
-        return {
-          ...parsed,
-          provider: 'gmail',
-        };
-      }
+      const parsed = normalizeGmailMailboxMetadata(JSON.parse(raw) as unknown);
+      if (parsed) return parsed;
     } catch {
       // Try the next path.
     }
@@ -125,15 +178,9 @@ export async function loadGmailMailboxMetadata(identifier: string): Promise<Gmai
     for (const file of files) {
       try {
         const raw = await readFile(join(getConfigDir(), file), 'utf-8');
-        const parsed = JSON.parse(raw) as unknown;
-        if (
-          isGmailMailboxMetadata(parsed) &&
-          (parsed.mailboxName === identifier || parsed.emailAddress === identifier)
-        ) {
-          return {
-            ...parsed,
-            provider: 'gmail',
-          };
+        const parsed = normalizeGmailMailboxMetadata(JSON.parse(raw) as unknown);
+        if (parsed && (parsed.mailboxName === identifier || parsed.emailAddress === identifier)) {
+          return parsed;
         }
       } catch {
         // Skip unreadable or invalid files.
