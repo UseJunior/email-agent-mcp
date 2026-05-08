@@ -165,6 +165,54 @@ export function htmlToMarkdown(html: string): string {
   return nhm.translate(html);
 }
 
+// node-html-markdown escapes literal `[`, `]`, `(`, `)` in prose even when they
+// aren't markdown syntax (e.g. footnote refs `[1]`, URL obfuscation `nipsco[.]com`).
+// This helper unescapes them outside code regions and link/image syntax so LLM
+// consumers see the literal characters from the source HTML.
+const FENCE_RE = /^(```|~~~)[^\n]*\n[\s\S]*?^\1\s*$/gm;
+const REF_DEF_RE = /^\[[^\]\n]+\]:\s+\S.*$/gm;
+// Link text disallows unescaped `[` and `]` so the regex can't greedily span
+// across escaped-bracket prose to a later real link.
+const LINK_TEXT = /(?:[^\[\]\\]|\\.)*/.source;
+const DEST = /\(\s*(?:<[^>\n]*>|(?:\([^)\n]*\)|[^\s()\\]|\\.)+)(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?\s*\)/.source;
+const INLINE_IMG_RE = new RegExp(`!\\[${LINK_TEXT}\\]${DEST}`, 'g');
+const INLINE_LINK_RE = new RegExp(`\\[${LINK_TEXT}\\]${DEST}`, 'g');
+const REF_LINK_RE = new RegExp(`!?\\[${LINK_TEXT}\\]\\[[^\\]\\n]*\\]`, 'g');
+const CODE_SPAN_RE = /``(?:[^`]|`(?!`))+``|`[^`\n]+`/g;
+
+export function unescapeMarkdownPunctuation(md: string): string {
+  const tokens: string[] = [];
+  const protect = (m: string): string => {
+    const i = tokens.length;
+    tokens.push(m);
+    return `\x00${i}\x00`;
+  };
+
+  let s = md;
+  s = s.replace(FENCE_RE, protect);
+  s = s.replace(REF_DEF_RE, protect);
+  s = s.replace(INLINE_IMG_RE, protect);
+  s = s.replace(INLINE_LINK_RE, protect);
+  s = s.replace(REF_LINK_RE, protect);
+  s = s.replace(CODE_SPAN_RE, protect);
+
+  s = s
+    .replace(/\\\[/g, '[')
+    .replace(/\\\]/g, ']')
+    .replace(/\\\(/g, '(')
+    .replace(/\\\)/g, ')');
+
+  // Recurse until fixed point so nested placeholders (e.g. code span inside a
+  // protected link) resolve fully.
+  let prev: string;
+  do {
+    prev = s;
+    s = s.replace(/\x00(\d+)\x00/g, (_, i) => tokens[Number(i)] ?? '');
+  } while (s !== prev);
+
+  return s;
+}
+
 /**
  * Normalize character encoding to UTF-8.
  * Handles ISO-8859-1 and other common encodings.
@@ -222,7 +270,7 @@ export function transformEmailContent(
   let content = '';
 
   if (bodyHtml) {
-    content = htmlToMarkdown(bodyHtml);
+    content = unescapeMarkdownPunctuation(htmlToMarkdown(bodyHtml));
   } else if (body) {
     content = body;
   }
