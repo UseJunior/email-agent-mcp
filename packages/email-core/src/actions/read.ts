@@ -3,11 +3,13 @@ import { z } from 'zod';
 import type { EmailAction } from './registry.js';
 import { transformEmailContent } from '../content/sanitize.js';
 import { stripSignature } from '../content/signatures.js';
+import { stripQuotedHistory } from '../content/quotes.js';
 
 const ReadEmailInput = z.object({
   id: z.string(),
   mailbox: z.string().optional(),
   strip_signatures: z.boolean().optional().default(true),
+  strip_quoted_history: z.boolean().optional().default(false),
 });
 
 const ReadEmailOutput = z.object({
@@ -23,6 +25,7 @@ const ReadEmailOutput = z.object({
     filename: z.string(),
     mimeType: z.string(),
     size: z.number(),
+    contentId: z.string().optional(),
     isInline: z.boolean(),
   })).optional(),
 });
@@ -40,6 +43,12 @@ export const readEmailAction: EmailAction<
     const msg = await ctx.provider.getMessage(input.id);
 
     let body = transformEmailContent(msg.body, msg.bodyHtml, msg.attachments);
+    // Quote stripping runs first: shrinking the body lets the signature heuristic
+    // (signatures.ts:33-39 uses a 30%-of-body-length threshold) actually fire on
+    // signatures in the latest reply, which would otherwise be dwarfed by the thread tail.
+    if (input.strip_quoted_history) {
+      body = stripQuotedHistory(body);
+    }
     if (input.strip_signatures) {
       body = stripSignature(body);
     }
@@ -57,6 +66,7 @@ export const readEmailAction: EmailAction<
         filename: a.filename,
         mimeType: a.mimeType,
         size: a.size,
+        contentId: a.contentId,
         isInline: a.isInline,
       })),
     };

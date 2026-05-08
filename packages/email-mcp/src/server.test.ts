@@ -737,6 +737,125 @@ describe('mcp-transport/Lazy Provider State', () => {
     ]);
   });
 
+  it('Scenario: read_email exposes strip_quoted_history with default false', async () => {
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { getMessage: vi.fn() } as never;
+    state.connectedMailbox = 'work@example.com';
+    state.mailboxes = [];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const readEmail = actions.find(a => a.name === 'read_email')!;
+
+    const schema = readEmail.input as { shape?: Record<string, unknown> };
+    expect(schema.shape).toBeDefined();
+    expect(schema.shape!.strip_quoted_history).toBeDefined();
+
+    const parsed = (readEmail.input as { parse: (v: unknown) => Record<string, unknown> }).parse({ id: 'msg1' });
+    expect(parsed.strip_quoted_history).toBe(false);
+  });
+
+  it('Scenario: read_email with strip_quoted_history=true delegates to action and strips quoted reply', async () => {
+    const getMessage = vi.fn().mockResolvedValue({
+      id: 'msg-quoted',
+      subject: 'Re: Standup',
+      from: { email: 'alice@corp.com', name: 'Alice' },
+      to: [{ email: 'bob@corp.com', name: 'Bob' }],
+      receivedAt: '2026-04-09T12:00:00.000Z',
+      body: [
+        'Sounds good.',
+        '',
+        'On Wed, Mar 13, 2024 at 9:30 AM Bob <bob@corp.com> wrote:',
+        '> Want to push standup to 10am?',
+      ].join('\n'),
+    });
+
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { getMessage } as never;
+    state.connectedMailbox = 'alice@corp.com';
+    state.mailboxes = [
+      {
+        name: 'alice',
+        emailAddress: 'alice@corp.com',
+        displayName: 'alice@corp.com',
+        providerType: 'gmail',
+        provider: { getMessage } as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const readEmail = actions.find(a => a.name === 'read_email')!;
+    const result = await readEmail.run({}, { id: 'msg-quoted', strip_quoted_history: true }) as { body: string };
+
+    expect(result.body).toContain('Sounds good.');
+    expect(result.body).toContain('[...prior thread truncated]');
+    expect(result.body).not.toContain('Want to push standup to 10am?');
+  });
+
+  it('Scenario: read_email does NOT strip signatures even with sig delimiter present', async () => {
+    // Wiring strip_signatures through the MCP tool is out of scope for issue #76 and
+    // tracked separately. The MCP adapter must keep the previous behavior of returning
+    // signatures intact regardless of the action default.
+    const getMessage = vi.fn().mockResolvedValue({
+      id: 'msg-sig',
+      subject: 'Signed reply',
+      from: { email: 'alice@corp.com', name: 'Alice' },
+      to: [{ email: 'bob@corp.com', name: 'Bob' }],
+      receivedAt: '2026-04-09T12:00:00.000Z',
+      body: [
+        'Sounds good.',
+        '',
+        '-- ',
+        'Alice Smith',
+        'Senior Partner',
+      ].join('\n'),
+    });
+
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { getMessage } as never;
+    state.connectedMailbox = 'alice@corp.com';
+    state.mailboxes = [
+      {
+        name: 'alice',
+        emailAddress: 'alice@corp.com',
+        displayName: 'alice@corp.com',
+        providerType: 'gmail',
+        provider: { getMessage } as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const readEmail = actions.find(a => a.name === 'read_email')!;
+    const result = await readEmail.run({}, { id: 'msg-sig' }) as { body: string };
+
+    expect(result.body).toContain('Alice Smith');
+    expect(result.body).toContain('Senior Partner');
+  });
+
+  it('Scenario: read_email demo path is unchanged when no mailbox is configured', async () => {
+    const state = createLazyProviderState();
+    state.status = 'configuring';
+    state.initPromise = Promise.resolve();
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const readEmail = actions.find(a => a.name === 'read_email')!;
+
+    const result = await readEmail.run({}, { id: 'demo-1' }) as { id: string; body: string };
+    expect(result.id).toBe('demo-1');
+    expect(result.body).toContain('No mailbox configured');
+  });
+
   it('Scenario: get_mailbox_status resolves the requested mailbox instead of the default', async () => {
     const state = createLazyProviderState();
     state.status = 'connected';
