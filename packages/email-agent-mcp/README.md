@@ -89,7 +89,7 @@ Agent Email exposes 15 MCP tools:
 | `flag_email` | Flag/unflag emails | write |
 | `mark_read` | Mark as read/unread | write |
 | `move_to_folder` | Move between folders | write |
-| `delete_email` | Delete (requires opt-in) | destructive |
+| `delete_email` | Delete (requires operator env + caller flag) | destructive |
 
 ## Provider Support
 
