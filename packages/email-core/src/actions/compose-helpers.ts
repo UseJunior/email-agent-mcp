@@ -1,7 +1,9 @@
 // Shared helpers for compose actions — internal module, NOT exported from package root
+import { z } from 'zod';
 import type { RateLimiter, MailboxEntry } from './registry.js';
 import { ProviderError } from '../providers/provider.js';
-import { resolveBodyFile } from '../content/body-loader.js';
+import type { EmailReader } from '../providers/provider.js';
+import { resolveBodyFile, truncateBody } from '../content/body-loader.js';
 import type { BodyFormat } from '../content/body-renderer.js';
 import { parseAddressList } from '../utils/address.js';
 import type { EmailAddress } from '../types.js';
@@ -177,6 +179,65 @@ export function parseRecipients(input: { to?: string[]; cc?: string[] }): Parsed
     };
   }
   return { to: toResult.addresses, cc: ccResult.addresses };
+}
+
+// --- Draft preview ---
+
+// Per-field cap on body/bodyHtml in draft preview responses. The 3.5 MB
+// BODY_SIZE_LIMIT in body-loader.ts is the email composition size cap, not a
+// safe MCP tool-response budget — returning that much would blow LLM context
+// and transport limits. 32 KB is enough for an agent to verify the rendered
+// body without overwhelming the response.
+export const PREVIEW_BODY_LIMIT = 32 * 1024;
+
+const EmailAddressSchema = z.object({
+  email: z.string(),
+  name: z.string().optional(),
+});
+
+export const DraftPreviewSchema = z.object({
+  to: z.array(EmailAddressSchema).optional(),
+  cc: z.array(EmailAddressSchema).optional(),
+  subject: z.string().optional(),
+  body: z.string().optional(),
+  bodyHtml: z.string().optional(),
+});
+
+export type DraftPreview = z.infer<typeof DraftPreviewSchema>;
+
+/**
+ * Build a preview block by reading the persisted draft back from the provider.
+ *
+ * The preview reflects PERSISTED state, not caller input — that is the point.
+ * It surfaces persistence-layer drops (e.g. Microsoft Graph createDraft cc/bcc
+ * drop, tracked in #48) without callers needing a separate read_email round
+ * trip. See issue #75.
+ *
+ * Read-back failures are swallowed: returns undefined so the caller can still
+ * report success on the underlying create/update. Logging is intentionally
+ * absent — ActionContext does not currently carry a logger.
+ */
+export async function buildDraftPreview(
+  provider: Pick<EmailReader, 'getMessage'>,
+  draftId: string,
+): Promise<DraftPreview | undefined> {
+  try {
+    const persisted = await provider.getMessage(draftId);
+    const preview: DraftPreview = {
+      to: persisted.to,
+      cc: persisted.cc,
+      subject: persisted.subject,
+    };
+    if (persisted.body !== undefined) {
+      preview.body = truncateBody(persisted.body, PREVIEW_BODY_LIMIT);
+    }
+    if (persisted.bodyHtml !== undefined) {
+      preview.bodyHtml = truncateBody(persisted.bodyHtml, PREVIEW_BODY_LIMIT);
+    }
+    return preview;
+  } catch {
+    return undefined;
+  }
 }
 
 // --- handleProviderError ---

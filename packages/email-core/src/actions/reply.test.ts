@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MockEmailProvider } from '../testing/mock-provider.js';
 import { replyToEmailAction } from './reply.js';
 import type { ActionContext } from './registry.js';
+import type { EmailMessage } from '../types.js';
 
 let provider: MockEmailProvider;
 let ctx: ActionContext;
@@ -406,5 +407,85 @@ describe('email-write/Reply CC Address Parsing', () => {
 
     // sendAllowlist is *@lawfirm.com — parsed cc email matches; should pass.
     expect(result.success).toBe(true);
+  });
+});
+
+// Helper: build a stub EmailMessage shaped like a persisted draft.
+function persistedDraft(overrides: Partial<EmailMessage>): EmailMessage {
+  return {
+    id: 'stub-draft-id',
+    subject: 'stub',
+    from: { email: 'me@company.com' },
+    to: [],
+    receivedAt: '2024-01-01T00:00:00Z',
+    isRead: true,
+    hasAttachments: false,
+    ...overrides,
+  };
+}
+
+describe('email-write/Reply Draft Preview (issue #75)', () => {
+  it('reply_to_email with draft: true returns preview with server-side reply-all expansion visible', async () => {
+    // Simulates Graph populating to/cc on the persisted reply draft after
+    // server-side reply-all expansion. The provider's createReplyDraft only
+    // returns a draftId, so the read-back is what surfaces the recipient list.
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Re: Hello',
+      to: [{ email: 'partner@lawfirm.com', name: 'Partner' }],
+      cc: [
+        { email: 'cc-1@lawfirm.com' },
+        { email: 'cc-2@lawfirm.com' },
+        { email: 'cc-3@lawfirm.com' },
+      ],
+      body: 'Draft reply!',
+      bodyHtml: '<p>Draft reply!</p>',
+    }));
+
+    const input = replyToEmailAction.input.parse({
+      message_id: VALID_MSG_ID,
+      body: 'Draft reply!',
+      draft: true,
+    });
+    expect(input.reply_all).toBe(true);
+
+    const result = await replyToEmailAction.run(ctx, input);
+
+    expect(result.success).toBe(true);
+    expect(result.draftId).toBeDefined();
+    expect(result.preview).toBeDefined();
+    expect(result.preview!.subject).toBe('Re: Hello');
+    expect(result.preview!.to).toEqual([{ email: 'partner@lawfirm.com', name: 'Partner' }]);
+    expect(result.preview!.cc).toHaveLength(3);
+    expect(result.preview!.cc!.map(c => c.email)).toEqual([
+      'cc-1@lawfirm.com',
+      'cc-2@lawfirm.com',
+      'cc-3@lawfirm.com',
+    ]);
+  });
+
+  it('reply_to_email draft preview omitted when read-back fails — success unchanged', async () => {
+    vi.spyOn(provider, 'getMessage').mockRejectedValueOnce(new Error('read-back failed'));
+
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: VALID_MSG_ID,
+      body: 'Draft reply',
+      draft: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.draftId).toBeDefined();
+    expect(result.preview).toBeUndefined();
+  });
+
+  it('reply_to_email send path does not return a preview', async () => {
+    // Preview is for draft-creating flows only. The send path returns messageId.
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: VALID_MSG_ID,
+      body: 'Thanks!',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.messageId).toBeDefined();
+    expect(result.preview).toBeUndefined();
   });
 });

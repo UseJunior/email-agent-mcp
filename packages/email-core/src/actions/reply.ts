@@ -11,6 +11,8 @@ import {
   checkRateLimit,
   handleProviderError,
   parseRecipients,
+  buildDraftPreview,
+  DraftPreviewSchema,
 } from './compose-helpers.js';
 
 const ReplyToEmailInput = z.object({
@@ -31,6 +33,7 @@ const ReplyToEmailOutput = z.object({
   success: z.boolean(),
   messageId: z.string().optional(),
   draftId: z.string().optional(),
+  preview: DraftPreviewSchema.optional(),
   error: z.object({
     code: z.string(),
     message: z.string(),
@@ -156,9 +159,13 @@ export const replyToEmailAction: EmailAction<
           bodyHtml,
           replyAll: input.reply_all,
         });
+        const preview = draftResult.success && draftResult.draftId
+          ? await buildDraftPreview(ctx.provider, draftResult.draftId)
+          : undefined;
         return {
           success: draftResult.success,
           draftId: draftResult.draftId,
+          preview,
           error: draftResult.error ? {
             code: draftResult.error.code,
             message: draftResult.error.message,

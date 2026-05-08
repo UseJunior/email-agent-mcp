@@ -13,6 +13,8 @@ import {
   checkRateLimit,
   handleProviderError,
   parseRecipients,
+  buildDraftPreview,
+  DraftPreviewSchema,
 } from './compose-helpers.js';
 
 // --- Shared schemas ---
@@ -20,6 +22,7 @@ import {
 const DraftOutput = z.object({
   success: z.boolean(),
   draftId: z.string().optional(),
+  preview: DraftPreviewSchema.optional(),
   error: z.object({
     code: z.string(),
     message: z.string(),
@@ -116,9 +119,13 @@ export const createDraftAction: EmailAction<
           cc: parsed.cc,
           bodyHtml: outBodyHtml,
         });
+        const preview = result.success && result.draftId
+          ? await buildDraftPreview(ctx.provider, result.draftId)
+          : undefined;
         return {
           success: result.success,
           draftId: result.draftId,
+          preview,
           error: result.error ? { code: result.error.code, message: result.error.message, recoverable: result.error.recoverable } : undefined,
         };
       } catch (err) {
@@ -135,9 +142,13 @@ export const createDraftAction: EmailAction<
         body,
         bodyHtml: outBodyHtml,
       });
+      const preview = result.success && result.draftId
+        ? await buildDraftPreview(ctx.provider, result.draftId)
+        : undefined;
       return {
         success: result.success,
         draftId: result.draftId,
+        preview,
         error: result.error ? { code: result.error.code, message: result.error.message, recoverable: result.error.recoverable } : undefined,
       };
     } catch (err) {
@@ -330,9 +341,13 @@ export const updateDraftAction: EmailAction<
 
     try {
       const result = await ctx.provider.updateDraft(input.draft_id, partial);
+      const preview = result.success && result.draftId
+        ? await buildDraftPreview(ctx.provider, result.draftId)
+        : undefined;
       return {
         success: result.success,
         draftId: result.draftId,
+        preview,
         error: result.error ? { code: result.error.code, message: result.error.message, recoverable: result.error.recoverable } : undefined,
       };
     } catch (err) {

@@ -1,10 +1,11 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MockEmailProvider } from '../testing/mock-provider.js';
 import { createDraftAction, sendDraftAction, updateDraftAction } from './draft.js';
 import type { ActionContext } from './registry.js';
+import type { EmailMessage } from '../types.js';
 
 let provider: MockEmailProvider;
 let ctx: ActionContext;
@@ -421,5 +422,209 @@ describe('email-write/Draft Address Parsing', () => {
     expect(updated.success).toBe(false);
     expect(updated.error!.code).toBe('INVALID_ADDRESS');
     expect(updated.error!.message).toContain('cc[0]');
+  });
+});
+
+// Helper: build a stub EmailMessage shaped like a persisted draft.
+function persistedDraft(overrides: Partial<EmailMessage>): EmailMessage {
+  return {
+    id: 'stub-draft-id',
+    subject: 'stub',
+    from: { email: 'me@company.com' },
+    to: [],
+    receivedAt: '2024-01-01T00:00:00Z',
+    isRead: true,
+    hasAttachments: false,
+    ...overrides,
+  };
+}
+
+describe('email-write/Draft Preview (issue #75)', () => {
+  it('create_draft returns preview reflecting persisted draft (subject, to, cc, body, bodyHtml)', async () => {
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Hello',
+      to: [{ email: 'alice@allowed.com' }],
+      cc: [{ email: 'bob@allowed.com' }],
+      body: '### Heading',
+      bodyHtml: '<h3>Heading</h3>',
+    }));
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      cc: ['bob@allowed.com'],
+      subject: 'Hello',
+      body: '### Heading',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.draftId).toBeDefined();
+    expect(result.preview).toBeDefined();
+    expect(result.preview!.subject).toBe('Hello');
+    expect(result.preview!.to).toEqual([{ email: 'alice@allowed.com' }]);
+    expect(result.preview!.cc).toEqual([{ email: 'bob@allowed.com' }]);
+    expect(result.preview!.body).toBe('### Heading');
+    expect(result.preview!.bodyHtml).toBe('<h3>Heading</h3>');
+  });
+
+  it('create_draft preview reflects persisted state, not caller input (simulates #48 cc drop)', async () => {
+    // Simulate Microsoft Graph dropping cc on createDraft: caller passes cc,
+    // provider claims success, but the persisted draft has no cc. The preview
+    // must show the persisted (empty) cc — this is the verification surface.
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Important',
+      to: [{ email: 'alice@allowed.com' }],
+      cc: undefined,
+    }));
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      cc: ['dropped@allowed.com'],
+      subject: 'Important',
+      body: 'Body',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.preview).toBeDefined();
+    expect(result.preview!.cc).toBeUndefined();
+  });
+
+  it('create_draft preview omitted when read-back fails — success unchanged', async () => {
+    vi.spyOn(provider, 'getMessage').mockRejectedValueOnce(new Error('read-back failed'));
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Hello',
+      body: 'Body',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.draftId).toBeDefined();
+    expect(result.preview).toBeUndefined();
+  });
+
+  it('create_draft preview on reply-draft path (reply_to)', async () => {
+    provider.addMessage({
+      id: 'orig-msg',
+      subject: 'Original',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Re: Original',
+      to: [{ email: 'partner@allowed.com' }],
+      cc: [{ email: 'cc-1@allowed.com' }, { email: 'cc-2@allowed.com' }],
+    }));
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'partner@allowed.com',
+      subject: 'Re: Original',
+      reply_to: 'orig-msg',
+      body: 'Reply',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.preview!.cc).toEqual([
+      { email: 'cc-1@allowed.com' },
+      { email: 'cc-2@allowed.com' },
+    ]);
+  });
+
+  it('update_draft returns preview reflecting persisted draft', async () => {
+    const created = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Original',
+      body: 'Body',
+    });
+    expect(created.success).toBe(true);
+
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      id: created.draftId!,
+      subject: 'Updated',
+      to: [{ email: 'alice@allowed.com' }],
+      body: 'New body',
+    }));
+
+    const result = await updateDraftAction.run(ctx, {
+      draft_id: created.draftId!,
+      subject: 'Updated',
+      body: 'New body',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.preview).toBeDefined();
+    expect(result.preview!.subject).toBe('Updated');
+    expect(result.preview!.body).toBe('New body');
+  });
+
+  it('update_draft preview surfaces persisted state when cc cannot be cleared (Graph quirk)', async () => {
+    // Real-world Graph behavior: PATCH only includes ccRecipients when msg.cc
+    // is truthy, so cc: [] silently fails to clear. The preview must show the
+    // un-cleared cc — proving the verification surface catches this without
+    // fixing the underlying bug.
+    const created = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      cc: ['stale-cc@allowed.com'],
+      subject: 'Original',
+      body: 'Body',
+    });
+    expect(created.success).toBe(true);
+
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      id: created.draftId!,
+      subject: 'Original',
+      to: [{ email: 'alice@allowed.com' }],
+      cc: [{ email: 'stale-cc@allowed.com' }],
+    }));
+
+    const result = await updateDraftAction.run(ctx, {
+      draft_id: created.draftId!,
+      cc: [],
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.preview).toBeDefined();
+    expect(result.preview!.cc).toEqual([{ email: 'stale-cc@allowed.com' }]);
+  });
+
+  it('update_draft preview omitted when read-back fails — success unchanged', async () => {
+    const created = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Original',
+      body: 'Body',
+    });
+    expect(created.success).toBe(true);
+
+    vi.spyOn(provider, 'getMessage').mockRejectedValueOnce(new Error('read-back failed'));
+
+    const result = await updateDraftAction.run(ctx, {
+      draft_id: created.draftId!,
+      body: 'Updated',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.preview).toBeUndefined();
+  });
+
+  it('preview body is truncated past PREVIEW_BODY_LIMIT', async () => {
+    const huge = 'x'.repeat(64 * 1024);
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Big',
+      to: [{ email: 'alice@allowed.com' }],
+      body: huge,
+      bodyHtml: huge,
+    }));
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Big',
+      body: 'small input',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.preview!.body!.length).toBeLessThan(huge.length);
+    expect(result.preview!.bodyHtml!.length).toBeLessThan(huge.length);
   });
 });
