@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { RateLimiter, MailboxEntry } from './registry.js';
 import { ProviderError } from '../providers/provider.js';
 import type { EmailReader } from '../providers/provider.js';
-import { resolveBodyFile, truncateBody } from '../content/body-loader.js';
+import { resolveBodyFile } from '../content/body-loader.js';
 import type { BodyFormat } from '../content/body-renderer.js';
 import { parseAddressList } from '../utils/address.js';
 import type { EmailAddress } from '../types.js';
@@ -190,6 +190,10 @@ export function parseRecipients(input: { to?: string[]; cc?: string[] }): Parsed
 // body without overwhelming the response.
 export const PREVIEW_BODY_LIMIT = 32 * 1024;
 
+// Delay between the first failed read-back and the retry. Providers can have a
+// brief read-after-write window after createDraft/updateDraft.
+export const PREVIEW_RETRY_DELAY_MS = 500;
+
 const EmailAddressSchema = z.object({
   email: z.string(),
   name: z.string().optional(),
@@ -198,12 +202,59 @@ const EmailAddressSchema = z.object({
 export const DraftPreviewSchema = z.object({
   to: z.array(EmailAddressSchema).optional(),
   cc: z.array(EmailAddressSchema).optional(),
+  // bcc intentionally omitted in v1: Gmail's mapGmailMessage at
+  // packages/provider-gmail/src/email-gmail-provider.ts (mapGmailMessage) does
+  // not parse the Bcc header, and Graph's mapGraphMessage similarly does not
+  // surface bcc on EmailMessage. Action-layer read-back cannot make
+  // preview.bcc meaningful without provider work; tracked as a follow-up.
   subject: z.string().optional(),
   body: z.string().optional(),
   bodyHtml: z.string().optional(),
+  bodyTruncated: z.boolean().optional()
+    .describe('True if preview.body was truncated to fit the MCP response budget. The persisted draft body is unchanged.'),
+  bodyHtmlTruncated: z.boolean().optional()
+    .describe('True if preview.bodyHtml was truncated to fit the MCP response budget. The persisted draft body is unchanged.'),
+});
+
+export const PreviewErrorSchema = z.object({
+  code: z.string(),
+  message: z.string(),
 });
 
 export type DraftPreview = z.infer<typeof DraftPreviewSchema>;
+export type PreviewError = z.infer<typeof PreviewErrorSchema>;
+
+export interface BuildDraftPreviewResult {
+  preview?: DraftPreview;
+  previewError?: PreviewError;
+}
+
+// Cut a string to a UTF-8 byte budget without producing invalid sequences.
+// Unlike truncateBody in body-loader.ts, this is for MCP tool-response sizing,
+// not provider-side email size limits — so we deliberately do NOT append the
+// "exceeded email size limits" notice (that would mislead an agent into
+// thinking the persisted draft itself was capped). Truncation is signalled
+// structurally via bodyTruncated / bodyHtmlTruncated in DraftPreviewSchema.
+function truncateForPreview(input: string, maxBytes: number): { text: string; truncated: boolean } {
+  const encoded = Buffer.from(input, 'utf-8');
+  if (encoded.length <= maxBytes) return { text: input, truncated: false };
+
+  // Walk back to a safe UTF-8 boundary so we don't return a half-codepoint.
+  let cut = maxBytes;
+  while (cut > 0 && (encoded[cut]! & 0xc0) === 0x80) cut--;
+
+  return { text: encoded.subarray(0, cut).toString('utf-8'), truncated: true };
+}
+
+function toPreviewError(err: unknown): PreviewError {
+  if (err instanceof ProviderError) {
+    return { code: err.code, message: err.message };
+  }
+  if (err instanceof Error) {
+    return { code: 'PREVIEW_FETCH_FAILED', message: err.message };
+  }
+  return { code: 'PREVIEW_FETCH_FAILED', message: String(err) };
+}
 
 /**
  * Build a preview block by reading the persisted draft back from the provider.
@@ -213,31 +264,59 @@ export type DraftPreview = z.infer<typeof DraftPreviewSchema>;
  * drop, tracked in #48) without callers needing a separate read_email round
  * trip. See issue #75.
  *
- * Read-back failures are swallowed: returns undefined so the caller can still
- * report success on the underlying create/update. Logging is intentionally
- * absent — ActionContext does not currently carry a logger.
+ * On read-back failure, returns `{ previewError }` so the caller can surface
+ * a structured signal to the agent — distinguishing "no preview" from
+ * "preview lookup failed". The underlying create/update is still reported as
+ * successful by the caller. A single short retry handles transient
+ * read-after-write windows; non-recoverable ProviderErrors skip the retry.
+ *
+ * Note on cost: Gmail's updateDraft already does an internal getMessage to
+ * merge partial updates (see GmailEmailProvider.updateDraft), so wiring this
+ * helper after updateDraft on Gmail incurs a second redundant GET. Provider
+ * interface changes to surface the persisted draft directly are out of scope
+ * for v1; documented here so future optimizations have a starting point.
  */
 export async function buildDraftPreview(
   provider: Pick<EmailReader, 'getMessage'>,
   draftId: string,
-): Promise<DraftPreview | undefined> {
+  opts?: { retryDelayMs?: number },
+): Promise<BuildDraftPreviewResult> {
+  const retryDelay = opts?.retryDelayMs ?? PREVIEW_RETRY_DELAY_MS;
+
+  let persisted;
   try {
-    const persisted = await provider.getMessage(draftId);
-    const preview: DraftPreview = {
-      to: persisted.to,
-      cc: persisted.cc,
-      subject: persisted.subject,
-    };
-    if (persisted.body !== undefined) {
-      preview.body = truncateBody(persisted.body, PREVIEW_BODY_LIMIT);
+    persisted = await provider.getMessage(draftId);
+  } catch (firstErr) {
+    // Skip retry on definitively-permanent failures (e.g. invalid draft id).
+    if (firstErr instanceof ProviderError && !firstErr.recoverable) {
+      return { previewError: toPreviewError(firstErr) };
     }
-    if (persisted.bodyHtml !== undefined) {
-      preview.bodyHtml = truncateBody(persisted.bodyHtml, PREVIEW_BODY_LIMIT);
+    if (retryDelay > 0) {
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
     }
-    return preview;
-  } catch {
-    return undefined;
+    try {
+      persisted = await provider.getMessage(draftId);
+    } catch (secondErr) {
+      return { previewError: toPreviewError(secondErr) };
+    }
   }
+
+  const preview: DraftPreview = {
+    to: persisted.to,
+    cc: persisted.cc,
+    subject: persisted.subject,
+  };
+  if (persisted.body !== undefined) {
+    const { text, truncated } = truncateForPreview(persisted.body, PREVIEW_BODY_LIMIT);
+    preview.body = text;
+    if (truncated) preview.bodyTruncated = true;
+  }
+  if (persisted.bodyHtml !== undefined) {
+    const { text, truncated } = truncateForPreview(persisted.bodyHtml, PREVIEW_BODY_LIMIT);
+    preview.bodyHtml = text;
+    if (truncated) preview.bodyHtmlTruncated = true;
+  }
+  return { preview };
 }
 
 // --- handleProviderError ---

@@ -127,6 +127,11 @@ The system SHALL support a draft-then-send pattern: create a draft, allow review
 - **WHEN** `send_email` is called with draft mode
 - **THEN** the system creates a draft, returns the draft ID for review, and sends on confirmation
 
+#### Scenario: Draft-creating tools return a persisted preview
+- **WHEN** `create_draft`, `update_draft`, `reply_to_email` (with `draft: true`), or `send_email` (with `draft: true`) successfully creates or updates a draft
+- **THEN** the response includes a `preview` block (`{ to, cc, subject, body, bodyHtml, bodyTruncated, bodyHtmlTruncated }`) sourced by reading the persisted draft back from the provider, so persistence-layer drops are visible to the caller without a separate `read_email` round trip
+- **AND** if the read-back fails after one short retry, the response includes `previewError: { code, message }` instead of `preview`; the underlying create/update success flag is unchanged
+
 ### Requirement: Delivery Failure Handling
 
 The system SHALL retry with exponential backoff on transient errors (5xx, network failures). On permanent failure, the system SHALL return a structured error so the agent can inform the user.

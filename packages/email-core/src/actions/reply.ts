@@ -13,6 +13,7 @@ import {
   parseRecipients,
   buildDraftPreview,
   DraftPreviewSchema,
+  PreviewErrorSchema,
 } from './compose-helpers.js';
 
 const ReplyToEmailInput = z.object({
@@ -34,6 +35,7 @@ const ReplyToEmailOutput = z.object({
   messageId: z.string().optional(),
   draftId: z.string().optional(),
   preview: DraftPreviewSchema.optional(),
+  previewError: PreviewErrorSchema.optional(),
   error: z.object({
     code: z.string(),
     message: z.string(),
@@ -159,13 +161,13 @@ export const replyToEmailAction: EmailAction<
           bodyHtml,
           replyAll: input.reply_all,
         });
-        const preview = draftResult.success && draftResult.draftId
+        const previewResult = draftResult.success && draftResult.draftId
           ? await buildDraftPreview(ctx.provider, draftResult.draftId)
-          : undefined;
+          : {};
         return {
           success: draftResult.success,
           draftId: draftResult.draftId,
-          preview,
+          ...previewResult,
           error: draftResult.error ? {
             code: draftResult.error.code,
             message: draftResult.error.message,

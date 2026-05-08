@@ -463,8 +463,8 @@ describe('email-write/Reply Draft Preview (issue #75)', () => {
     ]);
   });
 
-  it('reply_to_email draft preview omitted when read-back fails — success unchanged', async () => {
-    vi.spyOn(provider, 'getMessage').mockRejectedValueOnce(new Error('read-back failed'));
+  it('reply_to_email draft persistent read-back failure: previewError surfaces, success unchanged', async () => {
+    vi.spyOn(provider, 'getMessage').mockRejectedValue(new Error('read-back persistent'));
 
     const result = await replyToEmailAction.run(ctx, {
       message_id: VALID_MSG_ID,
@@ -475,6 +475,7 @@ describe('email-write/Reply Draft Preview (issue #75)', () => {
     expect(result.success).toBe(true);
     expect(result.draftId).toBeDefined();
     expect(result.preview).toBeUndefined();
+    expect(result.previewError!.code).toBe('PREVIEW_FETCH_FAILED');
   });
 
   it('reply_to_email send path does not return a preview', async () => {

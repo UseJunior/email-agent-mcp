@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MockEmailProvider } from '../testing/mock-provider.js';
 import { createDraftAction, sendDraftAction, updateDraftAction } from './draft.js';
+import { sendEmailAction } from './send.js';
+import { ProviderError } from '../providers/provider.js';
 import type { ActionContext } from './registry.js';
 import type { EmailMessage } from '../types.js';
 
@@ -440,6 +442,29 @@ function persistedDraft(overrides: Partial<EmailMessage>): EmailMessage {
 }
 
 describe('email-write/Draft Preview (issue #75)', () => {
+  it('Scenario: Draft-creating tools return a persisted preview', async () => {
+    // Spec scenario: every draft-creating tool returns a `preview` block
+    // sourced from the persisted draft, and surfaces `previewError` when the
+    // read-back fails. Concrete behaviors are exercised in the per-tool tests
+    // below (create_draft / update_draft / reply_to_email / send_email).
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Spec',
+      to: [{ email: 'alice@allowed.com' }],
+      body: 'Body',
+    }));
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Spec',
+      body: 'Body',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.preview).toBeDefined();
+    expect(result.preview!.subject).toBe('Spec');
+    expect(result.previewError).toBeUndefined();
+  });
+
   it('create_draft returns preview reflecting persisted draft (subject, to, cc, body, bodyHtml)', async () => {
     vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
       subject: 'Hello',
@@ -488,8 +513,29 @@ describe('email-write/Draft Preview (issue #75)', () => {
     expect(result.preview!.cc).toBeUndefined();
   });
 
-  it('create_draft preview omitted when read-back fails — success unchanged', async () => {
-    vi.spyOn(provider, 'getMessage').mockRejectedValueOnce(new Error('read-back failed'));
+  it('create_draft transient read-back failure: retry succeeds, preview present', async () => {
+    // First call rejects (simulating a brief read-after-write window); the
+    // helper retries after PREVIEW_RETRY_DELAY_MS and the real provider call
+    // succeeds, so the agent ultimately sees a preview.
+    vi.spyOn(provider, 'getMessage').mockRejectedValueOnce(new Error('read-back transient'));
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Hello',
+      body: 'Body',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.draftId).toBeDefined();
+    expect(result.preview).toBeDefined();
+    expect(result.preview!.subject).toBe('Hello');
+    expect(result.previewError).toBeUndefined();
+  });
+
+  it('create_draft persistent read-back failure: previewError surfaces, success unchanged', async () => {
+    // Both calls reject — retry exhausted. previewError is structured so the
+    // agent can distinguish "no preview returned" from "preview lookup failed".
+    vi.spyOn(provider, 'getMessage').mockRejectedValue(new Error('read-back persistent'));
 
     const result = await createDraftAction.run(ctx, {
       to: 'alice@allowed.com',
@@ -500,6 +546,67 @@ describe('email-write/Draft Preview (issue #75)', () => {
     expect(result.success).toBe(true);
     expect(result.draftId).toBeDefined();
     expect(result.preview).toBeUndefined();
+    expect(result.previewError).toBeDefined();
+    expect(result.previewError!.code).toBe('PREVIEW_FETCH_FAILED');
+    expect(result.previewError!.message).toBe('read-back persistent');
+  });
+
+  it('create_draft non-recoverable ProviderError: no retry, previewError carries provider code', async () => {
+    const getMessageSpy = vi.spyOn(provider, 'getMessage')
+      .mockRejectedValue(new ProviderError('INVALID_DRAFT_ID', 'no such draft', 'mock', false));
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Hello',
+      body: 'Body',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.preview).toBeUndefined();
+    expect(result.previewError!.code).toBe('INVALID_DRAFT_ID');
+    expect(getMessageSpy).toHaveBeenCalledTimes(1); // no retry on non-recoverable
+  });
+
+  it('create_draft non-Error throw: previewError carries stringified value', async () => {
+    vi.spyOn(provider, 'getMessage').mockRejectedValue('plain string failure');
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Hello',
+      body: 'Body',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.previewError!.code).toBe('PREVIEW_FETCH_FAILED');
+    expect(result.previewError!.message).toBe('plain string failure');
+  });
+
+  it('create_draft sparse persisted message: preview omits absent fields cleanly', async () => {
+    // Provider returned a draft with no body, bodyHtml, or cc — preview should
+    // reflect that without crashing or fabricating defaults.
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Bare draft',
+      to: [{ email: 'alice@allowed.com' }],
+      cc: undefined,
+      body: undefined,
+      bodyHtml: undefined,
+    }));
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Bare draft',
+      body: 'Body',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.preview).toBeDefined();
+    expect(result.preview!.subject).toBe('Bare draft');
+    expect(result.preview!.to).toEqual([{ email: 'alice@allowed.com' }]);
+    expect(result.preview!.cc).toBeUndefined();
+    expect(result.preview!.body).toBeUndefined();
+    expect(result.preview!.bodyHtml).toBeUndefined();
+    expect(result.preview!.bodyTruncated).toBeUndefined();
+    expect(result.preview!.bodyHtmlTruncated).toBeUndefined();
   });
 
   it('create_draft preview on reply-draft path (reply_to)', async () => {
@@ -589,7 +696,7 @@ describe('email-write/Draft Preview (issue #75)', () => {
     expect(result.preview!.cc).toEqual([{ email: 'stale-cc@allowed.com' }]);
   });
 
-  it('update_draft preview omitted when read-back fails — success unchanged', async () => {
+  it('update_draft persistent read-back failure: previewError surfaces, success unchanged', async () => {
     const created = await createDraftAction.run(ctx, {
       to: 'alice@allowed.com',
       subject: 'Original',
@@ -597,7 +704,7 @@ describe('email-write/Draft Preview (issue #75)', () => {
     });
     expect(created.success).toBe(true);
 
-    vi.spyOn(provider, 'getMessage').mockRejectedValueOnce(new Error('read-back failed'));
+    vi.spyOn(provider, 'getMessage').mockRejectedValue(new Error('read-back persistent'));
 
     const result = await updateDraftAction.run(ctx, {
       draft_id: created.draftId!,
@@ -606,9 +713,10 @@ describe('email-write/Draft Preview (issue #75)', () => {
 
     expect(result.success).toBe(true);
     expect(result.preview).toBeUndefined();
+    expect(result.previewError!.code).toBe('PREVIEW_FETCH_FAILED');
   });
 
-  it('preview body is truncated past PREVIEW_BODY_LIMIT', async () => {
+  it('preview body is truncated past PREVIEW_BODY_LIMIT and signals truncation structurally', async () => {
     const huge = 'x'.repeat(64 * 1024);
     vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
       subject: 'Big',
@@ -624,7 +732,94 @@ describe('email-write/Draft Preview (issue #75)', () => {
     });
 
     expect(result.success).toBe(true);
-    expect(result.preview!.body!.length).toBeLessThan(huge.length);
-    expect(result.preview!.bodyHtml!.length).toBeLessThan(huge.length);
+    // Both fields capped to the 32 KB MCP-response budget.
+    expect(Buffer.byteLength(result.preview!.body!, 'utf-8')).toBeLessThanOrEqual(32 * 1024);
+    expect(Buffer.byteLength(result.preview!.bodyHtml!, 'utf-8')).toBeLessThanOrEqual(32 * 1024);
+    // Structured truncation flag — agents should not need to grep a footer
+    // string, and we deliberately do NOT append the misleading
+    // "exceeded email size limits" notice (the persisted draft is unchanged).
+    expect(result.preview!.bodyTruncated).toBe(true);
+    expect(result.preview!.bodyHtmlTruncated).toBe(true);
+    expect(result.preview!.body).not.toContain('exceeded email size limits');
+    expect(result.preview!.bodyHtml).not.toContain('exceeded email size limits');
+  });
+
+  it('preview body within PREVIEW_BODY_LIMIT does not set bodyTruncated', async () => {
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Small',
+      to: [{ email: 'alice@allowed.com' }],
+      body: 'tiny',
+    }));
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Small',
+      body: 'tiny',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.preview!.body).toBe('tiny');
+    expect(result.preview!.bodyTruncated).toBeUndefined();
+  });
+});
+
+describe('email-write/send_email Draft Preview (issue #75)', () => {
+  it('send_email with draft: true returns preview reflecting persisted draft', async () => {
+    // send_email's draft branch creates a draft via createDraft, the same
+    // draft-creating contract as create_draft. The preview must be returned
+    // for symmetry — agents should not need to choose between tools to get
+    // verification.
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Send-as-draft',
+      to: [{ email: 'alice@allowed.com' }],
+      cc: [{ email: 'bob@allowed.com' }],
+      body: 'Body',
+    }));
+
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      cc: ['bob@allowed.com'],
+      subject: 'Send-as-draft',
+      body: 'Body',
+      draft: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.draftId).toBeDefined();
+    expect(result.messageId).toBeUndefined();
+    expect(provider.getSentMessages()).toHaveLength(0);
+    expect(result.preview).toBeDefined();
+    expect(result.preview!.subject).toBe('Send-as-draft');
+    expect(result.preview!.cc).toEqual([{ email: 'bob@allowed.com' }]);
+  });
+
+  it('send_email with draft: true persistent read-back failure: previewError surfaces', async () => {
+    vi.spyOn(provider, 'getMessage').mockRejectedValue(new Error('read-back persistent'));
+
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Send-as-draft',
+      body: 'Body',
+      draft: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.draftId).toBeDefined();
+    expect(result.preview).toBeUndefined();
+    expect(result.previewError!.code).toBe('PREVIEW_FETCH_FAILED');
+  });
+
+  it('send_email send path (non-draft) returns no preview', async () => {
+    // Preview is for draft-creating flows only. The send branch returns messageId.
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Live send',
+      body: 'Body',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.messageId).toBeDefined();
+    expect(result.preview).toBeUndefined();
+    expect(result.previewError).toBeUndefined();
   });
 });
