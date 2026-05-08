@@ -837,7 +837,7 @@ export async function buildLazyActions(
       name: 'search_emails',
       description: 'Search emails using full-text query across one or all mailboxes. Use offset for pagination.',
       input: z.object({ query: z.string(), mailbox: z.string().nullable().optional(), limit: z.number().optional(), offset: z.number().optional() }),
-      output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean(), mailbox: z.string().optional() })) }),
+      output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean(), mailbox: z.string().optional(), conversationId: z.string().optional(), threadId: z.string().optional() })) }),
       annotations: { readOnlyHint: true, destructiveHint: false },
       run: async (_ctx, input) => {
         await waitForInit(state);
@@ -857,6 +857,8 @@ export async function buildLazyActions(
             receivedAt: string;
             isRead: boolean;
             hasAttachments: boolean;
+            conversationId?: string;
+            threadId?: string;
           }>).map(result => ({ ...result, mailbox: resolved.mailbox.name }))
           : (await Promise.all(
             getConnectedMailboxes(state).map(async mailbox => {
@@ -876,6 +878,8 @@ export async function buildLazyActions(
             isRead: m.isRead,
             hasAttachments: m.hasAttachments,
             mailbox: m.mailbox,
+            ...(m.conversationId !== undefined ? { conversationId: m.conversationId } : {}),
+            ...(m.threadId !== undefined ? { threadId: m.threadId } : {}),
           })),
         };
       },

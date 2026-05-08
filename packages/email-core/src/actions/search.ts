@@ -20,6 +20,8 @@ const SearchEmailsOutput = z.object({
     hasAttachments: z.boolean(),
     mailbox: z.string().optional(),
     snippet: z.string().optional(),
+    conversationId: z.string().optional(),
+    threadId: z.string().optional(),
   })),
 });
 
@@ -56,6 +58,8 @@ export const searchEmailsAction: EmailAction<
           hasAttachments: m.hasAttachments,
           mailbox: m.mailbox,
           snippet: m.snippet,
+          ...(m.conversationId !== undefined ? { conversationId: m.conversationId } : {}),
+          ...(m.threadId !== undefined ? { threadId: m.threadId } : {}),
         })),
       };
     }
@@ -71,6 +75,8 @@ export const searchEmailsAction: EmailAction<
         hasAttachments: m.hasAttachments,
         mailbox: ctx.mailboxName,
         snippet: m.snippet,
+        ...(m.conversationId !== undefined ? { conversationId: m.conversationId } : {}),
+        ...(m.threadId !== undefined ? { threadId: m.threadId } : {}),
       })),
     };
   },
