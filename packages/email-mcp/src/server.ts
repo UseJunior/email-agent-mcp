@@ -1,6 +1,6 @@
 // MCP server — thin transport adapter mapping action registry to MCP tools
 import { createRequire } from 'node:module';
-import type { EmailAction, EmailProvider } from '@usejunior/email-core';
+import type { DeletePolicy, EmailAction, EmailProvider } from '@usejunior/email-core';
 import { z } from 'zod';
 
 /**
@@ -655,6 +655,7 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
 export async function buildLazyActions(
   state: LazyProviderState,
   getSendAllowlist: () => { entries: string[] } | undefined,
+  getDeletePolicy: () => DeletePolicy | undefined = () => undefined,
 ): Promise<EmailActionDef[]> {
   const {
     sendEmailAction,
@@ -698,11 +699,14 @@ export async function buildLazyActions(
             ? (input as { mailbox?: string }).mailbox
             : undefined;
         const resolved = resolveMailboxContext(state, requestedMailbox);
+        const deletePolicy = getDeletePolicy();
         const actionCtx = {
           provider: resolved.mailbox.provider,
           mailboxName: resolved.mailbox.name,
           allMailboxes: resolved.allMailboxes,
           sendAllowlist: getSendAllowlist(),
+          deleteEnabled: deletePolicy?.enabled === true,
+          hardDeleteAllowed: deletePolicy?.hardDeleteAllowed === true,
         };
         return action.run(actionCtx as never, input as never);
       } catch (err) {
@@ -983,7 +987,7 @@ export async function runServer(): Promise<void> {
   const { ListToolsRequestSchema, CallToolRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
 
   // Load send allowlist with hot-reload (convention: ~/.email-agent-mcp/send-allowlist.json)
-  const { loadSendAllowlist, getSendAllowlistPath, WatchedAllowlist } = await import('@usejunior/email-core');
+  const { loadSendAllowlist, getSendAllowlistPath, WatchedAllowlist, getDeletePolicyFromEnv } = await import('@usejunior/email-core');
   const sendAllowlistPath = getSendAllowlistPath();
   const sendAllowlistWatcher = new WatchedAllowlist(sendAllowlistPath, loadSendAllowlist);
   await sendAllowlistWatcher.start();
@@ -994,9 +998,19 @@ export async function runServer(): Promise<void> {
     console.error(`[email-agent-mcp] WARNING: Send allowlist empty or not found at ${sendAllowlistPath} — all outbound email is disabled`);
   }
 
+  // Resolve delete policy from env once at startup. Misconfiguration warnings
+  // surface via console.error inside getDeletePolicyFromEnv.
+  const deletePolicy = getDeletePolicyFromEnv();
+  const getDeletePolicy = () => deletePolicy;
+  console.error(
+    deletePolicy
+      ? `[email-agent-mcp] Delete policy: enabled (hard_delete=${deletePolicy.hardDeleteAllowed})`
+      : '[email-agent-mcp] Delete policy: disabled (set AGENT_EMAIL_DELETE_ENABLED=true to enable)',
+  );
+
   // Build tool registry with lazy provider state (no auth yet).
   const state = createLazyProviderState();
-  const actions = await buildLazyActions(state, getSendAllowlist);
+  const actions = await buildLazyActions(state, getSendAllowlist, getDeletePolicy);
 
   const server = new Server(
     { name: 'email-agent-mcp', version: PACKAGE_VERSION },

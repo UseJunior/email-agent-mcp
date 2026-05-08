@@ -56,12 +56,75 @@ describe('email-categorize/Mailbox Routing', () => {
   });
 });
 
-describe('email-categorize/No Delete in v1', () => {
+describe('email-categorize/Delete Policy', () => {
   it('Scenario: Delete attempt when disabled', async () => {
     // Delete is disabled by default (ctx.deleteEnabled is undefined)
     const result = await deleteEmailAction.run(ctx, {
       id: 'msg123',
       user_explicitly_requested_deletion: true,
+      hard_delete: false,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('DELETE_DISABLED');
+    expect(result.error!.message).toContain('Email deletion is disabled');
+    // Names the env var so operators can self-remediate.
+    expect(result.error!.message).toContain('AGENT_EMAIL_DELETE_ENABLED');
+  });
+
+  it('Scenario: Delete enabled, soft delete succeeds', async () => {
+    const enabledCtx: ActionContext = { provider, deleteEnabled: true, hardDeleteAllowed: false };
+    const result = await deleteEmailAction.run(enabledCtx, {
+      id: 'msg123',
+      user_explicitly_requested_deletion: true,
+      hard_delete: false,
+    });
+
+    expect(result.success).toBe(true);
+    // Soft delete moves to trash (not removed entirely).
+    const msgs = provider.getMessages();
+    const moved = msgs.find(m => m.id === 'msg123');
+    expect(moved?.folder).toBe('trash');
+  });
+
+  it('Scenario: hard_delete blocked when only soft is enabled (closes self-approval loophole)', async () => {
+    // Even though caller passes hard_delete: true, ctx.hardDeleteAllowed is false
+    // so the request must be rejected. Previously, label.ts derived
+    // hardDeleteAllowed from input.hard_delete itself, so this case "succeeded".
+    const enabledCtx: ActionContext = { provider, deleteEnabled: true, hardDeleteAllowed: false };
+    const result = await deleteEmailAction.run(enabledCtx, {
+      id: 'msg123',
+      user_explicitly_requested_deletion: true,
+      hard_delete: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('DELETE_DISABLED');
+    expect(result.error!.message).toContain('Hard delete is not allowed');
+    expect(result.error!.message).toContain('AGENT_EMAIL_HARD_DELETE_ENABLED');
+  });
+
+  it('Scenario: hard delete succeeds when both gates are open', async () => {
+    const enabledCtx: ActionContext = { provider, deleteEnabled: true, hardDeleteAllowed: true };
+    const result = await deleteEmailAction.run(enabledCtx, {
+      id: 'msg123',
+      user_explicitly_requested_deletion: true,
+      hard_delete: true,
+    });
+
+    expect(result.success).toBe(true);
+    // Hard delete removes the message entirely.
+    const msgs = provider.getMessages();
+    expect(msgs.find(m => m.id === 'msg123')).toBeUndefined();
+  });
+
+  it('Scenario: ctx.deleteEnabled requires strict-equality (not truthy)', async () => {
+    // Passing a non-boolean truthy value must NOT enable deletion.
+    const sneakyCtx = { provider, deleteEnabled: 'true' as unknown as boolean };
+    const result = await deleteEmailAction.run(sneakyCtx, {
+      id: 'msg123',
+      user_explicitly_requested_deletion: true,
+      hard_delete: false,
     });
 
     expect(result.success).toBe(false);

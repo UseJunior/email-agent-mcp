@@ -1183,6 +1183,159 @@ describe('cli/Call Subcommand Mailbox Routing', () => {
   });
 });
 
+describe('cli/Call Subcommand Delete Policy Wiring (issue #78)', () => {
+  // Confirms that runCall reads AGENT_EMAIL_DELETE_ENABLED from env and
+  // forwards a working getDeletePolicy into buildLazyActions, AND that the
+  // status log line only appears for delete_email (not noisy for every call).
+
+  const originalDelete = process.env['AGENT_EMAIL_DELETE_ENABLED'];
+  const originalHard = process.env['AGENT_EMAIL_HARD_DELETE_ENABLED'];
+
+  afterEach(() => {
+    if (originalDelete === undefined) delete process.env['AGENT_EMAIL_DELETE_ENABLED'];
+    else process.env['AGENT_EMAIL_DELETE_ENABLED'] = originalDelete;
+    if (originalHard === undefined) delete process.env['AGENT_EMAIL_HARD_DELETE_ENABLED'];
+    else process.env['AGENT_EMAIL_HARD_DELETE_ENABLED'] = originalHard;
+    vi.doUnmock('./server.js');
+  });
+
+  it('Scenario: AGENT_EMAIL_DELETE_ENABLED=true is threaded through to action context', async () => {
+    process.env['AGENT_EMAIL_DELETE_ENABLED'] = 'true';
+    delete process.env['AGENT_EMAIL_HARD_DELETE_ENABLED'];
+
+    const { z } = await import('zod');
+    const capturedCtx: Array<{ deleteEnabled?: boolean; hardDeleteAllowed?: boolean }> = [];
+    const recordingAction = {
+      name: 'delete_email',
+      description: 'test stub that records ctx',
+      input: z.object({}).passthrough(),
+      output: z.object({ ok: z.boolean() }),
+      annotations: { readOnlyHint: false, destructiveHint: true },
+      run: async (ctx: { deleteEnabled?: boolean; hardDeleteAllowed?: boolean }, _input: unknown) => {
+        capturedCtx.push(ctx);
+        return { ok: true };
+      },
+    };
+    const noopState = { status: 'connected', mailboxes: [], defaultMailboxName: null };
+
+    vi.doMock('./server.js', async () => {
+      const actual = await vi.importActual<typeof import('./server.js')>('./server.js');
+      return {
+        ...actual,
+        createLazyProviderState: () => noopState,
+        // Pass through the third arg by invoking it once, simulating what
+        // wrapAction would do at action-run time. This proves runCall built
+        // and forwarded the getDeletePolicy correctly.
+        buildLazyActions: async (
+          _state: unknown,
+          _getSendAllowlist: unknown,
+          getDeletePolicy?: () => unknown,
+        ) => {
+          const policy = getDeletePolicy?.() as { enabled?: boolean; hardDeleteAllowed?: boolean } | undefined;
+          return [{
+            ...recordingAction,
+            run: async (_ctx: unknown, input: unknown) => recordingAction.run(
+              {
+                deleteEnabled: policy?.enabled === true,
+                hardDeleteAllowed: policy?.hardDeleteAllowed === true,
+              },
+              input,
+            ),
+          }];
+        },
+        ensureProvider: async () => undefined,
+      };
+    });
+
+    const { runCall } = await import('./cli.js');
+    const exitCode = await runCall({
+      command: 'call',
+      callTool: 'delete_email',
+      callArgs: '{}',
+    });
+
+    expect(exitCode).toBe(0);
+    expect(capturedCtx[0]?.deleteEnabled).toBe(true);
+    expect(capturedCtx[0]?.hardDeleteAllowed).toBe(false);
+  });
+
+  it('Scenario: status log line only appears when invoked tool is delete_email', async () => {
+    process.env['AGENT_EMAIL_DELETE_ENABLED'] = 'true';
+
+    const { z } = await import('zod');
+    const stub = {
+      name: 'list_emails',
+      description: 'stub',
+      input: z.object({}).passthrough(),
+      output: z.object({ ok: z.boolean() }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      run: async () => ({ ok: true }),
+    };
+    const noopState = { status: 'connected', mailboxes: [], defaultMailboxName: null };
+
+    vi.doMock('./server.js', async () => {
+      const actual = await vi.importActual<typeof import('./server.js')>('./server.js');
+      return {
+        ...actual,
+        createLazyProviderState: () => noopState,
+        buildLazyActions: async () => [stub],
+        ensureProvider: async () => undefined,
+      };
+    });
+
+    const stderrSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { runCall } = await import('./cli.js');
+      const exitCode = await runCall({
+        command: 'call',
+        callTool: 'list_emails',
+        callArgs: '{}',
+      });
+      expect(exitCode).toBe(0);
+      const allStderr = stderrSpy.mock.calls.map(args => String(args[0])).join('\n');
+      expect(allStderr).not.toMatch(/Delete policy:/);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('Scenario: misconfigured env (e.g. "1") emits a warning regardless of invoked tool', async () => {
+    process.env['AGENT_EMAIL_DELETE_ENABLED'] = '1';
+
+    const { z } = await import('zod');
+    const stub = {
+      name: 'list_emails',
+      description: 'stub',
+      input: z.object({}).passthrough(),
+      output: z.object({ ok: z.boolean() }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      run: async () => ({ ok: true }),
+    };
+    const noopState = { status: 'connected', mailboxes: [], defaultMailboxName: null };
+
+    vi.doMock('./server.js', async () => {
+      const actual = await vi.importActual<typeof import('./server.js')>('./server.js');
+      return {
+        ...actual,
+        createLazyProviderState: () => noopState,
+        buildLazyActions: async () => [stub],
+        ensureProvider: async () => undefined,
+      };
+    });
+
+    const stderrSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { runCall } = await import('./cli.js');
+      await runCall({ command: 'call', callTool: 'list_emails', callArgs: '{}' });
+      const allStderr = stderrSpy.mock.calls.map(args => String(args[0])).join('\n');
+      expect(allStderr).toContain('AGENT_EMAIL_DELETE_ENABLED');
+      expect(allStderr).toMatch(/WARNING/);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+});
+
 describe('cli/Call Subcommand Diagnostic Tools', () => {
   it('Scenario: call get_mailbox_status reports state without requiring provider readiness', async () => {
     // Regression: the eager-init gate previously short-circuited get_mailbox_status

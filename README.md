@@ -160,7 +160,7 @@ Agent Email exposes 15 MCP tools:
 | `flag_email` | Flag/unflag emails | write |
 | `mark_read` | Mark as read/unread | write |
 | `move_to_folder` | Move between folders | write |
-| `delete_email` | Delete (requires opt-in) | destructive |
+| `delete_email` | Delete (requires operator env + caller flag) | destructive |
 
 ## Provider Support
 
@@ -177,7 +177,9 @@ Agent Email ships with restrictive defaults that you loosen as needed:
 
 - **Send allowlist**: empty by default -- agents cannot send email until you add recipients
 - **Receive allowlist**: accepts all by default -- controls which senders trigger the watcher
-- **Delete disabled**: agents cannot delete email unless you set `user_explicitly_requested_deletion: true`
+- **Delete disabled**: agents cannot delete email by default. Two gates must both be satisfied:
+  1. operator sets `AGENT_EMAIL_DELETE_ENABLED=true` in the email-agent-mcp process environment (and `AGENT_EMAIL_HARD_DELETE_ENABLED=true` for permanent deletion). Restart required after change.
+  2. the caller passes `user_explicitly_requested_deletion: true` on the tool call.
 - **Error sanitization**: API keys, file paths, and stack traces are redacted from error responses
 - **Body file sandboxing**: no `../` traversal, no symlinks, binary detection
 

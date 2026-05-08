@@ -101,8 +101,8 @@ export const deleteEmailAction: EmailAction<z.infer<typeof DeleteEmailInput>, z.
   output: LabelEmailOutput,
   annotations: { readOnlyHint: false, destructiveHint: true },
   run: async (ctx, input) => {
-    const deletePolicy: DeletePolicy | undefined = ctx.deleteEnabled
-      ? { enabled: true, hardDeleteAllowed: input.hard_delete }
+    const deletePolicy: DeletePolicy | undefined = ctx.deleteEnabled === true
+      ? { enabled: true, hardDeleteAllowed: ctx.hardDeleteAllowed === true }
       : undefined;
 
     const policyError = checkDeletePolicy(deletePolicy, input.user_explicitly_requested_deletion, input.hard_delete);

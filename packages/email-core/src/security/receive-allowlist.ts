@@ -77,19 +77,50 @@ export function checkDeletePolicy(
   userExplicitlyRequestedDeletion: boolean,
   hardDelete: boolean,
 ): string | undefined {
-  if (!policy || !policy.enabled) {
-    return 'Email deletion is disabled. Enable in configuration if needed.';
+  if (!policy || policy.enabled !== true) {
+    return 'Email deletion is disabled. Set AGENT_EMAIL_DELETE_ENABLED=true in the email-agent-mcp process environment to enable.';
   }
 
-  if (!userExplicitlyRequestedDeletion) {
+  if (userExplicitlyRequestedDeletion !== true) {
     return 'user_explicitly_requested_deletion must be true to delete emails';
   }
 
-  if (hardDelete && !policy.hardDeleteAllowed) {
-    return 'Hard delete is not allowed in current configuration';
+  if (hardDelete && policy.hardDeleteAllowed !== true) {
+    return 'Hard delete is not allowed. Set AGENT_EMAIL_HARD_DELETE_ENABLED=true in the email-agent-mcp process environment to enable.';
   }
 
   return undefined;
+}
+
+/**
+ * Resolve the delete policy from environment variables. Strict: only the
+ * literal string 'true' enables a gate; all other values leave it disabled.
+ * Returns undefined when deletion is not enabled.
+ *
+ * Side effects: emits stderr warnings via `onWarn` for misconfigured env state
+ * (unsupported non-empty values, or hard-delete enabled without delete enabled)
+ * so silent typos don't strand operators on the disabled fallback.
+ */
+export function getDeletePolicyFromEnv(
+  onWarn: (msg: string) => void = (msg) => { console.error(msg); },
+): DeletePolicy | undefined {
+  const rawDelete = process.env['AGENT_EMAIL_DELETE_ENABLED'];
+  const rawHard = process.env['AGENT_EMAIL_HARD_DELETE_ENABLED'];
+
+  if (rawDelete !== undefined && rawDelete !== '' && rawDelete !== 'true') {
+    onWarn(`[email-agent-mcp] WARNING: AGENT_EMAIL_DELETE_ENABLED='${rawDelete}' is not 'true' — deletion remains disabled.`);
+  }
+  if (rawHard !== undefined && rawHard !== '' && rawHard !== 'true') {
+    onWarn(`[email-agent-mcp] WARNING: AGENT_EMAIL_HARD_DELETE_ENABLED='${rawHard}' is not 'true' — hard delete remains disabled.`);
+  }
+
+  if (rawDelete !== 'true') {
+    if (rawHard === 'true') {
+      onWarn('[email-agent-mcp] WARNING: AGENT_EMAIL_HARD_DELETE_ENABLED=true has no effect without AGENT_EMAIL_DELETE_ENABLED=true.');
+    }
+    return undefined;
+  }
+  return { enabled: true, hardDeleteAllowed: rawHard === 'true' };
 }
 
 // Anti-spoofing check

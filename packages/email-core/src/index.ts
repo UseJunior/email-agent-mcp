@@ -27,7 +27,10 @@ export {
   isAllowedSender,
   loadReceiveAllowlist,
   getReceiveAllowlistPath,
+  checkDeletePolicy,
+  getDeletePolicyFromEnv,
 } from './security/receive-allowlist.js';
+export type { DeletePolicy } from './security/receive-allowlist.js';
 export {
   isAllowedRecipient,
   loadSendAllowlist,

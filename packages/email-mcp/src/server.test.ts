@@ -1294,3 +1294,107 @@ describe('mcp-transport/Scalar Coercion at Boundary', () => {
     expect(parsed.success).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #78: delete policy plumbing through buildLazyActions/wrapAction.
+// Regression net for the original bug — ctx.deleteEnabled was declared but
+// never populated by wrapAction, so delete_email was effectively impossible.
+// ---------------------------------------------------------------------------
+
+describe('mcp-transport/Delete policy wiring', () => {
+  const noAllowlist = () => undefined;
+
+  function makeConnectedState(deleteMessage: ReturnType<typeof vi.fn>) {
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    const provider = { deleteMessage } as never;
+    state.provider = provider;
+    state.connectedMailbox = 'work@example.com';
+    state.connectedProvider = 'microsoft';
+    state.mailboxes = [
+      {
+        name: 'work',
+        emailAddress: 'work@example.com',
+        displayName: 'work@example.com',
+        providerType: 'microsoft',
+        provider,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+    ];
+    return state;
+  }
+
+  it('default getDeletePolicy (none) — delete_email returns DELETE_DISABLED naming the env var', async () => {
+    const deleteMessage = vi.fn();
+    const state = makeConnectedState(deleteMessage);
+    const actions = await buildLazyActions(state, noAllowlist); // no third arg = disabled
+
+    const del = actions.find(a => a.name === 'delete_email')!;
+    const result = await del.run({}, {
+      id: 'msg-1',
+      user_explicitly_requested_deletion: true,
+      hard_delete: false,
+    }) as { success: boolean; error?: { code: string; message: string } };
+
+    expect(deleteMessage).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('DELETE_DISABLED');
+    expect(result.error?.message).toContain('AGENT_EMAIL_DELETE_ENABLED');
+  });
+
+  it('soft-only policy threads through wrapAction — provider.deleteMessage called with hard=false', async () => {
+    const deleteMessage = vi.fn().mockResolvedValue(undefined);
+    const state = makeConnectedState(deleteMessage);
+    const getDeletePolicy = () => ({ enabled: true, hardDeleteAllowed: false });
+    const actions = await buildLazyActions(state, noAllowlist, getDeletePolicy);
+
+    const del = actions.find(a => a.name === 'delete_email')!;
+    const result = await del.run({}, {
+      id: 'msg-1',
+      user_explicitly_requested_deletion: true,
+      hard_delete: false,
+    }) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(deleteMessage).toHaveBeenCalledWith('msg-1', false);
+  });
+
+  it('soft-only policy still blocks hard_delete:true (closes self-approval loophole)', async () => {
+    const deleteMessage = vi.fn();
+    const state = makeConnectedState(deleteMessage);
+    const getDeletePolicy = () => ({ enabled: true, hardDeleteAllowed: false });
+    const actions = await buildLazyActions(state, noAllowlist, getDeletePolicy);
+
+    const del = actions.find(a => a.name === 'delete_email')!;
+    const result = await del.run({}, {
+      id: 'msg-1',
+      user_explicitly_requested_deletion: true,
+      hard_delete: true,
+    }) as { success: boolean; error?: { code: string; message: string } };
+
+    expect(deleteMessage).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('DELETE_DISABLED');
+    expect(result.error?.message).toContain('AGENT_EMAIL_HARD_DELETE_ENABLED');
+  });
+
+  it('full policy threads through — provider.deleteMessage called with hard=true', async () => {
+    const deleteMessage = vi.fn().mockResolvedValue(undefined);
+    const state = makeConnectedState(deleteMessage);
+    const getDeletePolicy = () => ({ enabled: true, hardDeleteAllowed: true });
+    const actions = await buildLazyActions(state, noAllowlist, getDeletePolicy);
+
+    const del = actions.find(a => a.name === 'delete_email')!;
+    const result = await del.run({}, {
+      id: 'msg-1',
+      user_explicitly_requested_deletion: true,
+      hard_delete: true,
+    }) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(deleteMessage).toHaveBeenCalledWith('msg-1', true);
+  });
+});
