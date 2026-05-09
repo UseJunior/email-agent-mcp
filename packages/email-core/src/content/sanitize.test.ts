@@ -295,6 +295,18 @@ describe('content-engine/Unescape Markdown Punctuation (issue #79)', () => {
     expect(unescapeMarkdownPunctuation(md)).toBe(md);
   });
 
+  it('preserves escapes inside 3-backtick code spans (CommonMark allows any run length)', () => {
+    // NHM emits 3-backtick delimiters (with surrounding spaces) when the inline
+    // code content itself contains 2 backticks. The escapes inside must survive.
+    const md = 'Use ``` ``\\[x\\]`` ``` literally';
+    expect(unescapeMarkdownPunctuation(md)).toBe(md);
+  });
+
+  it('preserves escapes inside 4-backtick code spans', () => {
+    const md = 'See ```` ```\\[x\\]``` ```` here';
+    expect(unescapeMarkdownPunctuation(md)).toBe(md);
+  });
+
   it('preserves escapes inside fenced code blocks', () => {
     const md = 'Example:\n\n```\n\\[in fence\\]\n```\n';
     expect(unescapeMarkdownPunctuation(md)).toBe(md);

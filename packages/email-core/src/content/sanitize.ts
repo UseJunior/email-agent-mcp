@@ -178,7 +178,11 @@ const DEST = /\(\s*(?:<[^>\n]*>|(?:\([^)\n]*\)|[^\s()\\]|\\.)+)(?:\s+(?:"[^"\n]*
 const INLINE_IMG_RE = new RegExp(`!\\[${LINK_TEXT}\\]${DEST}`, 'g');
 const INLINE_LINK_RE = new RegExp(`\\[${LINK_TEXT}\\]${DEST}`, 'g');
 const REF_LINK_RE = new RegExp(`!?\\[${LINK_TEXT}\\]\\[[^\\]\\n]*\\]`, 'g');
-const CODE_SPAN_RE = /``(?:[^`]|`(?!`))+``|`[^`\n]+`/g;
+// Match CommonMark code spans of any backtick run length: opener and closer
+// must be backtick strings of equal length, content cannot contain that exact
+// run. Lazy `*?` lets empty spans (`` `` ``) match; `[^\n]` keeps the span
+// single-line, matching NHM output.
+const CODE_SPAN_RE = /(`+)(?:(?!\1)[^\n])*?\1/g;
 
 export function unescapeMarkdownPunctuation(md: string): string {
   const tokens: string[] = [];
