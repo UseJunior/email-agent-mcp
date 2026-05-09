@@ -737,6 +737,51 @@ describe('mcp-transport/Lazy Provider State', () => {
     ]);
   });
 
+  it('Scenario: read_email omits cc field even when provider returns it (wire-shape parity with pre-PR MCP tool)', async () => {
+    // The pre-PR hand-rolled MCP `read_email` did not surface `cc`. The refactor delegates
+    // to readEmailAction (which returns `cc`), but the MCP adapter must drop it so the wire
+    // shape stays unchanged. Adding cc to the MCP surface is a separate, additive change.
+    const getMessage = vi.fn().mockResolvedValue({
+      id: 'msg-cc',
+      subject: 'Has cc',
+      from: { email: 'alice@corp.com', name: 'Alice' },
+      to: [{ email: 'bob@corp.com', name: 'Bob' }],
+      cc: [{ email: 'carol@corp.com', name: 'Carol' }],
+      receivedAt: '2026-04-09T12:00:00.000Z',
+      body: 'Hello.',
+    });
+
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { getMessage } as never;
+    state.connectedMailbox = 'alice@corp.com';
+    state.mailboxes = [
+      {
+        name: 'alice',
+        emailAddress: 'alice@corp.com',
+        displayName: 'alice@corp.com',
+        providerType: 'gmail',
+        provider: { getMessage } as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const readEmail = actions.find(a => a.name === 'read_email')!;
+    const result = await readEmail.run({}, { id: 'msg-cc' }) as Record<string, unknown>;
+
+    expect(result).not.toHaveProperty('cc');
+    expect(result.id).toBe('msg-cc');
+    expect(result.to).toEqual(['Bob <bob@corp.com>']);
+    // The action's full schema includes cc; the MCP output schema does NOT.
+    const schema = readEmail.output as { shape?: Record<string, unknown> };
+    expect(schema.shape).toBeDefined();
+    expect(schema.shape!.cc).toBeUndefined();
+  });
+
   it('Scenario: read_email exposes strip_quoted_history with default false', async () => {
     const state = createLazyProviderState();
     state.status = 'connected';

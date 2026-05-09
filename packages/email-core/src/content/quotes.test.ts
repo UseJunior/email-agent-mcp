@@ -288,6 +288,12 @@ describe('content-engine/Quoted-History Stripping', () => {
     expect(result).toContain('Thanks!');
     expect(result).toContain(MARKER);
     expect(result).not.toContain('Original message body.');
+    // Regression: the wrapped preamble lines themselves must also be removed —
+    // the previous detector cut at the `>` line and left the `On …\n<email> wrote:`
+    // pair in the output.
+    expect(result).not.toContain('On Thu, Jul 14, 2011');
+    expect(result).not.toContain('alice@long-domain-example.com');
+    expect(result).not.toMatch(/wrote:\s*$/m);
   });
 
   it('Scenario: "On" line that does not wrap to "wrote:" is NOT mistaken for preamble', () => {
@@ -315,6 +321,148 @@ describe('content-engine/Quoted-History Stripping', () => {
 
     const result = stripQuotedHistory(body, { marker: '[trimmed]' });
     expect(result).toContain('[trimmed]');
+    expect(result).not.toContain(MARKER);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Terminal-validation regression tests — added in response to peer review.
+  // Pre-fix, the detector cut on the FIRST recognized pattern without verifying
+  // the candidate was actually at the bottom of the body, so an inline quote
+  // followed by user prose would collapse the user's reply to the marker only.
+  // ---------------------------------------------------------------------------
+
+  it('Scenario: Inline Gmail "On … wrote:" with user prose after is preserved', () => {
+    const body = [
+      'Hi team,',
+      '',
+      'Including the earlier exchange below for reference.',
+      '',
+      'On Wed, Mar 13, 2024 at 9:30 AM Alice <alice@corp.com> wrote:',
+      '> Want to push standup to 10am?',
+      '> Talk soon.',
+      '',
+      'My take: 10am is fine for me but conflicts with Bob — let me check.',
+      'Will follow up tomorrow.',
+    ].join('\n');
+
+    const result = stripQuotedHistory(body);
+    expect(result).toBe(body);
+    expect(result).not.toContain(MARKER);
+  });
+
+  it('Scenario: Inline wrapped "On …" preamble with user prose after is preserved', () => {
+    const body = [
+      'Including for context:',
+      '',
+      'On Thu, Jul 14, 2011 at 4:55 PM, Alice',
+      '<alice@long-domain-example.com> wrote:',
+      '> Earlier note.',
+      '',
+      'And here is my actual response: I disagree with point 3.',
+    ].join('\n');
+
+    const result = stripQuotedHistory(body);
+    expect(result).toBe(body);
+    expect(result).not.toContain(MARKER);
+  });
+
+  it('Scenario: "-----Original Message-----" without an Outlook cluster is preserved', () => {
+    // Without a real header block following, "-----Original Message-----" might be
+    // user-authored (e.g. a literary section divider, a copy-pasted plaintext snippet).
+    // We require a real cluster to commit to stripping.
+    const body = [
+      'Note from the meeting:',
+      '',
+      '-----Original Message-----',
+      '',
+      'Per the discussion, we agreed to ship Friday.',
+    ].join('\n');
+
+    const result = stripQuotedHistory(body);
+    expect(result).toBe(body);
+    expect(result).not.toContain(MARKER);
+  });
+
+  it('Scenario: Multiple "On … wrote:" levels — cut at the first', () => {
+    const body = [
+      'Latest reply.',
+      '',
+      'On Wed, Mar 13, 2024 at 9:30 AM Alice <alice@corp.com> wrote:',
+      '> Reply level 1',
+      '>',
+      '> On Tue, Mar 12, 2024 Bob <bob@corp.com> wrote:',
+      '> > Reply level 2',
+      '> >',
+      '> > On Mon, Mar 11, 2024 Carol <carol@corp.com> wrote:',
+      '> > > Original message',
+    ].join('\n');
+
+    const result = stripQuotedHistory(body);
+
+    expect(result).toContain('Latest reply.');
+    expect(result).toContain(MARKER);
+    expect(result).not.toContain('Reply level 1');
+    expect(result).not.toContain('Reply level 2');
+    expect(result).not.toContain('Original message');
+    // Cut should be at the first "On … wrote:" — the marker should appear right after
+    // the latest reply, with no intermediate preamble lines lingering.
+    const lines = result.split('\n');
+    const lastNonBlank = [...lines].reverse().find(l => l.trim() !== '');
+    expect(lastNonBlank).toBe(MARKER);
+  });
+
+  it('Scenario: Body starting with Outlook From: cluster (no leading user text) collapses to marker only', () => {
+    const body = [
+      'From: Alice <alice@corp.com>',
+      'Sent: Wednesday, March 13, 2024 9:30 AM',
+      'To: Bob <bob@corp.com>',
+      'Subject: RE: Contract review',
+      '',
+      'Original body text here.',
+    ].join('\n');
+
+    const result = stripQuotedHistory(body);
+
+    expect(result).toBe(MARKER);
+    expect(result).not.toContain('Alice');
+    expect(result).not.toContain('Original body text here.');
+  });
+
+  it('Scenario: Bolded Outlook headers with colon outside asterisks (`**From**:`) are detected', () => {
+    // Some markdown converters emit `**From**:` (colon outside the bold) instead of
+    // `**From:**` (colon inside). The detector must handle both shapes.
+    const body = [
+      'Yes.',
+      '',
+      '**From**: Alice <alice@corp.com>',
+      '**Sent**: Wednesday, May 6, 2026 11:38 AM',
+      '**To**: Bob <bob@corp.com>',
+      '**Subject**: RE: Symposium logistics',
+      '',
+      'Hi Bob — could we move it to 10am?',
+    ].join('\n');
+
+    const result = stripQuotedHistory(body);
+
+    expect(result).toContain('Yes.');
+    expect(result).toContain(MARKER);
+    expect(result).not.toContain('Alice');
+    expect(result).not.toContain('Hi Bob — could we move it to 10am?');
+  });
+
+  it('Scenario: Real-world `>`-prefix shell prompt at EOF (with trailing user text after) is preserved', () => {
+    // A markdown code block in a reply that uses `>` as a shell prompt should not
+    // be mistaken for a quoted-history terminal block, IF user text follows.
+    const body = [
+      'I tested the command:',
+      '',
+      '> ls -la /tmp',
+      '',
+      'It returned the expected output, so we are good to ship.',
+    ].join('\n');
+
+    const result = stripQuotedHistory(body);
+    expect(result).toBe(body);
     expect(result).not.toContain(MARKER);
   });
 });

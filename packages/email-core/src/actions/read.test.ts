@@ -137,6 +137,119 @@ describe('email-read/Read Email', () => {
     expect(result.body).not.toContain('historical line 1');
   });
 
+  it('Scenario: strip_quoted_history true on Outlook-style HTML body with header cluster', async () => {
+    // Real Outlook web/365 reply HTML uses `<div>From:</div>` blocks for the header
+    // cluster. This test exercises the path from raw HTML through transformEmailContent
+    // to the detector — i.e. it covers normalization, not just pre-rendered markdown.
+    provider.addMessage({
+      id: 'msg-outlook-html',
+      bodyHtml: [
+        '<p>Confirmed — 10am tomorrow.</p>',
+        '<div>',
+        '<div>From: Alice &lt;alice@corp.com&gt;</div>',
+        '<div>Sent: Wednesday, March 13, 2024 9:30 AM</div>',
+        '<div>To: Bob &lt;bob@corp.com&gt;</div>',
+        '<div>Subject: RE: Contract review</div>',
+        '</div>',
+        '<p>Can we move the call to 10am?</p>',
+      ].join(''),
+    });
+
+    const result = await readEmailAction.run(ctx, {
+      id: 'msg-outlook-html',
+      strip_quoted_history: true,
+    });
+
+    expect(result.body).toContain('Confirmed');
+    expect(result.body).toContain(QUOTE_MARKER);
+    expect(result.body).not.toContain('Can we move the call to 10am?');
+    expect(result.body).not.toContain('alice@corp.com');
+  });
+
+  it('Scenario: strip_quoted_history true on bolded-Outlook HTML body (Outlook-365 / OWA shape)', async () => {
+    // Outlook-on-the-web wraps the field labels in `<strong>` / `<b>`. node-html-markdown
+    // emits these as `**From:**` (or sometimes `**From**:`) — the detector must handle
+    // both, end-to-end from HTML.
+    provider.addMessage({
+      id: 'msg-outlook-bold-html',
+      bodyHtml: [
+        '<p>Yes.</p>',
+        '<div>',
+        '<div><strong>From:</strong> Alice &lt;alice@corp.com&gt;</div>',
+        '<div><strong>Sent:</strong> Wednesday, May 6, 2026 11:38 AM</div>',
+        '<div><strong>To:</strong> Bob &lt;bob@corp.com&gt;</div>',
+        '<div><strong>Subject:</strong> RE: Symposium logistics</div>',
+        '</div>',
+        '<p>Original body — could we move it to 10am?</p>',
+      ].join(''),
+    });
+
+    const result = await readEmailAction.run(ctx, {
+      id: 'msg-outlook-bold-html',
+      strip_quoted_history: true,
+    });
+
+    expect(result.body).toContain('Yes.');
+    expect(result.body).toContain(QUOTE_MARKER);
+    expect(result.body).not.toContain('Original body — could we move it to 10am?');
+    expect(result.body).not.toContain('alice@corp.com');
+  });
+
+  it('Scenario: strip_quoted_history true preserves user prose after an inline Gmail quote (HTML input)', async () => {
+    // Regression for the terminal-validation fix: an inline `On … wrote:` quote
+    // followed by additional user-authored prose must NOT collapse the user's
+    // continuation into the marker.
+    provider.addMessage({
+      id: 'msg-inline-html',
+      bodyHtml: [
+        '<p>Including for context:</p>',
+        '<div class="gmail_quote">',
+        '<div>On Wed, Mar 13, 2024 at 9:30 AM Alice &lt;alice@corp.com&gt; wrote:</div>',
+        '<blockquote>Want to push standup to 10am?</blockquote>',
+        '</div>',
+        '<p>My take: 10am is fine but conflicts with Bob — let me check.</p>',
+      ].join(''),
+    });
+
+    const result = await readEmailAction.run(ctx, {
+      id: 'msg-inline-html',
+      strip_quoted_history: true,
+    });
+
+    expect(result.body).toContain('Including for context');
+    expect(result.body).toContain('My take');
+    expect(result.body).toContain('let me check');
+    expect(result.body).not.toContain(QUOTE_MARKER);
+  });
+
+  it('Scenario: strip_quoted_history true with mobile (non-RFC) signature above marker', async () => {
+    // Many mobile clients use a non-RFC signature like "Sent from my iPhone" without
+    // the "-- " delimiter. The signature heuristic strips by length-percentage on this
+    // shape, which can run after quote stripping has inserted the marker. Confirm the
+    // marker survives.
+    provider.addMessage({
+      id: 'msg-mobile-sig',
+      body: [
+        'Approved.',
+        '',
+        'Sent from my iPhone',
+        '',
+        'On Wed, Mar 13, 2024 at 9:30 AM Alice <alice@corp.com> wrote:',
+        '> earlier draft of the contract',
+      ].join('\n'),
+    });
+
+    const result = await readEmailAction.run(ctx, {
+      id: 'msg-mobile-sig',
+      strip_quoted_history: true,
+      strip_signatures: true,
+    });
+
+    expect(result.body).toContain('Approved.');
+    expect(result.body).toContain(QUOTE_MARKER);
+    expect(result.body).not.toContain('earlier draft');
+  });
+
   it('Scenario: attachment shape includes contentId when provider returns it', async () => {
     provider.addMessage({
       id: 'msg-inline',

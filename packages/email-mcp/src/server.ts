@@ -780,7 +780,6 @@ export async function buildLazyActions(
         subject: z.string(),
         from: z.string(),
         to: z.array(z.string()),
-        cc: z.array(z.string()).optional(),
         body: z.string(),
         receivedAt: z.string(),
         attachments: z.array(z.object({
@@ -803,7 +802,7 @@ export async function buildLazyActions(
         // must not re-implement business logic). strip_signatures stays false for
         // backwards compatibility — wiring it through is tracked separately.
         const { readEmailAction } = await import('@usejunior/email-core');
-        return readEmailAction.run(
+        const actionResult = await readEmailAction.run(
           { provider: mailbox.provider },
           {
             id: inp.id,
@@ -812,6 +811,11 @@ export async function buildLazyActions(
             strip_quoted_history: inp.strip_quoted_history ?? false,
           },
         );
+        // Drop `cc` — the pre-PR hand-rolled MCP tool did not return cc, so omit it
+        // here to keep the MCP wire shape unchanged. Adding cc to the MCP surface is
+        // a separate, additive wire change and is tracked separately.
+        const { cc: _cc, ...rest } = actionResult;
+        return rest;
       },
     },
     {
