@@ -1,6 +1,10 @@
 // MCP server — thin transport adapter mapping action registry to MCP tools
 import { createRequire } from 'node:module';
-import type { DeletePolicy, EmailAction, EmailProvider } from '@usejunior/email-core';
+import type { DeletePolicy, EmailAction, EmailMessage, EmailProvider } from '@usejunior/email-core';
+import {
+  SearchEmailThreadFieldsSchema,
+  getSearchEmailThreadFields,
+} from '@usejunior/email-core';
 import { z } from 'zod';
 
 /**
@@ -841,27 +845,30 @@ export async function buildLazyActions(
       name: 'search_emails',
       description: 'Search emails using full-text query across one or all mailboxes. Use offset for pagination.',
       input: z.object({ query: z.string(), mailbox: z.string().nullable().optional(), limit: z.number().optional(), offset: z.number().optional() }),
-      output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean(), mailbox: z.string().optional() })) }),
+      output: z.object({
+        emails: z.array(z.object({
+          id: z.string(),
+          subject: z.string(),
+          from: z.string(),
+          receivedAt: z.string(),
+          isRead: z.boolean(),
+          hasAttachments: z.boolean(),
+          mailbox: z.string().optional(),
+        }).extend(SearchEmailThreadFieldsSchema.shape)),
+      }),
       annotations: { readOnlyHint: true, destructiveHint: false },
       run: async (_ctx, input) => {
         await waitForInit(state);
         if (!getDefaultMailbox(state)) return { emails: [] };
         const inp = input as { query: string; mailbox?: string | null; limit?: number; offset?: number };
         const resolved = inp.mailbox === null ? null : resolveMailboxContext(state, inp.mailbox);
-        const results = resolved
+        const results: Array<EmailMessage & { mailbox: string }> = resolved
           ? (await resolved.mailbox.provider.searchMessages(
             inp.query,
             undefined,
             inp.limit ?? 25,
             inp.offset,
-          ) as Array<{
-            id: string;
-            subject: string;
-            from: { email: string; name?: string };
-            receivedAt: string;
-            isRead: boolean;
-            hasAttachments: boolean;
-          }>).map(result => ({ ...result, mailbox: resolved.mailbox.name }))
+          )).map(result => ({ ...result, mailbox: resolved.mailbox.name }))
           : (await Promise.all(
             getConnectedMailboxes(state).map(async mailbox => {
               const mailboxResults = await mailbox.provider.searchMessages(inp.query, undefined);
@@ -880,6 +887,7 @@ export async function buildLazyActions(
             isRead: m.isRead,
             hasAttachments: m.hasAttachments,
             mailbox: m.mailbox,
+            ...getSearchEmailThreadFields(m),
           })),
         };
       },

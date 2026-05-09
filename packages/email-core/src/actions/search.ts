@@ -1,6 +1,27 @@
 // search_emails action — full-text search using provider's native query
 import { z } from 'zod';
 import type { EmailAction } from './registry.js';
+import type { EmailMessage } from '../types.js';
+
+/**
+ * Provider-native conversation handles surfaced on search results so MCP
+ * clients can group rows by thread without parsing subjects. Microsoft Graph
+ * populates `conversationId`; Gmail populates `threadId`. Both are optional
+ * because providers may legitimately produce neither (e.g. drafts).
+ */
+export const SearchEmailThreadFieldsSchema = z.object({
+  conversationId: z.string().optional(),
+  threadId: z.string().optional(),
+});
+
+export function getSearchEmailThreadFields(
+  message: Pick<EmailMessage, 'conversationId' | 'threadId'>,
+): z.infer<typeof SearchEmailThreadFieldsSchema> {
+  return {
+    ...(message.conversationId !== undefined ? { conversationId: message.conversationId } : {}),
+    ...(message.threadId !== undefined ? { threadId: message.threadId } : {}),
+  };
+}
 
 const SearchEmailsInput = z.object({
   query: z.string(),
@@ -20,7 +41,7 @@ const SearchEmailsOutput = z.object({
     hasAttachments: z.boolean(),
     mailbox: z.string().optional(),
     snippet: z.string().optional(),
-  })),
+  }).extend(SearchEmailThreadFieldsSchema.shape)),
 });
 
 export const searchEmailsAction: EmailAction<
@@ -56,6 +77,7 @@ export const searchEmailsAction: EmailAction<
           hasAttachments: m.hasAttachments,
           mailbox: m.mailbox,
           snippet: m.snippet,
+          ...getSearchEmailThreadFields(m),
         })),
       };
     }
@@ -71,6 +93,7 @@ export const searchEmailsAction: EmailAction<
         hasAttachments: m.hasAttachments,
         mailbox: ctx.mailboxName,
         snippet: m.snippet,
+        ...getSearchEmailThreadFields(m),
       })),
     };
   },

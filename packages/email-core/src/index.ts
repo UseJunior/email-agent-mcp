@@ -41,6 +41,10 @@ export {
 export { WatchedAllowlist } from './security/watched-allowlist.js';
 export { htmlToMarkdown, transformEmailContent } from './content/sanitize.js';
 export { sendEmailAction } from './actions/send.js';
+export {
+  SearchEmailThreadFieldsSchema,
+  getSearchEmailThreadFields,
+} from './actions/search.js';
 export { replyToEmailAction } from './actions/reply.js';
 export { createDraftAction, sendDraftAction, updateDraftAction } from './actions/draft.js';
 export { getThreadAction } from './actions/conversation.js';

@@ -528,6 +528,7 @@ describe('mcp-transport/Lazy Provider State', () => {
         receivedAt: '2026-04-09T10:00:00.000Z',
         isRead: false,
         hasAttachments: false,
+        conversationId: 'graph-conversation-abc',
       },
     ]);
     const personalSearch = vi.fn().mockResolvedValue([
@@ -538,6 +539,7 @@ describe('mcp-transport/Lazy Provider State', () => {
         receivedAt: '2026-04-09T11:00:00.000Z',
         isRead: true,
         hasAttachments: true,
+        threadId: 'gmail-thread-xyz',
       },
     ]);
 
@@ -587,6 +589,7 @@ describe('mcp-transport/Lazy Provider State', () => {
         isRead: true,
         hasAttachments: true,
         mailbox: 'personal',
+        threadId: 'gmail-thread-xyz',
       },
     ]);
   });
@@ -600,6 +603,7 @@ describe('mcp-transport/Lazy Provider State', () => {
         receivedAt: '2026-04-09T10:00:00.000Z',
         isRead: false,
         hasAttachments: false,
+        conversationId: 'graph-conversation-abc',
       },
     ]);
     const personalSearch = vi.fn().mockResolvedValue([
@@ -610,6 +614,7 @@ describe('mcp-transport/Lazy Provider State', () => {
         receivedAt: '2026-04-09T11:00:00.000Z',
         isRead: true,
         hasAttachments: true,
+        threadId: 'gmail-thread-xyz',
       },
     ]);
 
@@ -659,6 +664,7 @@ describe('mcp-transport/Lazy Provider State', () => {
         isRead: true,
         hasAttachments: true,
         mailbox: 'personal',
+        threadId: 'gmail-thread-xyz',
       },
       {
         id: 'work-1',
@@ -668,6 +674,7 @@ describe('mcp-transport/Lazy Provider State', () => {
         isRead: false,
         hasAttachments: false,
         mailbox: 'work',
+        conversationId: 'graph-conversation-abc',
       },
     ]);
   });
