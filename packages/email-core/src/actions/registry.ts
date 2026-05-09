@@ -10,6 +10,7 @@ export interface ActionContext {
   receiveAllowlist?: AllowlistConfig;
   safeDir?: string;
   deleteEnabled?: boolean;
+  hardDeleteAllowed?: boolean;
   rateLimiter?: RateLimiter;
 }
 

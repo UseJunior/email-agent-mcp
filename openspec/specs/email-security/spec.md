@@ -49,15 +49,29 @@ The system SHALL provide a receive allowlist that controls which inbound emails 
 
 ### Requirement: Delete Policy
 
-Delete SHALL be disabled by default. When enabled via configuration, the agent MUST pass `user_explicitly_requested_deletion: true`. Default to soft delete (move to Trash). No bulk delete.
+Delete SHALL be disabled by default. Two independent gates govern deletion: an operator-controlled env var (`AGENT_EMAIL_DELETE_ENABLED=true`) AND a per-call flag (`user_explicitly_requested_deletion: true`). Permanent deletion adds a third gate (`AGENT_EMAIL_HARD_DELETE_ENABLED=true`). All gates use strict-equality checks and accept only the literal string `'true'` to enable. Default to soft delete (move to Trash). No bulk delete.
+
+#### Scenario: Disabled by default
+- **WHEN** `AGENT_EMAIL_DELETE_ENABLED` is unset or any value other than `'true'`
+- **THEN** `delete_email` returns a `DELETE_DISABLED` error whose message names `AGENT_EMAIL_DELETE_ENABLED` so operators can self-remediate
 
 #### Scenario: Soft delete
-- **WHEN** delete is enabled and `user_explicitly_requested_deletion: true` is passed
+- **WHEN** `AGENT_EMAIL_DELETE_ENABLED=true` AND the caller passes `user_explicitly_requested_deletion: true`
 - **THEN** the email is moved to Trash (soft delete)
 
-#### Scenario: Hard delete requires explicit flag
-- **WHEN** `hard_delete: true` is also passed
+#### Scenario: Hard delete requires both server gate and explicit flag
+- **WHEN** `AGENT_EMAIL_HARD_DELETE_ENABLED=true` AND `hard_delete: true` is passed (with the soft-delete gates above also satisfied)
 - **THEN** the email is permanently deleted
+
+#### Scenario: Hard delete blocked when only soft is enabled
+- **WHEN** `AGENT_EMAIL_DELETE_ENABLED=true` but `AGENT_EMAIL_HARD_DELETE_ENABLED` is not `'true'`
+- **AND** the caller passes `hard_delete: true`
+- **THEN** `delete_email` returns `DELETE_DISABLED` and the message names `AGENT_EMAIL_HARD_DELETE_ENABLED`
+
+#### Scenario: Misconfigured env vars warn at startup
+- **WHEN** an env var is set to a non-empty unsupported value (e.g. `'1'`, `'yes'`)
+- **OR** `AGENT_EMAIL_HARD_DELETE_ENABLED=true` is set without `AGENT_EMAIL_DELETE_ENABLED=true`
+- **THEN** the process logs a stderr warning at startup so operators can correct the config rather than silently fall back to disabled
 
 ### Requirement: Anti-Spoofing
 

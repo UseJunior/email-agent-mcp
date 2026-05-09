@@ -588,7 +588,7 @@ function printJsonResult(value: unknown): void {
 export async function runCall(opts: CliOptions): Promise<number> {
   const { createLazyProviderState, buildLazyActions, ensureProvider, executeTool, getActionInputJsonSchema } =
     await import('./server.js');
-  const { loadSendAllowlist, getSendAllowlistPath } = await import('@usejunior/email-core');
+  const { loadSendAllowlist, getSendAllowlistPath, getDeletePolicyFromEnv } = await import('@usejunior/email-core');
 
   // Match `serve`'s allowlist setup, but DON'T spawn a watcher in a one-shot
   // process — load once and snapshot. (`serve` uses `WatchedAllowlist` for
@@ -597,8 +597,21 @@ export async function runCall(opts: CliOptions): Promise<number> {
   const snapshot = await loadSendAllowlist(sendAllowlistPath);
   const getSendAllowlist = () => snapshot;
 
+  // Resolve delete policy from env once. getDeletePolicyFromEnv emits its own
+  // stderr warnings for misconfigured envs. Status line is printed only when
+  // the invoked tool is delete_email — other tools shouldn't see this noise.
+  const deletePolicy = getDeletePolicyFromEnv();
+  const getDeletePolicy = () => deletePolicy;
+  if (opts.callTool === 'delete_email') {
+    console.error(
+      deletePolicy
+        ? `[email-agent-mcp] Delete policy: enabled (hard_delete=${deletePolicy.hardDeleteAllowed})`
+        : '[email-agent-mcp] Delete policy: disabled (set AGENT_EMAIL_DELETE_ENABLED=true to enable)',
+    );
+  }
+
   const state = createLazyProviderState();
-  const actions = await buildLazyActions(state, getSendAllowlist);
+  const actions = await buildLazyActions(state, getSendAllowlist, getDeletePolicy);
 
   // --list: enumerate tools and exit
   if (opts.callList) {
