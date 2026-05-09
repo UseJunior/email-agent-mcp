@@ -888,6 +888,18 @@ describe('mcp-transport/Lazy Provider State', () => {
   it('Scenario: wrapped send_email uses the requested mailbox provider', async () => {
     const workCreateDraft = vi.fn().mockResolvedValue({ success: true, draftId: 'draft-work' });
     const personalCreateDraft = vi.fn().mockResolvedValue({ success: true, draftId: 'draft-personal' });
+    // send_email's draft branch reads the persisted draft back via getMessage
+    // for the preview block (issue #75). Stub it so the preview path completes
+    // without the 500ms retry; this test asserts mailbox routing, not preview shape.
+    const personalGetMessage = vi.fn().mockResolvedValue({
+      id: 'draft-personal',
+      subject: 'hello',
+      from: { email: 'personal@example.com' },
+      to: [{ email: 'friend@example.com' }],
+      receivedAt: '2026-04-09T11:00:00.000Z',
+      isRead: true,
+      hasAttachments: false,
+    });
 
     const state = createLazyProviderState();
     state.status = 'connected';
@@ -911,7 +923,7 @@ describe('mcp-transport/Lazy Provider State', () => {
         emailAddress: 'personal@example.com',
         displayName: 'personal@example.com',
         providerType: 'gmail',
-        provider: { createDraft: personalCreateDraft } as never,
+        provider: { createDraft: personalCreateDraft, getMessage: personalGetMessage } as never,
         auth: null,
         isDefault: false,
         status: 'connected',
@@ -928,8 +940,9 @@ describe('mcp-transport/Lazy Provider State', () => {
       draft: true,
     }) as { success: boolean; draftId?: string };
 
-    expect(result).toEqual({ success: true, draftId: 'draft-personal', error: undefined });
+    expect(result).toMatchObject({ success: true, draftId: 'draft-personal' });
     expect(personalCreateDraft).toHaveBeenCalledOnce();
+    expect(personalGetMessage).toHaveBeenCalledWith('draft-personal');
     expect(workCreateDraft).not.toHaveBeenCalled();
   });
 
