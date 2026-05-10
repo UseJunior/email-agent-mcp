@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { htmlToMarkdown, normalizeEncoding, generateAttachmentSummary } from './sanitize.js';
+import { htmlToMarkdown, normalizeEncoding, generateAttachmentSummary, unescapeMarkdownPunctuation, transformEmailContent } from './sanitize.js';
 
 describe('content-engine/HTML to Token-Efficient Markdown', () => {
   it('Scenario: HTML with tracking pixel', () => {
@@ -239,5 +239,114 @@ describe('content-engine/Attachment Summary', () => {
     expect(result).toContain('logo.png (inline)');
     expect(result).toContain('data.xlsx (1.2MB)');
     expect(result).toMatch(/^Attachments: /);
+  });
+});
+
+describe('content-engine/Unescape Markdown Punctuation (issue #79)', () => {
+  it('unescapes footnote-style refs', () => {
+    expect(unescapeMarkdownPunctuation('See \\[1\\] and \\[2\\]')).toBe('See [1] and [2]');
+  });
+
+  it('unescapes URL obfuscation pattern', () => {
+    expect(unescapeMarkdownPunctuation('Visit nipsco\\[.\\]com today')).toBe('Visit nipsco[.]com today');
+  });
+
+  it('unescapes bare parens in prose', () => {
+    expect(unescapeMarkdownPunctuation('Note \\(important\\) detail')).toBe('Note (important) detail');
+  });
+
+  it('preserves inline links', () => {
+    const md = 'See [docs](https://example.com) for info';
+    expect(unescapeMarkdownPunctuation(md)).toBe(md);
+  });
+
+  it('preserves inline images', () => {
+    const md = '![Q1 Revenue](https://example.com/chart.png)';
+    expect(unescapeMarkdownPunctuation(md)).toBe(md);
+  });
+
+  it('preserves images with escaped brackets in alt text', () => {
+    const md = '![Revenue \\[Q1\\]](https://example.com/x.png)';
+    expect(unescapeMarkdownPunctuation(md)).toBe(md);
+  });
+
+  it('preserves images with angle-bracket destinations', () => {
+    const md = '![test](<https://example.com/a b(1).png>)';
+    expect(unescapeMarkdownPunctuation(md)).toBe(md);
+  });
+
+  it('preserves titled images with parens in title', () => {
+    const md = '![x](https://example.com/x.png "Q(1) chart")';
+    expect(unescapeMarkdownPunctuation(md)).toBe(md);
+  });
+
+  it('preserves links with depth-1 balanced parens in URL', () => {
+    const md = '[docs](https://example.com?a=(b))';
+    expect(unescapeMarkdownPunctuation(md)).toBe(md);
+  });
+
+  it('preserves reference-style links and definitions', () => {
+    const md = 'See [docs][1] for info\n\n[1]: https://example.com';
+    expect(unescapeMarkdownPunctuation(md)).toBe(md);
+  });
+
+  it('preserves escapes inside inline code spans', () => {
+    const md = 'Use `\\[escaped\\]` syntax';
+    expect(unescapeMarkdownPunctuation(md)).toBe(md);
+  });
+
+  it('preserves escapes inside 3-backtick code spans (CommonMark allows any run length)', () => {
+    // NHM emits 3-backtick delimiters (with surrounding spaces) when the inline
+    // code content itself contains 2 backticks. The escapes inside must survive.
+    const md = 'Use ``` ``\\[x\\]`` ``` literally';
+    expect(unescapeMarkdownPunctuation(md)).toBe(md);
+  });
+
+  it('preserves escapes inside 4-backtick code spans', () => {
+    const md = 'See ```` ```\\[x\\]``` ```` here';
+    expect(unescapeMarkdownPunctuation(md)).toBe(md);
+  });
+
+  it('preserves escapes inside fenced code blocks', () => {
+    const md = 'Example:\n\n```\n\\[in fence\\]\n```\n';
+    expect(unescapeMarkdownPunctuation(md)).toBe(md);
+  });
+
+  it('preserves links containing code spans (nested constructs)', () => {
+    const md = '[`code`](https://example.com)';
+    expect(unescapeMarkdownPunctuation(md)).toBe(md);
+  });
+
+  it('handles mixed escaped prose and valid links', () => {
+    const md = 'See \\[1\\] at \\[example.com\\] for [docs](https://x.com)';
+    expect(unescapeMarkdownPunctuation(md)).toBe(
+      'See [1] at [example.com] for [docs](https://x.com)',
+    );
+  });
+
+  it('end-to-end: HTML with footnote-style brackets', () => {
+    const result = transformEmailContent(undefined, '<p>See [1] at nipsco[.]com</p>');
+    expect(result).toContain('See [1] at nipsco[.]com');
+    expect(result).not.toContain('\\[');
+    expect(result).not.toContain('\\]');
+  });
+
+  it('end-to-end: plain-text body passes through unchanged', () => {
+    // Plain-text bodies bypass the unescape pass — escapes typed by humans survive.
+    const plain = 'Literal \\[escape\\] in plain text';
+    expect(transformEmailContent(plain, undefined)).toBe(plain);
+  });
+
+  it('end-to-end: HTML with <a> tag does not introduce stray escapes', () => {
+    // Note: the repo's custom <a> postprocess (sanitize.ts) flattens anchors
+    // to their inner text — that's a separate pre-existing concern. This test
+    // just guards that the unescape pass doesn't introduce backslash artifacts.
+    const result = transformEmailContent(
+      undefined,
+      '<p>Read <a href="https://example.com">our docs</a> please</p>',
+    );
+    expect(result).toContain('our docs');
+    expect(result).not.toContain('\\[');
+    expect(result).not.toContain('\\]');
   });
 });
