@@ -1,0 +1,10 @@
+- [x] Add `stripQuotedHistory` helper in `packages/email-core/src/content/quotes.ts` with terminal-block detection and attachments-summary preservation
+- [x] Add unit tests in `packages/email-core/src/content/quotes.test.ts` covering Gmail, Outlook (plain + bolded + Apple Mail Date variant), Outlook-2003 separator, wrapped preambles, deep-nested, CRLF, idempotency, false-positive guards, and attachments preservation
+- [x] Wire `strip_quoted_history` flag into `readEmailAction` in `packages/email-core/src/actions/read.ts`; run order is `transformEmailContent` → `stripQuotedHistory` → `stripSignature`
+- [x] Add optional `contentId?: string` to `ReadEmailOutput.attachments` so MCP and action output shapes align
+- [x] Re-export `readEmailAction` from `packages/email-core/src/index.ts`
+- [x] Refactor MCP `read_email` tool in `packages/email-mcp/src/server.ts` to delegate the connected-provider path to `readEmailAction.run(...)`, keeping demo-mode handling local and exposing the new flag
+- [x] Extend `packages/email-core/src/actions/read.test.ts` with omitted/true/HTML-body/dual-flag/contentId scenarios
+- [x] Extend `packages/email-mcp/src/server.test.ts` `read_email` tests with input-schema, connected-path, demo-path, and no-signature-stripping scenarios
+- [x] Run `openspec validate add-strip-quoted-history --strict`
+- [x] Run `npm run test:run --workspaces` and `npm run lint --workspaces`

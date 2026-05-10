@@ -773,8 +773,12 @@ export async function buildLazyActions(
     },
     {
       name: 'read_email',
-      description: 'Read the full content of an email by ID, transformed to token-efficient markdown',
-      input: z.object({ id: z.string(), mailbox: z.string().optional() }),
+      description: 'Read the full content of an email by ID, transformed to token-efficient markdown. Set strip_quoted_history to true to drop the terminal "On … wrote:" / Outlook-header / `>`-prefix reply chain and replace it with a short marker.',
+      input: z.object({
+        id: z.string(),
+        mailbox: z.string().optional(),
+        strip_quoted_history: z.boolean().optional().default(false),
+      }),
       output: z.object({
         id: z.string(),
         subject: z.string(),
@@ -794,51 +798,28 @@ export async function buildLazyActions(
       annotations: { readOnlyHint: true, destructiveHint: false },
       run: async (_ctx, input) => {
         await waitForInit(state);
-        const inp = input as { id: string; mailbox?: string };
+        const inp = input as { id: string; mailbox?: string; strip_quoted_history?: boolean };
         if (!getDefaultMailbox(state)) return demoReadEmail(inp.id);
         const { mailbox } = resolveMailboxContext(state, inp.mailbox);
-        const msg = await mailbox.provider.getMessage(inp.id) as {
-          id: string;
-          subject: string;
-          from: { email: string; name?: string };
-          to: Array<{ email: string; name?: string }>;
-          receivedAt: string;
-          body?: string;
-          bodyHtml?: string;
-          attachments?: Array<{
-            id: string;
-            filename: string;
-            mimeType: string;
-            size: number;
-            contentId?: string;
-            isInline: boolean;
-          }>;
-        };
-
-        let emailBody = '';
-        try {
-          const { transformEmailContent } = await import('@usejunior/email-core');
-          emailBody = transformEmailContent(msg.body, msg.bodyHtml, msg.attachments);
-        } catch {
-          emailBody = msg.bodyHtml ?? msg.body ?? '';
-        }
-
-        return {
-          id: msg.id,
-          subject: msg.subject,
-          from: msg.from.name ? `${msg.from.name} <${msg.from.email}>` : msg.from.email,
-          to: msg.to.map(a => a.name ? `${a.name} <${a.email}>` : a.email),
-          body: emailBody,
-          receivedAt: msg.receivedAt,
-          attachments: msg.attachments?.map(attachment => ({
-            id: attachment.id,
-            filename: attachment.filename,
-            mimeType: attachment.mimeType,
-            size: attachment.size,
-            contentId: attachment.contentId,
-            isInline: attachment.isInline,
-          })),
-        };
+        // Delegate to the canonical readEmailAction so MCP stays a thin adapter
+        // (per AGENTS.md: actions are the single source of truth, transport layers
+        // must not re-implement business logic). strip_signatures stays false for
+        // backwards compatibility — wiring it through is tracked separately.
+        const { readEmailAction } = await import('@usejunior/email-core');
+        const actionResult = await readEmailAction.run(
+          { provider: mailbox.provider },
+          {
+            id: inp.id,
+            mailbox: inp.mailbox,
+            strip_signatures: false,
+            strip_quoted_history: inp.strip_quoted_history ?? false,
+          },
+        );
+        // Drop `cc` — the pre-PR hand-rolled MCP tool did not return cc, so omit it
+        // here to keep the MCP wire shape unchanged. Adding cc to the MCP surface is
+        // a separate, additive wire change and is tracked separately.
+        const { cc: _cc, ...rest } = actionResult;
+        return rest;
       },
     },
     {
