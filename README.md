@@ -162,6 +162,30 @@ Agent Email exposes 15 MCP tools:
 | `move_to_folder` | Move between folders | write |
 | `delete_email` | Delete (requires operator env + caller flag) | destructive |
 
+### Outbound attachments
+
+`send_email`, `reply_to_email`, `create_draft`, and `update_draft` accept an
+optional `attachments` array. Each entry takes a sandboxed file `path` (read
+relative to `EMAIL_MCP_SAFE_DIR`, default the process working directory) or
+inline `base64`, plus optional `filename` / `mimeType` overrides:
+
+```json
+{
+  "to": "alice@example.com",
+  "subject": "Signed agreement",
+  "body": "Attached as requested.",
+  "attachments": [
+    { "path": "./out/agreement.pdf" },
+    { "base64": "iVBORw0KGgo...", "filename": "screenshot.png" }
+  ]
+}
+```
+
+Files are capped at 25MB each; Microsoft Graph additionally caps inline sends
+at ~3MB total (larger files need an upload session — not yet supported). For
+`update_draft`, omitting `attachments` preserves the draft's existing files;
+passing an array (even empty) replaces them.
+
 ## Provider Support
 
 | Provider | Status | Package |

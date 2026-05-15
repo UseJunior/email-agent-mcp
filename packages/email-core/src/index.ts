@@ -7,8 +7,10 @@ export type {
   EmailThread,
   EmailAttachment,
   ComposeMessage,
+  OutboundAttachment,
   SendResult,
   DraftResult,
+  EmailError,
   ListOptions,
   ReplyOptions,
 } from './types.js';

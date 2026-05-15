@@ -3,8 +3,7 @@ import { z } from 'zod';
 import { extname } from 'node:path';
 import type { EmailAction } from './registry.js';
 import { AttachmentNotSupportedError, AttachmentNotFoundError } from '../providers/provider.js';
-
-const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024; // 25MB
+import { MAX_ATTACHMENT_SIZE } from '../content/attachment-loader.js';
 
 // Binary file magic bytes
 const MAGIC_BYTES: [Buffer, string][] = [

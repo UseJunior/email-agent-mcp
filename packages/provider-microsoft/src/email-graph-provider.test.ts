@@ -1700,3 +1700,96 @@ describe('provider-microsoft/Watcher Timestamp Boundary', () => {
     expect(decoded).not.toContain('receivedDateTime gt ');
   });
 });
+
+describe('provider-microsoft/Outbound Attachments', () => {
+  const PDF = Buffer.from('%PDF-1.4\nbytes', 'utf-8');
+  type MockFn = ReturnType<typeof vi.fn>;
+
+  it('Scenario: sendMessage includes inline fileAttachment', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.sendMessage({
+      to: [{ email: 'bob@corp.com' }],
+      subject: 'With file',
+      body: 'body',
+      attachments: [{ filename: 'r.pdf', content: PDF, mimeType: 'application/pdf' }],
+    });
+
+    const call = (client.post as MockFn).mock.calls.find(c => String(c[0]).endsWith('/sendMail'))!;
+    const message = (call[1] as { message: { attachments?: Array<Record<string, unknown>> } }).message;
+    expect(message.attachments).toHaveLength(1);
+    expect(message.attachments![0]!['@odata.type']).toBe('#microsoft.graph.fileAttachment');
+    expect(message.attachments![0]!.name).toBe('r.pdf');
+    expect(message.attachments![0]!.contentBytes).toBe(PDF.toString('base64'));
+  });
+
+  it('Scenario: createDraft includes inline fileAttachment', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createDraft({
+      to: [{ email: 'bob@corp.com' }],
+      subject: 'Draft',
+      body: 'body',
+      attachments: [{ filename: 'r.pdf', content: PDF, mimeType: 'application/pdf' }],
+    });
+
+    const call = (client.post as MockFn).mock.calls.find(c => String(c[0]).endsWith('/messages'))!;
+    const graphMsg = call[1] as { attachments?: Array<Record<string, unknown>> };
+    expect(graphMsg.attachments).toHaveLength(1);
+    expect(graphMsg.attachments![0]!['@odata.type']).toBe('#microsoft.graph.fileAttachment');
+  });
+
+  it('Scenario: reply draft attachments use the two-step POST /attachments flow', async () => {
+    const client = createMockClient({
+      post: vi.fn()
+        .mockResolvedValueOnce(quotedReplyResponse()) // createReplyAll
+        .mockResolvedValue({ id: 'att-1' }),          // attachment POST
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.createReplyDraft('msg-1', 'reply', {
+      attachments: [{ filename: 'r.pdf', content: PDF, mimeType: 'application/pdf' }],
+    });
+
+    expect(result.success).toBe(true);
+    const attCalls = (client.post as MockFn).mock.calls.filter(c => String(c[0]).endsWith('/attachments'));
+    expect(attCalls).toHaveLength(1);
+    const body = attCalls[0]![1] as Record<string, unknown>;
+    expect(body['@odata.type']).toBe('#microsoft.graph.fileAttachment');
+    expect(body.contentBytes).toBe(PDF.toString('base64'));
+  });
+
+  it('Scenario: an attachment over 3MB is rejected before any request', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.sendMessage({
+      to: [{ email: 'bob@corp.com' }],
+      subject: 'Too big',
+      body: 'body',
+      attachments: [{ filename: 'big.bin', content: Buffer.alloc(3 * 1024 * 1024 + 1), mimeType: 'application/octet-stream' }],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('ATTACHMENT_TOO_LARGE_FOR_PROVIDER');
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: update_draft replaces attachments by deleting then re-posting', async () => {
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({ value: [{ id: 'old-att' }] }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.updateDraft('draft-1', {
+      attachments: [{ filename: 'new.pdf', content: PDF, mimeType: 'application/pdf' }],
+    });
+
+    expect(result.success).toBe(true);
+    expect(client.delete).toHaveBeenCalledWith(expect.stringContaining('/attachments/old-att'));
+    const attCalls = (client.post as MockFn).mock.calls.filter(c => String(c[0]).endsWith('/attachments'));
+    expect(attCalls).toHaveLength(1);
+  });
+});

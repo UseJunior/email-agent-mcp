@@ -108,6 +108,13 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
     // Fall back to drafts — allows send_draft to look up draft recipients
     const draft = this.drafts.get(id);
     if (draft) {
+      const attachments = draft.attachments?.map((a, i) => ({
+        id: `${id}-att-${i}`,
+        filename: a.filename,
+        mimeType: a.mimeType,
+        size: a.content.length,
+        isInline: false,
+      }));
       return {
         id,
         subject: draft.subject,
@@ -116,8 +123,9 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
         cc: draft.cc,
         receivedAt: new Date().toISOString(),
         isRead: true,
-        hasAttachments: false,
+        hasAttachments: (attachments?.length ?? 0) > 0,
         body: draft.body,
+        attachments,
       };
     }
 
@@ -263,6 +271,7 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
       subject: `Re: ${original.subject}`,
       body,
       bodyHtml: opts?.bodyHtml,
+      attachments: opts?.attachments,
     });
     return { success: true, draftId };
   }
@@ -280,6 +289,9 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
       ...(msg.subject !== undefined && { subject: msg.subject }),
       ...(msg.body !== undefined && { body: msg.body }),
       ...(msg.bodyHtml !== undefined && { bodyHtml: msg.bodyHtml }),
+      // Omitted attachments → preserve via the `...existing` spread;
+      // provided (even []) → replace.
+      ...(msg.attachments !== undefined && { attachments: msg.attachments }),
     });
     return { success: true, draftId };
   }

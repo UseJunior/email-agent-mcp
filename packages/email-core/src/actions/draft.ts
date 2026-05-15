@@ -14,6 +14,8 @@ import {
   handleProviderError,
   parseRecipients,
   buildDraftPreview,
+  resolveAttachments,
+  AttachmentInputSchema,
   DraftPreviewSchema,
   PreviewErrorSchema,
 } from './compose-helpers.js';
@@ -46,6 +48,8 @@ const CreateDraftInput = z.object({
     .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
   force_black: z.boolean().optional()
     .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true.'),
+  attachments: z.array(AttachmentInputSchema).optional()
+    .describe('Files to attach. Each entry takes a sandboxed `path` or inline `base64`.'),
 });
 
 export const createDraftAction: EmailAction<
@@ -72,6 +76,13 @@ export const createDraftAction: EmailAction<
 
     const { to, cc, subject, replyTo, format, forceBlack } = fields;
     let { body } = fields;
+
+    // Resolve attachments (sandboxed path reads + validation)
+    const attResult = await resolveAttachments(input.attachments, ctx.safeDir);
+    if (attResult.error) {
+      return { success: false, error: attResult.error };
+    }
+    const attachments = attResult.files!;
 
     // Validate required fields
     const requiredError = validateRequiredFields(to, subject);
@@ -120,6 +131,7 @@ export const createDraftAction: EmailAction<
         const result = await ctx.provider.createReplyDraft(replyTo, body, {
           cc: parsed.cc,
           bodyHtml: outBodyHtml,
+          attachments: attachments.length > 0 ? attachments : undefined,
         });
         const previewResult = result.success && result.draftId
           ? await buildDraftPreview(ctx.provider, result.draftId)
@@ -143,6 +155,7 @@ export const createDraftAction: EmailAction<
         subject: subject!,
         body,
         bodyHtml: outBodyHtml,
+        attachments: attachments.length > 0 ? attachments : undefined,
       });
       const previewResult = result.success && result.draftId
         ? await buildDraftPreview(ctx.provider, result.draftId)
@@ -267,6 +280,8 @@ const UpdateDraftInput = z.object({
     .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
   force_black: z.boolean().optional()
     .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true.'),
+  attachments: z.array(AttachmentInputSchema).optional()
+    .describe('Files to attach. Omit to preserve the draft\'s existing attachments; provide an array (possibly empty) to replace them entirely.'),
 });
 
 export const updateDraftAction: EmailAction<
@@ -326,6 +341,17 @@ export const updateDraftAction: EmailAction<
       if (cc !== undefined) partial.cc = parsed.cc;
     }
     if (subject) partial.subject = subject;
+
+    // Attachments: omitted → preserve existing (handled provider-side);
+    // provided → replace entirely (an empty array removes all).
+    if (input.attachments !== undefined) {
+      const attResult = await resolveAttachments(input.attachments, ctx.safeDir);
+      if (attResult.error) {
+        return { success: false, error: attResult.error };
+      }
+      partial.attachments = attResult.files!;
+    }
+
     if (body) {
       const rendered = renderEmailBody(body, { format, forceBlack });
       let outBody = rendered.body;

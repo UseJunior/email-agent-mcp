@@ -430,9 +430,10 @@ describe('provider-gmail/buildRawMessage', () => {
 
     const raw = lastRaw(client.sendMessage as ReturnType<typeof vi.fn>);
     expect(raw).toContain('Content-Type: text/plain; charset=utf-8');
+    expect(raw).toContain('Content-Transfer-Encoding: quoted-printable');
     expect(raw).not.toContain('multipart/alternative');
-    // Body newlines are preserved verbatim — outer CRLF is from the mime header join.
-    expect(raw).toContain('line one\nline two');
+    // Body line breaks are normalized to canonical CRLF inside the part.
+    expect(raw).toContain('line one\r\nline two');
   });
 
   it('Scenario: Cc and Bcc headers emitted when recipients supplied', async () => {
@@ -859,5 +860,159 @@ describe('provider-gmail/Update Draft', () => {
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('UPDATE_DRAFT_FAILED');
     expect(result.error?.message).toMatch(/draft not found/);
+  });
+
+  it('Scenario: updateDraft preserves attachments using the backing message id', async () => {
+    const attachmentBytes = Buffer.from('PDF-ATTACHMENT-BYTES');
+    // Backing message id deliberately differs from the draft id passed in.
+    const draftWithAttachment = {
+      id: 'msg-backing-123',
+      threadId: 'thread-draft',
+      labelIds: ['DRAFT'],
+      payload: {
+        headers: [
+          { name: 'From', value: 'me@corp.com' },
+          { name: 'To', value: 'bob@corp.com' },
+          { name: 'Subject', value: 'Original subject' },
+        ],
+        mimeType: 'multipart/mixed',
+        parts: [
+          { mimeType: 'text/plain', body: { data: Buffer.from('Original body').toString('base64url') } },
+          { mimeType: 'application/pdf', filename: 'r.pdf', body: { attachmentId: 'att-1', size: attachmentBytes.length } },
+        ],
+      },
+      internalDate: String(Date.now()),
+    };
+    const getAttachment = vi.fn().mockResolvedValue({
+      data: attachmentBytes.toString('base64url'),
+      size: attachmentBytes.length,
+    });
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(draftWithAttachment),
+      getAttachment,
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const result = await provider.updateDraft('draft-existing', { subject: 'New subject' });
+
+    expect(result.success).toBe(true);
+    // Attachment bytes fetched with the backing message id, not the draft id.
+    expect(getAttachment).toHaveBeenCalledWith('msg-backing-123', 'att-1');
+    const raw = lastRaw(client.updateDraft as ReturnType<typeof vi.fn>, 1);
+    expect(raw).toContain('filename="r.pdf"');
+    expect(raw).toContain(attachmentBytes.toString('base64'));
+  });
+
+  it('Scenario: updateDraft fails closed when preserving a draft with inline attachments', async () => {
+    const draftWithInline = {
+      id: 'msg-backing-456',
+      threadId: 'thread-draft',
+      labelIds: ['DRAFT'],
+      payload: {
+        headers: [
+          { name: 'From', value: 'me@corp.com' },
+          { name: 'To', value: 'bob@corp.com' },
+          { name: 'Subject', value: 'Has inline image' },
+        ],
+        mimeType: 'multipart/related',
+        parts: [
+          { mimeType: 'text/html', body: { data: Buffer.from('<img src="cid:x">').toString('base64url') } },
+          {
+            mimeType: 'image/png',
+            filename: 'logo.png',
+            headers: [{ name: 'Content-ID', value: '<x>' }],
+            body: { attachmentId: 'inline-1', size: 4 },
+          },
+        ],
+      },
+      internalDate: String(Date.now()),
+    };
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(draftWithInline),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const result = await provider.updateDraft('draft-existing', { subject: 'New subject' });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('INLINE_ATTACHMENTS_UNSUPPORTED');
+  });
+});
+
+describe('provider-gmail/buildRawMessage attachments', () => {
+  const PDF = Buffer.from('%PDF-1.4\nbinary\x00bytes', 'binary');
+
+  it('Scenario: attachments produce multipart/mixed with a base64 file part', async () => {
+    const client = createMockGmailClient();
+    const provider = new GmailEmailProvider(client);
+
+    await provider.sendMessage({
+      to: [{ email: 'bob@corp.com' }],
+      subject: 'With file',
+      body: 'see attached',
+      attachments: [{ filename: 'report.pdf', content: PDF, mimeType: 'application/pdf' }],
+    });
+
+    const raw = lastRaw(client.sendMessage as ReturnType<typeof vi.fn>);
+    expect(raw).toMatch(/Content-Type: multipart\/mixed; boundary="=_Part_[a-f0-9]{24}"/);
+    expect(raw).toContain('Content-Type: application/pdf; name="report.pdf"');
+    expect(raw).toContain('Content-Transfer-Encoding: base64');
+    expect(raw).toContain('Content-Disposition: attachment; filename="report.pdf"');
+    // The file bytes appear base64-encoded, not raw.
+    expect(raw).toContain(PDF.toString('base64'));
+  });
+
+  it('Scenario: text body uses quoted-printable, not 7bit', async () => {
+    const client = createMockGmailClient();
+    const provider = new GmailEmailProvider(client);
+
+    await provider.sendMessage({
+      to: [{ email: 'bob@corp.com' }],
+      subject: 'Unicode',
+      body: 'Café — déjà vu',
+    });
+
+    const raw = lastRaw(client.sendMessage as ReturnType<typeof vi.fn>);
+    expect(raw).toContain('Content-Transfer-Encoding: quoted-printable');
+    expect(raw).not.toContain('Content-Transfer-Encoding: 7bit');
+    // Non-ASCII bytes are =XX-encoded (é = UTF-8 0xC3 0xA9).
+    expect(raw).toContain('=C3=A9');
+  });
+
+  it('Scenario: attachments + bodyHtml nest multipart/alternative inside multipart/mixed', async () => {
+    const client = createMockGmailClient();
+    const provider = new GmailEmailProvider(client);
+
+    await provider.sendMessage({
+      to: [{ email: 'bob@corp.com' }],
+      subject: 'Rich',
+      body: 'plain',
+      bodyHtml: '<p>rich</p>',
+      attachments: [{ filename: 'a.pdf', content: PDF, mimeType: 'application/pdf' }],
+    });
+
+    const raw = lastRaw(client.sendMessage as ReturnType<typeof vi.fn>);
+    expect(raw).toContain('multipart/mixed');
+    expect(raw).toContain('multipart/alternative');
+    const mixedIdx = raw.indexOf('multipart/mixed');
+    const altIdx = raw.indexOf('multipart/alternative');
+    expect(mixedIdx).toBeLessThan(altIdx);
+  });
+
+  it('Scenario: long base64 payload is wrapped at 76 chars', async () => {
+    const client = createMockGmailClient();
+    const provider = new GmailEmailProvider(client);
+
+    await provider.sendMessage({
+      to: [{ email: 'bob@corp.com' }],
+      subject: 'Big-ish',
+      body: 'body',
+      attachments: [{ filename: 'big.bin', content: Buffer.alloc(1000, 0x41), mimeType: 'application/octet-stream' }],
+    });
+
+    const raw = lastRaw(client.sendMessage as ReturnType<typeof vi.fn>);
+    for (const line of raw.split('\r\n')) {
+      expect(line.length).toBeLessThanOrEqual(76);
+    }
   });
 });

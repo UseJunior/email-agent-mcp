@@ -134,7 +134,14 @@ To search for an older driver's license email, start with Gmail's native query s
 
 Then widen or narrow with Gmail filters such as `older_than:5y`, `from:dmv`, `filename:pdf`, or `in:anywhere`.
 
+## Outbound attachments
+
+`create_draft`, `update_draft`, `send_email`, and `reply_to_email` accept an
+`attachments` array. Each entry is either a sandboxed file `path` or inline
+`base64`, with optional `filename` / `mimeType` overrides. Gmail builds a
+`multipart/mixed` MIME message; the 25MB per-file cap is enforced before send.
+
 ## Current caveats
 
 - Gmail watcher / PubSub wiring is not implemented yet.
-- Gmail attachments on outgoing mail are not implemented yet.
+- Inline (CID) image attachments on outgoing mail are not implemented yet.

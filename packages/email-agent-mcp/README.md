@@ -91,6 +91,10 @@ Agent Email exposes 15 MCP tools:
 | `move_to_folder` | Move between folders | write |
 | `delete_email` | Delete (requires operator env + caller flag) | destructive |
 
+`send_email`, `reply_to_email`, `create_draft`, and `update_draft` accept an
+optional `attachments` array — each entry is a sandboxed file `path` or inline
+`base64`, with optional `filename` / `mimeType`. Files are capped at 25MB each.
+
 ## Provider Support
 
 | Provider | Status | Package |

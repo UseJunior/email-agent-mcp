@@ -4,8 +4,10 @@ import type {
   EmailMessage,
   EmailThread,
   ComposeMessage,
+  OutboundAttachment,
   SendResult,
   DraftResult,
+  EmailError,
   ListOptions,
   ReplyOptions,
   EmailReader,
@@ -18,6 +20,74 @@ import { AttachmentNotSupportedError, AttachmentNotFoundError } from '@usejunior
 
 const BODY_SIZE_LIMIT = 3.5 * 1024 * 1024; // 3.5MB
 const SUBJECT_MAX_LENGTH = 255;
+
+// Microsoft Graph's hard cap is on the *encoded write request* size, not the
+// raw file: a fileAttachment carries the bytes as base64 (≈4/3 expansion)
+// inside JSON. Graph rejects requests past ~4MB, so the preflight measures
+// base64-encoded size and caps it at 3MB — conservative headroom for the
+// JSON envelope and (for inline sends) the message body. Files past this
+// need the upload-session flow, which is intentionally out of scope here.
+const GRAPH_ENCODED_LIMIT = 3 * 1024 * 1024;
+
+/** base64-encoded byte length of a buffer of `rawBytes` bytes. */
+function base64Size(rawBytes: number): number {
+  return 4 * Math.ceil(rawBytes / 3);
+}
+
+/**
+ * Reject attachments Microsoft Graph's inline / simple-upload paths cannot
+ * carry, so callers fail fast with a clear message instead of a late 413.
+ * `checkTotal` additionally caps the combined encoded size (for inline
+ * /sendMail and POST /messages, where every attachment rides in one request).
+ */
+function checkGraphAttachmentLimits(
+  attachments: OutboundAttachment[] | undefined,
+  opts: { checkTotal: boolean },
+): EmailError | null {
+  if (!attachments || attachments.length === 0) return null;
+  let totalEncoded = 0;
+  for (const att of attachments) {
+    const encoded = base64Size(att.content.length);
+    totalEncoded += encoded;
+    if (encoded > GRAPH_ENCODED_LIMIT) {
+      return {
+        code: 'ATTACHMENT_TOO_LARGE_FOR_PROVIDER',
+        message: `Attachment "${att.filename}" is ${att.content.length} bytes (${encoded} base64-encoded); Microsoft Graph supports roughly 3MB encoded per file without an upload session. Larger files require the Graph upload-session flow (out of scope — tracked as a follow-up).`,
+        recoverable: false,
+      };
+    }
+  }
+  if (opts.checkTotal && totalEncoded > GRAPH_ENCODED_LIMIT) {
+    return {
+      code: 'ATTACHMENT_TOO_LARGE_FOR_PROVIDER',
+      message: `Combined attachments are ${totalEncoded} bytes base64-encoded; Microsoft Graph's inline send payload supports roughly 3MB. Use fewer or smaller files.`,
+      recoverable: false,
+    };
+  }
+  return null;
+}
+
+/** Build a Graph `fileAttachment` resource from an OutboundAttachment. */
+function toGraphFileAttachment(att: OutboundAttachment): Record<string, unknown> {
+  return {
+    '@odata.type': '#microsoft.graph.fileAttachment',
+    name: att.filename,
+    contentType: att.mimeType,
+    contentBytes: att.content.toString('base64'),
+  };
+}
+
+/**
+ * Carries a structured attachment error out of prepareReplyDraft, optionally
+ * with the id of a draft that was created but could not be completed — so the
+ * caller can surface it for inspection/retry instead of orphaning it silently.
+ */
+class GraphAttachmentError extends Error {
+  constructor(public readonly emailError: EmailError, public readonly draftId?: string) {
+    super(emailError.message);
+    this.name = 'GraphAttachmentError';
+  }
+}
 
 // Sent message tracking via custom extended property
 const TRACKING_PROPERTY = 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailTrackingId';
@@ -383,8 +453,14 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   }
 
   async sendMessage(msg: ComposeMessage): Promise<SendResult> {
+    // Inline /sendMail carries every attachment in one request — cap total size.
+    const sizeError = checkGraphAttachmentLimits(msg.attachments, { checkTotal: true });
+    if (sizeError) {
+      return { success: false, error: sizeError };
+    }
+
     const trackingId = msg.trackingId ?? `ae-${Date.now()}`;
-    const graphMsg = {
+    const graphMsg: Record<string, unknown> = {
       subject: msg.subject.slice(0, SUBJECT_MAX_LENGTH),
       body: buildGraphBody(msg.bodyHtml, msg.body),
       toRecipients: msg.to.map(r => ({ emailAddress: { address: r.email, name: r.name } })),
@@ -393,6 +469,9 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
         { id: TRACKING_PROPERTY, value: trackingId },
       ],
     };
+    if (msg.attachments && msg.attachments.length > 0) {
+      graphMsg.attachments = msg.attachments.map(toGraphFileAttachment);
+    }
 
     await this.client.post(`${this.basePath}/sendMail`, { message: graphMsg });
     // sendMail returns 202 with no body — use tracking ID for sent message lookup
@@ -407,17 +486,35 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       await this.client.post(`${this.basePath}/messages/${encodeGraphPathId(draftId)}/send`, {});
       return { success: true, messageId: draftId };
     } catch (err) {
+      if (err instanceof GraphAttachmentError) {
+        const detail = err.draftId
+          ? ` A reply draft (${err.draftId}) was created but not sent.`
+          : '';
+        return {
+          success: false,
+          error: { ...err.emailError, message: err.emailError.message + detail },
+        };
+      }
       const message = err instanceof Error ? err.message : 'Failed to send reply';
       return { success: false, error: { code: 'REPLY_FAILED', message, recoverable: false } };
     }
   }
 
   async createDraft(msg: ComposeMessage): Promise<DraftResult> {
-    const graphMsg = {
+    // Attachments ride inline in the POST /messages payload — cap total size.
+    const sizeError = checkGraphAttachmentLimits(msg.attachments, { checkTotal: true });
+    if (sizeError) {
+      return { success: false, error: sizeError };
+    }
+
+    const graphMsg: Record<string, unknown> = {
       subject: msg.subject,
       body: buildGraphBody(msg.bodyHtml, msg.body),
       toRecipients: msg.to.map(r => ({ emailAddress: { address: r.email, name: r.name } })),
     };
+    if (msg.attachments && msg.attachments.length > 0) {
+      graphMsg.attachments = msg.attachments.map(toGraphFileAttachment);
+    }
 
     const response = await this.client.post(`${this.basePath}/messages`, graphMsg);
     return { success: true, draftId: response.id };
@@ -435,6 +532,9 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       const draftId = await this.prepareReplyDraft(messageId, body, opts);
       return { success: true, draftId };
     } catch (err) {
+      if (err instanceof GraphAttachmentError) {
+        return { success: false, draftId: err.draftId, error: err.emailError };
+      }
       const message = err instanceof Error ? err.message : 'Failed to create reply draft';
       return { success: false, error: { code: 'DRAFT_FAILED', message, recoverable: false } };
     }
@@ -449,11 +549,32 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
    *
    * Returns the draft id. Throws if the Graph endpoint fails or returns no id.
    */
+  /**
+   * POST each attachment to a draft's `/attachments` collection. Used for the
+   * two-step draft attachment flow (reply drafts, draft updates), since Graph's
+   * createReply/createReplyAll and PATCH paths cannot carry attachments inline.
+   */
+  private async postDraftAttachments(draftId: string, attachments: OutboundAttachment[]): Promise<void> {
+    for (const att of attachments) {
+      await this.client.post(
+        `${this.basePath}/messages/${encodeGraphPathId(draftId)}/attachments`,
+        toGraphFileAttachment(att),
+      );
+    }
+  }
+
   private async prepareReplyDraft(
     messageId: string,
     body: string,
     opts?: ReplyOptions,
   ): Promise<string> {
+    // Size preflight before creating the draft, so an oversize attachment
+    // never leaves an orphan draft behind.
+    const sizeError = checkGraphAttachmentLimits(opts?.attachments, { checkTotal: false });
+    if (sizeError) {
+      throw new GraphAttachmentError(sizeError);
+    }
+
     const endpoint = opts?.replyAll === false ? 'createReply' : 'createReplyAll';
     const draft = await this.client.post(
       `${this.basePath}/messages/${encodeGraphPathId(messageId)}/${endpoint}`,
@@ -491,6 +612,25 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     if (bccMerged.length > 0) patch.bccRecipients = bccMerged;
 
     await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(draft.id)}`, patch);
+
+    // Two-step attachment upload: the draft now exists, so POST each file to
+    // its /attachments collection. A failure here leaves a created-but-
+    // incomplete draft — surface its id so the caller can inspect or retry.
+    if (opts?.attachments && opts.attachments.length > 0) {
+      try {
+        await this.postDraftAttachments(draft.id, opts.attachments);
+      } catch (err) {
+        throw new GraphAttachmentError(
+          {
+            code: 'ATTACHMENT_UPLOAD_FAILED',
+            message: `Reply draft was created but attaching files failed: ${err instanceof Error ? err.message : String(err)}`,
+            recoverable: false,
+          },
+          draft.id,
+        );
+      }
+    }
+
     return draft.id;
   }
 
@@ -527,7 +667,45 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     if (msg.to) patch.toRecipients = msg.to.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
     if (msg.cc) patch.ccRecipients = msg.cc.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
 
+    // Attachments: an omitted field preserves the draft's existing attachments
+    // (Graph attachments are child resources untouched by this PATCH). A
+    // provided array replaces them — delete the existing set, then add the new
+    // one. Size preflight runs first so nothing is deleted if it would fail.
+    if (msg.attachments !== undefined) {
+      const sizeError = checkGraphAttachmentLimits(msg.attachments, { checkTotal: false });
+      if (sizeError) {
+        return { success: false, draftId, error: sizeError };
+      }
+    }
+
     await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(draftId)}`, patch);
+
+    if (msg.attachments !== undefined) {
+      try {
+        const existing = await this.client.get(
+          `${this.basePath}/messages/${encodeGraphPathId(draftId)}/attachments?$select=id`,
+        );
+        for (const att of ((existing.value ?? []) as Array<{ id?: string }>)) {
+          if (att.id) {
+            await this.client.delete(
+              `${this.basePath}/messages/${encodeGraphPathId(draftId)}/attachments/${encodeGraphPathId(att.id)}`,
+            );
+          }
+        }
+        await this.postDraftAttachments(draftId, msg.attachments);
+      } catch (err) {
+        return {
+          success: false,
+          draftId,
+          error: {
+            code: 'ATTACHMENT_UPDATE_FAILED',
+            message: `Draft ${draftId} field updates were applied, but replacing attachments failed: ${err instanceof Error ? err.message : String(err)}`,
+            recoverable: false,
+          },
+        };
+      }
+    }
+
     return { success: true, draftId };
   }
 

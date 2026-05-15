@@ -14,6 +14,8 @@ import {
   handleProviderError,
   parseRecipients,
   buildDraftPreview,
+  resolveAttachments,
+  AttachmentInputSchema,
   DraftPreviewSchema,
   PreviewErrorSchema,
 } from './compose-helpers.js';
@@ -30,6 +32,8 @@ const SendEmailInput = z.object({
     .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
   force_black: z.boolean().optional()
     .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true. Ignored when format is "text".'),
+  attachments: z.array(AttachmentInputSchema).optional()
+    .describe('Files to attach. Each entry takes a sandboxed `path` or inline `base64`.'),
 });
 
 const SendEmailOutput = z.object({
@@ -69,6 +73,13 @@ export const sendEmailAction: EmailAction<
 
     const { to, cc, subject, draft, format, forceBlack } = fields;
     let { body } = fields;
+
+    // Resolve attachments (sandboxed path reads + validation)
+    const attResult = await resolveAttachments(input.attachments, ctx.safeDir);
+    if (attResult.error) {
+      return { success: false, error: attResult.error };
+    }
+    const attachments = attResult.files!.length > 0 ? attResult.files : undefined;
 
     // Validate required fields after merge
     const requiredError = validateRequiredFields(to, subject);
@@ -116,6 +127,7 @@ export const sendEmailAction: EmailAction<
         subject: subject!,
         body,
         bodyHtml: outBodyHtml,
+        attachments,
       });
       const previewResult = draftResult.success && draftResult.draftId
         ? await buildDraftPreview(ctx.provider, draftResult.draftId)
@@ -156,6 +168,7 @@ export const sendEmailAction: EmailAction<
           subject: subject!,
           body,
           bodyHtml: outBodyHtml,
+          attachments,
         }),
         { maxRetries: 3, baseDelay: 1000 },
       );
