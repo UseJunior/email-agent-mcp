@@ -1,7 +1,8 @@
 // Shared body-file resolution — safe file loading with frontmatter support
-import { readFile, realpath, lstat } from 'node:fs/promises';
-import { resolve, relative, isAbsolute, extname } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { extname } from 'node:path';
 import { parseFrontmatter, type FrontmatterFields } from './frontmatter.js';
+import { assertPathInSafeDir } from './safe-path.js';
 
 export const BODY_SIZE_LIMIT = 3.5 * 1024 * 1024; // 3.5MB
 export const TEXT_EXTENSIONS = new Set(['.md', '.html', '.htm', '.txt', '.text']);
@@ -16,56 +17,11 @@ export async function resolveBodyFile(
   bodyFile: string,
   safeDir?: string,
 ): Promise<BodyFileResult> {
-  const baseDir = safeDir ?? process.cwd();
-  const resolved = resolve(baseDir, bodyFile);
-
-  // Check path traversal
-  if (bodyFile.includes('..') || (isAbsolute(bodyFile) && !resolved.startsWith(baseDir))) {
-    return {
-      error: {
-        code: 'PATH_TRAVERSAL',
-        message: 'body_file must be within the working directory',
-        recoverable: false,
-      },
-    };
+  const pathCheck = await assertPathInSafeDir(bodyFile, safeDir, 'body_file');
+  if (pathCheck.error) {
+    return { error: pathCheck.error };
   }
-
-  // Verify it's within the safe directory
-  const rel = relative(baseDir, resolved);
-  if (rel.startsWith('..')) {
-    return {
-      error: {
-        code: 'PATH_TRAVERSAL',
-        message: 'body_file must be within the working directory',
-        recoverable: false,
-      },
-    };
-  }
-
-  // Check if file exists and is not a symlink escape
-  try {
-    const stat = await lstat(resolved);
-    if (stat.isSymbolicLink()) {
-      const realPath = await realpath(resolved);
-      if (!realPath.startsWith(baseDir)) {
-        return {
-          error: {
-            code: 'SYMLINK_ESCAPE',
-            message: 'body_file symlink targets outside working directory',
-            recoverable: false,
-          },
-        };
-      }
-    }
-  } catch {
-    return {
-      error: {
-        code: 'FILE_NOT_FOUND',
-        message: `body_file not found: ${bodyFile}`,
-        recoverable: false,
-      },
-    };
-  }
+  const resolved = pathCheck.resolved!;
 
   // Check file extension
   const ext = extname(resolved).toLowerCase();

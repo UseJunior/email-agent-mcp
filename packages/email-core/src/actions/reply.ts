@@ -12,6 +12,8 @@ import {
   handleProviderError,
   parseRecipients,
   buildDraftPreview,
+  resolveAttachments,
+  AttachmentInputSchema,
   DraftPreviewSchema,
   PreviewErrorSchema,
 } from './compose-helpers.js';
@@ -28,6 +30,8 @@ const ReplyToEmailInput = z.object({
     .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
   force_black: z.boolean().optional()
     .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true.'),
+  attachments: z.array(AttachmentInputSchema).optional()
+    .describe('Files to attach. Each entry takes a sandboxed `path` or inline `base64`.'),
 });
 
 const ReplyToEmailOutput = z.object({
@@ -138,6 +142,13 @@ export const replyToEmailAction: EmailAction<
       return { success: false, error: parsed.error };
     }
 
+    // Resolve attachments (sandboxed path reads + validation)
+    const attResult = await resolveAttachments(input.attachments, ctx.safeDir);
+    if (attResult.error) {
+      return { success: false, error: attResult.error };
+    }
+    const attachments = attResult.files!.length > 0 ? attResult.files : undefined;
+
     // Render body: markdown → HTML by default
     const rendered = renderEmailBody(input.body, { format: input.format, forceBlack: input.force_black });
     const bodyPlain = rendered.body;
@@ -160,6 +171,7 @@ export const replyToEmailAction: EmailAction<
           cc: parsed.cc,
           bodyHtml,
           replyAll: input.reply_all,
+          attachments,
         });
         const previewResult = draftResult.success && draftResult.draftId
           ? await buildDraftPreview(ctx.provider, draftResult.draftId)
@@ -210,6 +222,7 @@ export const replyToEmailAction: EmailAction<
           cc: parsed.cc,
           bodyHtml,
           replyAll: input.reply_all,
+          attachments,
         }),
         { maxRetries: 3, baseDelay: 1000 },
       );

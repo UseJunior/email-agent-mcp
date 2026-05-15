@@ -11,6 +11,7 @@ import type {
   ListOptions,
   ReplyOptions,
   DownloadedAttachment,
+  OutboundAttachment,
 } from '@usejunior/email-core';
 import { AttachmentNotFoundError } from '@usejunior/email-core';
 
@@ -213,6 +214,7 @@ export class GmailEmailProvider {
         subject,
         body,
         bodyHtml: opts?.bodyHtml,
+        attachments: opts?.attachments,
       },
       {
         inReplyTo: original.messageId,
@@ -252,6 +254,7 @@ export class GmailEmailProvider {
           subject,
           body,
           bodyHtml: opts?.bodyHtml,
+          attachments: opts?.attachments,
         },
         {
           inReplyTo: original.messageId,
@@ -291,6 +294,37 @@ export class GmailEmailProvider {
       // lose thread association.
       const current = await this.getMessage(draftId);
 
+      // Attachments: drafts.update is a full replacement, so an omitted
+      // `attachments` field must be rehydrated from the existing draft or it
+      // would be silently dropped. When the caller supplies `attachments`
+      // (possibly an empty array), that set replaces the existing one.
+      let attachments: OutboundAttachment[] | undefined;
+      if (msg.attachments !== undefined) {
+        attachments = msg.attachments;
+      } else if (current.attachments && current.attachments.length > 0) {
+        // Inline (CID) parts cannot be safely round-tripped: this builder
+        // re-emits attachments with `Content-Disposition: attachment`, which
+        // would orphan the `cid:` references in the preserved HTML body.
+        // Fail closed and tell the caller to pass `attachments` explicitly.
+        if (current.attachments.some(att => att.isInline)) {
+          return {
+            success: false,
+            error: {
+              code: 'INLINE_ATTACHMENTS_UNSUPPORTED',
+              message: 'This draft has inline (CID) attachments that cannot be preserved automatically. Pass an explicit `attachments` array to update it.',
+              recoverable: false,
+            },
+          };
+        }
+        attachments = [];
+        for (const att of current.attachments) {
+          // Gmail attachment bytes are keyed by the backing message id, not
+          // the draft id — use current.id (the resolved message).
+          const dl = await this.downloadAttachment(current.id, att.id);
+          attachments.push({ filename: dl.filename, content: dl.content, mimeType: dl.mimeType });
+        }
+      }
+
       const merged: ComposeMessage = {
         to: msg.to ?? current.to,
         cc: msg.cc ?? current.cc,
@@ -298,6 +332,7 @@ export class GmailEmailProvider {
         subject: msg.subject ?? current.subject,
         body: msg.body ?? current.body ?? '',
         bodyHtml: msg.bodyHtml ?? current.bodyHtml,
+        attachments,
       };
 
       const raw = buildRawMessage(merged, {
@@ -565,19 +600,121 @@ interface BuildRawOptions {
   references?: string[];
 }
 
+const CRLF = '\r\n';
+
+/**
+ * Encode text as quoted-printable (RFC 2045) with CRLF line endings and
+ * 76-char soft line wrapping. Replaces the previous `7bit` labelling, which
+ * was incorrect for UTF-8 bodies, and normalizes embedded `\n` to canonical
+ * CRLF inside the part.
+ */
+function encodeQuotedPrintable(text: string): string {
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const outLines: string[] = [];
+
+  for (const line of normalized.split('\n')) {
+    const bytes = Buffer.from(line, 'utf-8');
+    const tokens: string[] = [];
+    for (let i = 0; i < bytes.length; i++) {
+      const b = bytes[i]!;
+      const isLast = i === bytes.length - 1;
+      if (b === 0x20 || b === 0x09) {
+        // Space/tab: literal, except a trailing one must be encoded so it
+        // survives transport whitespace stripping.
+        tokens.push(isLast ? `=${b.toString(16).toUpperCase().padStart(2, '0')}` : String.fromCharCode(b));
+      } else if (b >= 0x21 && b <= 0x7e && b !== 0x3d) {
+        tokens.push(String.fromCharCode(b));
+      } else {
+        tokens.push(`=${b.toString(16).toUpperCase().padStart(2, '0')}`);
+      }
+    }
+    // Soft-wrap so no line (including the trailing '=') exceeds 76 chars.
+    // Tokens are atomic (1 char or a 3-char '=XX') and never split.
+    let current = '';
+    for (const tok of tokens) {
+      if (current.length + tok.length > 75) {
+        outLines.push(current + '=');
+        current = '';
+      }
+      current += tok;
+    }
+    outLines.push(current);
+  }
+
+  return outLines.join(CRLF);
+}
+
+/** Wrap a base64 string at 76 chars per line with CRLF endings (RFC 2045). */
+function wrapBase64(b64: string): string {
+  const out: string[] = [];
+  for (let i = 0; i < b64.length; i += 76) {
+    out.push(b64.slice(i, i + 76));
+  }
+  return out.join(CRLF);
+}
+
+/** A fully serialized MIME part: headers, blank line, encoded body. */
+type MimePart = string;
+
+function serializeTextPart(content: string, contentType: 'text/plain' | 'text/html'): MimePart {
+  return [
+    `Content-Type: ${contentType}; charset=utf-8`,
+    'Content-Transfer-Encoding: quoted-printable',
+    '',
+    encodeQuotedPrintable(content),
+  ].join(CRLF);
+}
+
+function serializeAttachmentPart(att: OutboundAttachment): MimePart {
+  const name = att.filename.replace(/[\r\n"\\]+/g, '_') || 'attachment';
+  const mimeType = att.mimeType.replace(/[\r\n";]+/g, '') || 'application/octet-stream';
+  return [
+    `Content-Type: ${mimeType}; name="${name}"`,
+    'Content-Transfer-Encoding: base64',
+    `Content-Disposition: attachment; filename="${name}"`,
+    '',
+    wrapBase64(att.content.toString('base64')),
+  ].join(CRLF);
+}
+
+/** Join MIME parts under a fresh boundary, returning the Content-Type value and body. */
+function serializeMultipart(
+  subtype: 'alternative' | 'mixed',
+  parts: MimePart[],
+): { contentType: string; body: string } {
+  const boundary = generateBoundary(parts.join(CRLF));
+  const sections: string[] = [];
+  for (const part of parts) {
+    sections.push(`--${boundary}`);
+    sections.push(part);
+  }
+  sections.push(`--${boundary}--`);
+  return {
+    contentType: `multipart/${subtype}; boundary="${boundary}"`,
+    body: sections.join(CRLF),
+  };
+}
+
+/** A nested multipart rendered as a single MIME part (carries its own Content-Type header). */
+function multipartAsPart(subtype: 'alternative' | 'mixed', parts: MimePart[]): MimePart {
+  const { contentType, body } = serializeMultipart(subtype, parts);
+  return [`Content-Type: ${contentType}`, '', body].join(CRLF);
+}
+
 /**
  * Assemble a raw RFC 2822 message with CRLF line endings, base64url-encoded
  * for Gmail's `drafts.create` / `messages.send` APIs.
  *
- * - When `msg.bodyHtml` is set, emits `multipart/alternative` with a
- *   plain-text part first (for text-only clients) and the HTML part second.
- * - When only `msg.body` is set, emits a single `text/plain` part.
- * - Populates `Cc`, `Bcc`, `In-Reply-To`, `References` headers when present.
- * - Sanitizes all header values to prevent CR/LF injection.
- * - `attachments` are intentionally not emitted — documented follow-up.
+ * - With attachments: `multipart/mixed` whose first part is the body (a
+ *   nested `multipart/alternative` when bodyHtml is set, else a single
+ *   text part), followed by one `fileAttachment`-style part per attachment.
+ * - Without attachments: `multipart/alternative` when bodyHtml is set, else
+ *   a single quoted-printable `text/plain` message.
+ * - Text parts use quoted-printable so UTF-8 survives transport.
+ * - Populates `Cc`, `Bcc`, `In-Reply-To`, `References` when present and
+ *   sanitizes all header values to prevent CR/LF injection.
  */
 function buildRawMessage(msg: ComposeMessage, opts: BuildRawOptions = {}): string {
-  const CRLF = '\r\n';
   const headers: string[] = [];
   headers.push('MIME-Version: 1.0');
   headers.push(`To: ${formatAddressList(msg.to)}`);
@@ -590,42 +727,35 @@ function buildRawMessage(msg: ComposeMessage, opts: BuildRawOptions = {}): strin
   }
 
   const hasHtml = msg.bodyHtml !== undefined;
+  const attachments = msg.attachments ?? [];
 
-  if (hasHtml) {
-    // Boundary must not appear in either part; check against both the plain
-    // body and the html body.
-    const boundary = generateBoundary(msg.body + (msg.bodyHtml ?? ''));
-    headers.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
+  let body: string;
 
-    const sections: string[] = [];
-    sections.push(headers.join(CRLF));
-    sections.push(''); // blank line terminates headers
-
-    // Plain-text part
-    sections.push(`--${boundary}`);
-    sections.push('Content-Type: text/plain; charset=utf-8');
-    sections.push('Content-Transfer-Encoding: 7bit');
-    sections.push('');
-    sections.push(msg.body);
-
-    // HTML part
-    sections.push(`--${boundary}`);
-    sections.push('Content-Type: text/html; charset=utf-8');
-    sections.push('Content-Transfer-Encoding: 7bit');
-    sections.push('');
-    sections.push(msg.bodyHtml!);
-
-    // Close boundary
-    sections.push(`--${boundary}--`);
-    sections.push('');
-
-    return Buffer.from(sections.join(CRLF)).toString('base64url');
+  if (attachments.length > 0) {
+    const bodyPart: MimePart = hasHtml
+      ? multipartAsPart('alternative', [
+        serializeTextPart(msg.body, 'text/plain'),
+        serializeTextPart(msg.bodyHtml!, 'text/html'),
+      ])
+      : serializeTextPart(msg.body, 'text/plain');
+    const mixed = serializeMultipart('mixed', [bodyPart, ...attachments.map(serializeAttachmentPart)]);
+    headers.push(`Content-Type: ${mixed.contentType}`);
+    body = mixed.body;
+  } else if (hasHtml) {
+    const alt = serializeMultipart('alternative', [
+      serializeTextPart(msg.body, 'text/plain'),
+      serializeTextPart(msg.bodyHtml!, 'text/html'),
+    ]);
+    headers.push(`Content-Type: ${alt.contentType}`);
+    body = alt.body;
+  } else {
+    headers.push('Content-Type: text/plain; charset=utf-8');
+    headers.push('Content-Transfer-Encoding: quoted-printable');
+    body = encodeQuotedPrintable(msg.body);
   }
 
-  // Single-part text/plain fallback
-  headers.push('Content-Type: text/plain; charset=utf-8');
-  const lines = [...headers, '', msg.body];
-  return Buffer.from(lines.join(CRLF)).toString('base64url');
+  const message = [...headers, '', body].join(CRLF);
+  return Buffer.from(message, 'utf-8').toString('base64url');
 }
 
 /**

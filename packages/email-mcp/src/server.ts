@@ -661,6 +661,11 @@ export async function buildLazyActions(
   getSendAllowlist: () => { entries: string[] } | undefined,
   getDeletePolicy: () => DeletePolicy | undefined = () => undefined,
 ): Promise<EmailActionDef[]> {
+  // Sandbox boundary for body_file / attachment path reads. Resolved once so
+  // the boundary is intentional and operator-overridable rather than an
+  // implicit process.cwd() fallback inside the file loaders.
+  const safeDir = process.env.EMAIL_MCP_SAFE_DIR || process.cwd();
+
   const {
     sendEmailAction,
     replyToEmailAction,
@@ -709,6 +714,7 @@ export async function buildLazyActions(
           mailboxName: resolved.mailbox.name,
           allMailboxes: resolved.allMailboxes,
           sendAllowlist: getSendAllowlist(),
+          safeDir,
           deleteEnabled: deletePolicy?.enabled === true,
           hardDeleteAllowed: deletePolicy?.hardDeleteAllowed === true,
         };

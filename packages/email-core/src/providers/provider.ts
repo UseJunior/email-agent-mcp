@@ -60,7 +60,12 @@ export type EmailProvider = EmailReader & EmailSender & Partial<EmailSubscriber>
 export interface ProviderInfo {
   name: string;
   displayName: string;
-  capabilities: ('read' | 'send' | 'subscribe' | 'categorize' | 'attachments')[];
+  // 'attachments' covers inbound (list/download); 'outbound-attachments'
+  // covers attaching files to sent mail / drafts. Both Graph and Gmail
+  // support both. Note: no provider currently exports a ProviderInfo value —
+  // this is a forward-compat type surface; wiring a real metadata surface
+  // that declares these is a follow-up.
+  capabilities: ('read' | 'send' | 'subscribe' | 'categorize' | 'attachments' | 'outbound-attachments')[];
 }
 
 // Error normalization

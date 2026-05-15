@@ -1,12 +1,15 @@
 // Shared helpers for compose actions — internal module, NOT exported from package root
 import { z } from 'zod';
+import { basename } from 'node:path';
 import type { RateLimiter, MailboxEntry } from './registry.js';
 import { ProviderError } from '../providers/provider.js';
 import type { EmailReader } from '../providers/provider.js';
 import { resolveBodyFile } from '../content/body-loader.js';
+import { resolveAttachmentFile } from '../content/attachment-loader.js';
 import type { BodyFormat } from '../content/body-renderer.js';
 import { parseAddressList } from '../utils/address.js';
-import type { EmailAddress } from '../types.js';
+import { validateAttachment, sanitizeFilename } from './attachments.js';
+import type { EmailAddress, OutboundAttachment } from '../types.js';
 
 // --- Error shape used by all actions ---
 
@@ -105,6 +108,106 @@ export async function resolveComposeFields(
   }
 
   return { body: body ?? '', to, cc, subject, replyTo, draft, format, forceBlack };
+}
+
+// --- Outbound attachments ---
+
+// Strict standard-base64: zero or more full quartets, then an optional final
+// group of 2 chars + `==` or 3 chars + `=`. Rejects lengths that are not a
+// valid base64 size (e.g. a lone `A` or `abcde`), which Node's decoder would
+// otherwise silently truncate into corrupt bytes.
+const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+const hasNonEmpty = (v: string | undefined): boolean => v !== undefined && v !== '';
+
+/** True when `value` (whitespace stripped) is non-empty, valid standard base64. */
+function isValidBase64(value: string): boolean {
+  const stripped = value.replace(/\s/g, '');
+  return stripped.length > 0 && BASE64_PATTERN.test(stripped);
+}
+
+/**
+ * Per-attachment input schema for the four outbound actions. Each entry takes
+ * a sandboxed file path OR inline base64 — exactly one — plus optional
+ * filename/mimeType overrides.
+ */
+export const AttachmentInputSchema = z
+  .object({
+    path: z.string().optional()
+      .describe('Path to a file within the working directory (sandboxed, like body_file).'),
+    base64: z.string().optional()
+      .describe('Inline standard-base64-encoded file content. Alternative to path.'),
+    filename: z.string().optional()
+      .describe('Attachment filename. Defaults to basename(path); REQUIRED when using base64.'),
+    mimeType: z.string().optional()
+      .describe('MIME type override. Defaults to magic-byte detection.'),
+  })
+  .refine(v => hasNonEmpty(v.path) !== hasNonEmpty(v.base64), {
+    message: 'Each attachment must set exactly one of `path` or `base64`.',
+  })
+  .refine(v => !(hasNonEmpty(v.base64) && !hasNonEmpty(v.path) && !hasNonEmpty(v.filename)), {
+    message: '`filename` is required when an attachment is provided as `base64`.',
+  })
+  .refine(
+    v => !(hasNonEmpty(v.base64) && !hasNonEmpty(v.path)) || isValidBase64(v.base64!),
+    { message: '`base64` is not valid standard base64.' },
+  );
+
+export type AttachmentInput = z.infer<typeof AttachmentInputSchema>;
+
+export interface ResolveAttachmentsResult {
+  files?: OutboundAttachment[];
+  error?: ActionError;
+}
+
+/**
+ * Resolve caller-supplied attachment inputs into validated OutboundAttachment
+ * buffers. Path entries are read sandboxed to `safeDir`; base64 entries are
+ * decoded inline. Each file is run through validateAttachment (25MB cap +
+ * magic-byte MIME). Returns a structured error on the first failure — never
+ * throws. An undefined/empty input yields `{ files: [] }`.
+ */
+export async function resolveAttachments(
+  attachments: AttachmentInput[] | undefined,
+  safeDir: string | undefined,
+): Promise<ResolveAttachmentsResult> {
+  if (!attachments || attachments.length === 0) {
+    return { files: [] };
+  }
+
+  const files: OutboundAttachment[] = [];
+  for (const [index, att] of attachments.entries()) {
+    let content: Buffer;
+    let defaultName: string;
+
+    if (hasNonEmpty(att.path)) {
+      const read = await resolveAttachmentFile(att.path!, safeDir);
+      if (read.error) {
+        return { error: { ...read.error, message: `attachments[${index}]: ${read.error.message}` } };
+      }
+      content = read.content!;
+      defaultName = basename(att.path!);
+    } else {
+      content = Buffer.from(att.base64!.replace(/\s/g, ''), 'base64');
+      defaultName = 'attachment';
+    }
+
+    const filename = sanitizeFilename(att.filename ?? defaultName);
+    const validation = validateAttachment(content, filename, att.mimeType);
+    if (!validation.valid) {
+      return {
+        error: {
+          code: 'ATTACHMENT_INVALID',
+          message: `attachments[${index}]: ${validation.error}`,
+          recoverable: false,
+        },
+      };
+    }
+
+    files.push({ filename, content, mimeType: validation.detectedMimeType });
+  }
+
+  return { files };
 }
 
 // --- validateRequiredFields ---
