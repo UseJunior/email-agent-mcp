@@ -1194,10 +1194,6 @@ async function finalizeGmailMailbox(
   console.error('');
   console.error(`✅ Connected as: ${emailAddress}`);
   console.error(`   Mailbox saved to ~/.email-agent-mcp/tokens/${safeKey}.json`);
-  console.error('');
-  console.error('To start the MCP server, run:');
-  console.error('   npx tsx packages/email-mcp/src/cli.ts serve   # from source');
-  console.error('   npx email-agent-mcp serve             # after npm publish');
 }
 
 export function inferProviderFromMailbox(
@@ -1335,10 +1331,6 @@ export async function runConfigure(opts: CliOptions): Promise<number> {
         console.error(`✅ Connected as: ${profile.displayName ?? 'Unknown'} (no email found)`);
         console.error(`   Mailbox "${mailboxName}" saved to ~/.email-agent-mcp/tokens/${mailboxName}.json`);
       }
-      console.error('');
-      console.error('To start the MCP server, run:');
-      console.error('   npx tsx packages/email-mcp/src/cli.ts serve   # from source');
-      console.error('   npx email-agent-mcp serve             # after npm publish');
     } else {
       console.error('');
       console.error(`⚠️  Authentication succeeded but profile fetch failed (${resp.status})`);
