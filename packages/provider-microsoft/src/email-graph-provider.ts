@@ -395,13 +395,18 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       );
     }
     const content = Buffer.from(cleanedBytes, 'base64');
-    // Compare decoded length to the size Graph reported on the same response.
-    // A mismatch signals truncation in transit or a malformed contentBytes
-    // payload — return a hard error rather than corrupt bytes.
-    if (typeof response.size === 'number' && content.length !== response.size) {
+    // Validate that contentBytes round-trips cleanly: re-encoding the decoded
+    // buffer should produce the same canonical base64 length as what Graph
+    // sent. This catches truncation in transit and stray invalid chars
+    // (Node's decoder silently drops them) without depending on Graph's
+    // `size` field — which, for attachments uploaded via the inline
+    // fileAttachment path, reflects the stored base64+MIME-framed length
+    // and intentionally does NOT match the decoded raw byte count.
+    const expectedEncodedLen = Math.ceil(content.length / 3) * 4;
+    if (cleanedBytes.length !== expectedEncodedLen) {
       throw new GraphApiError(
         500,
-        `Attachment ${attachmentId} decoded length ${content.length} does not match Graph-reported size ${response.size}`,
+        `Attachment ${attachmentId} contentBytes appears truncated (${cleanedBytes.length} base64 chars, expected ${expectedEncodedLen} for the ${content.length}-byte payload)`,
       );
     }
     return {

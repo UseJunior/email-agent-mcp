@@ -397,21 +397,49 @@ describe('provider-microsoft/Attachment Download', () => {
     await expect(provider.downloadAttachment('msg-1', 'att-bad')).rejects.toThrow(/invalid base64/);
   });
 
-  it('Scenario: downloadAttachment rejects size mismatch between Graph-reported size and decoded length', async () => {
-    const PAYLOAD = Buffer.from('actual bytes');
+  it('Scenario: downloadAttachment accepts inline fileAttachment where Graph-reported size > decoded length', async () => {
+    // For attachments uploaded via the inline fileAttachment path (POST
+    // /sendMail or POST /messages with attachments inline), Graph's `size`
+    // reflects the stored base64+MIME-framed length, not the decoded raw
+    // payload. Round-tripping our own outbound attachments through Graph
+    // download must NOT trip the truncation guard on this benign mismatch.
+    const PAYLOAD = Buffer.from('hello world from an inline fileAttachment round-trip');
+    const client = createSchemaValidatingClient([
+      {
+        id: 'att-inline',
+        '@odata.type': '#microsoft.graph.fileAttachment',
+        name: 'roundtrip.bin',
+        contentType: 'application/octet-stream',
+        size: PAYLOAD.length * 4, // simulate Graph's inflated stored size
+        contentBytes: PAYLOAD.toString('base64'),
+      },
+    ]);
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.downloadAttachment('msg-1', 'att-inline');
+
+    expect(result.content.equals(PAYLOAD)).toBe(true);
+  });
+
+  it('Scenario: downloadAttachment rejects contentBytes truncated mid-base64', async () => {
+    // A base64 string whose length is not a multiple of 4 means the payload
+    // was cut on the wire — Node would silently decode the valid prefix.
+    // The base64-round-trip check catches it without depending on
+    // Graph's `size` field.
+    const truncated = Buffer.from('hello world').toString('base64').slice(0, -2); // drop trailing chars
     const client = createMockClient({
       get: vi.fn().mockResolvedValue({
-        id: 'att-mismatch',
+        id: 'att-trunc',
         '@odata.type': '#microsoft.graph.fileAttachment',
-        name: 'mismatch.bin',
+        name: 'trunc.bin',
         contentType: 'application/octet-stream',
-        size: 9999, // lies — actual decoded length is PAYLOAD.length
-        contentBytes: PAYLOAD.toString('base64'),
+        size: 11,
+        contentBytes: truncated,
       }),
     });
     const provider = new GraphEmailProvider(client);
 
-    await expect(provider.downloadAttachment('msg-1', 'att-mismatch')).rejects.toThrow(/does not match/);
+    await expect(provider.downloadAttachment('msg-1', 'att-trunc')).rejects.toThrow(/truncated/);
   });
 });
 
