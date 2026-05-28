@@ -13,7 +13,7 @@
 
 [English](./README.md) | [Español](./README.es.md) | [简体中文](./README.zh.md) | [Português (Brasil)](./README.pt-br.md) | [Deutsch](./README.de.md)
 
-**email-agent-mcp** by [UseJunior](https://usejunior.com) -- local email connectivity for AI agents.
+**email-agent-mcp** by [UseJunior](https://usejunior.com?utm_source=github&utm_medium=readme&utm_campaign=email-agent-mcp) -- local email connectivity for AI agents.
 
 Agent Email is an open-source TypeScript MCP server that lets Claude Code, Cursor, Gemini CLI, OpenClaw, and other MCP-compatible runtimes read email, search threads, draft replies, label messages, change read state, move messages, and send mail through your own mailbox. Microsoft 365 / Outlook and Gmail are supported today. Security-first defaults mean agents cannot send email until you explicitly configure an allowlist.
 
