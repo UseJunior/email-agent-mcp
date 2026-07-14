@@ -14,13 +14,52 @@ const MAGIC_BYTES: [Buffer, string][] = [
   [Buffer.from([0x50, 0x4b, 0x03, 0x04]), 'application/zip'],
 ];
 
+// OOXML and ODF documents are ZIP containers, so the PK magic alone cannot
+// distinguish them from a plain archive. Disambiguate by extension (#98).
+export const ZIP_CONTAINER_TYPES: Record<string, string> = {
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.dotx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.template',
+  '.xltx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.template',
+  '.potx': 'application/vnd.openxmlformats-officedocument.presentationml.template',
+  '.ppsx': 'application/vnd.openxmlformats-officedocument.presentationml.slideshow',
+  '.docm': 'application/vnd.ms-word.document.macroEnabled.12',
+  '.xlsm': 'application/vnd.ms-excel.sheet.macroEnabled.12',
+  '.pptm': 'application/vnd.ms-powerpoint.presentation.macroEnabled.12',
+  '.dotm': 'application/vnd.ms-word.template.macroEnabled.12',
+  '.xltm': 'application/vnd.ms-excel.template.macroEnabled.12',
+  '.potm': 'application/vnd.ms-powerpoint.template.macroEnabled.12',
+  '.ppsm': 'application/vnd.ms-powerpoint.slideshow.macroEnabled.12',
+  '.xlsb': 'application/vnd.ms-excel.sheet.binary.macroEnabled.12',
+  '.odt': 'application/vnd.oasis.opendocument.text',
+  '.ods': 'application/vnd.oasis.opendocument.spreadsheet',
+  '.odp': 'application/vnd.oasis.opendocument.presentation',
+  '.odg': 'application/vnd.oasis.opendocument.graphics',
+  '.ott': 'application/vnd.oasis.opendocument.text-template',
+  '.ots': 'application/vnd.oasis.opendocument.spreadsheet-template',
+  '.otp': 'application/vnd.oasis.opendocument.presentation-template',
+};
+
 /**
  * Detect MIME type from file content magic bytes.
+ *
+ * Specific magic matches (jpeg/png/gif/pdf) win over `declaredType` — content
+ * is authoritative when it identifies one concrete format. A ZIP match is only
+ * a container signature, so it defers to `declaredType`, then to the filename
+ * extension for known ZIP-based document formats (docx/xlsx/pptx/ODF).
  */
-export function detectMimeType(content: Buffer, declaredType?: string): string {
+export function detectMimeType(content: Buffer, declaredType?: string, filename?: string): string {
   for (const [magic, mimeType] of MAGIC_BYTES) {
     if (content.length >= magic.length && content.subarray(0, magic.length).equals(magic)) {
-      return mimeType;
+      if (mimeType !== 'application/zip') {
+        return mimeType;
+      }
+      if (declaredType) {
+        return declaredType;
+      }
+      const ext = filename ? extname(filename).toLowerCase() : '';
+      return ZIP_CONTAINER_TYPES[ext] ?? mimeType;
     }
   }
   return declaredType ?? 'application/octet-stream';
@@ -176,7 +215,7 @@ export const downloadAttachmentAction: EmailAction<
 // Validate attachment for outbound
 export function validateAttachment(
   content: Buffer,
-  _filename: string,
+  filename: string,
   declaredMimeType?: string,
 ): { valid: boolean; detectedMimeType: string; error?: string } {
   if (content.length > MAX_ATTACHMENT_SIZE) {
@@ -187,7 +226,7 @@ export function validateAttachment(
     };
   }
 
-  const detectedMimeType = detectMimeType(content, declaredMimeType);
+  const detectedMimeType = detectMimeType(content, declaredMimeType, filename);
 
   return { valid: true, detectedMimeType };
 }

@@ -140,7 +140,7 @@ export const AttachmentInputSchema = z
     filename: z.string().optional()
       .describe('Attachment filename. Defaults to basename(path); REQUIRED when using base64.'),
     mimeType: z.string().optional()
-      .describe('MIME type override. Defaults to magic-byte detection.'),
+      .describe('Optional MIME type hint. Overrides ZIP-container extension inference (Office/ODF documents are recognized without it); recognized JPEG/PNG/GIF/PDF magic bytes remain authoritative.'),
   })
   .refine(v => hasNonEmpty(v.path) !== hasNonEmpty(v.base64), {
     message: 'Each attachment must set exactly one of `path` or `base64`.',

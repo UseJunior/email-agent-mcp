@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MockEmailProvider } from '../testing/mock-provider.js';
-import { listAttachmentsAction, downloadAttachmentAction, detectMimeType, validateAttachment, sanitizeFilename } from './attachments.js';
+import { listAttachmentsAction, downloadAttachmentAction, detectMimeType, validateAttachment, sanitizeFilename, ZIP_CONTAINER_TYPES } from './attachments.js';
 import { AttachmentNotSupportedError, AttachmentNotFoundError } from '../providers/provider.js';
 import type { ActionContext } from './registry.js';
 
@@ -291,6 +291,10 @@ describe('email-attachments/Size and Type Validation', () => {
 });
 
 describe('email-attachments/Binary File Detection', () => {
+  // ZIP local file header (PK\x03\x04) — shared by plain archives and all
+  // OOXML/ODF documents.
+  const ZIP_BYTES = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x06, 0x00]);
+
   it('Scenario: MIME type detected from bytes', () => {
     // JPEG magic bytes (FF D8 FF)
     const jpegContent = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
@@ -298,6 +302,50 @@ describe('email-attachments/Binary File Detection', () => {
 
     // Should detect as image/jpeg despite declared text/plain
     expect(detected).toBe('image/jpeg');
+  });
+
+  it('Scenario: OOXML/ODF extensions disambiguate the generic ZIP magic (#98)', () => {
+    // Spot-check the flagship types map to the exact expected strings...
+    expect(detectMimeType(ZIP_BYTES, undefined, 'report.docx'))
+      .toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    expect(detectMimeType(ZIP_BYTES, undefined, 'sheet.xlsx'))
+      .toBe('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    expect(detectMimeType(ZIP_BYTES, undefined, 'deck.pptx'))
+      .toBe('application/vnd.openxmlformats-officedocument.presentationml.presentation');
+
+    // ...then cover EVERY mapped extension so the map and test cannot drift.
+    for (const [ext, expected] of Object.entries(ZIP_CONTAINER_TYPES)) {
+      expect(detectMimeType(ZIP_BYTES, undefined, `file${ext}`)).toBe(expected);
+      expect(expected).not.toBe('application/zip');
+    }
+  });
+
+  it('Scenario: extension match is case-insensitive', () => {
+    expect(detectMimeType(ZIP_BYTES, undefined, 'REPORT.DOCX'))
+      .toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+  });
+
+  it('Scenario: a plain .zip archive still detects as application/zip', () => {
+    expect(detectMimeType(ZIP_BYTES, undefined, 'archive.zip')).toBe('application/zip');
+    expect(detectMimeType(ZIP_BYTES, undefined, 'no-extension')).toBe('application/zip');
+    expect(detectMimeType(ZIP_BYTES)).toBe('application/zip');
+  });
+
+  it('Scenario: declared type wins over the generic ZIP magic', () => {
+    expect(detectMimeType(ZIP_BYTES, 'application/epub+zip', 'book.epub')).toBe('application/epub+zip');
+    // Declared beats the extension map too — an explicit override is authoritative.
+    expect(detectMimeType(ZIP_BYTES, 'application/zip', 'report.docx')).toBe('application/zip');
+  });
+
+  it('Scenario: specific magic matches still win over declared type', () => {
+    const pdfContent = Buffer.from('%PDF-1.4 body');
+    expect(detectMimeType(pdfContent, 'application/octet-stream', 'file.docx')).toBe('application/pdf');
+  });
+
+  it('Scenario: validateAttachment threads the filename into detection (#98)', () => {
+    const result = validateAttachment(ZIP_BYTES, 'contract.docx');
+    expect(result.valid).toBe(true);
+    expect(result.detectedMimeType).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
   });
 });
 
