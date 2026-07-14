@@ -16,16 +16,29 @@ const MAGIC_BYTES: [Buffer, string][] = [
 
 // OOXML and ODF documents are ZIP containers, so the PK magic alone cannot
 // distinguish them from a plain archive. Disambiguate by extension (#98).
-const ZIP_CONTAINER_TYPES: Record<string, string> = {
+export const ZIP_CONTAINER_TYPES: Record<string, string> = {
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.dotx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.template',
+  '.xltx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.template',
+  '.potx': 'application/vnd.openxmlformats-officedocument.presentationml.template',
+  '.ppsx': 'application/vnd.openxmlformats-officedocument.presentationml.slideshow',
   '.docm': 'application/vnd.ms-word.document.macroEnabled.12',
   '.xlsm': 'application/vnd.ms-excel.sheet.macroEnabled.12',
   '.pptm': 'application/vnd.ms-powerpoint.presentation.macroEnabled.12',
+  '.dotm': 'application/vnd.ms-word.template.macroEnabled.12',
+  '.xltm': 'application/vnd.ms-excel.template.macroEnabled.12',
+  '.potm': 'application/vnd.ms-powerpoint.template.macroEnabled.12',
+  '.ppsm': 'application/vnd.ms-powerpoint.slideshow.macroEnabled.12',
+  '.xlsb': 'application/vnd.ms-excel.sheet.binary.macroEnabled.12',
   '.odt': 'application/vnd.oasis.opendocument.text',
   '.ods': 'application/vnd.oasis.opendocument.spreadsheet',
   '.odp': 'application/vnd.oasis.opendocument.presentation',
+  '.odg': 'application/vnd.oasis.opendocument.graphics',
+  '.ott': 'application/vnd.oasis.opendocument.text-template',
+  '.ots': 'application/vnd.oasis.opendocument.spreadsheet-template',
+  '.otp': 'application/vnd.oasis.opendocument.presentation-template',
 };
 
 /**

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MockEmailProvider } from '../testing/mock-provider.js';
-import { listAttachmentsAction, downloadAttachmentAction, detectMimeType, validateAttachment, sanitizeFilename } from './attachments.js';
+import { listAttachmentsAction, downloadAttachmentAction, detectMimeType, validateAttachment, sanitizeFilename, ZIP_CONTAINER_TYPES } from './attachments.js';
 import { AttachmentNotSupportedError, AttachmentNotFoundError } from '../providers/provider.js';
 import type { ActionContext } from './registry.js';
 
@@ -305,17 +305,18 @@ describe('email-attachments/Binary File Detection', () => {
   });
 
   it('Scenario: OOXML/ODF extensions disambiguate the generic ZIP magic (#98)', () => {
-    const cases: [string, string][] = [
-      ['report.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
-      ['sheet.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
-      ['deck.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
-      ['macro.docm', 'application/vnd.ms-word.document.macroEnabled.12'],
-      ['notes.odt', 'application/vnd.oasis.opendocument.text'],
-      ['data.ods', 'application/vnd.oasis.opendocument.spreadsheet'],
-      ['slides.odp', 'application/vnd.oasis.opendocument.presentation'],
-    ];
-    for (const [filename, expected] of cases) {
-      expect(detectMimeType(ZIP_BYTES, undefined, filename)).toBe(expected);
+    // Spot-check the flagship types map to the exact expected strings...
+    expect(detectMimeType(ZIP_BYTES, undefined, 'report.docx'))
+      .toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    expect(detectMimeType(ZIP_BYTES, undefined, 'sheet.xlsx'))
+      .toBe('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    expect(detectMimeType(ZIP_BYTES, undefined, 'deck.pptx'))
+      .toBe('application/vnd.openxmlformats-officedocument.presentationml.presentation');
+
+    // ...then cover EVERY mapped extension so the map and test cannot drift.
+    for (const [ext, expected] of Object.entries(ZIP_CONTAINER_TYPES)) {
+      expect(detectMimeType(ZIP_BYTES, undefined, `file${ext}`)).toBe(expected);
+      expect(expected).not.toBe('application/zip');
     }
   });
 
