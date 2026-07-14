@@ -93,6 +93,23 @@ describe('outbound-attachments/send_email', () => {
     expect(att.content.equals(PDF_BYTES)).toBe(true);
   });
 
+  it('Scenario: .docx attachment gets the Word MIME type, not application/zip (#98)', async () => {
+    // OOXML files are ZIP containers — start with the PK magic.
+    const docxBytes = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x06, 0x00, 0x08, 0x00]);
+    await writeFile(join(testDir, 'term-sheet.docx'), docxBytes);
+
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Word doc',
+      body: 'body',
+      attachments: [{ path: 'term-sheet.docx' }],
+    });
+
+    expect(result.success).toBe(true);
+    expect(provider.getSentMessages()[0]!.attachments![0]!.mimeType)
+      .toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+  });
+
   it('Scenario: MIME inference overrides a wrong declared type', async () => {
     await writeFile(join(testDir, 'mystery.pdf'), PDF_BYTES);
 

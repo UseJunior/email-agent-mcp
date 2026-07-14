@@ -291,6 +291,10 @@ describe('email-attachments/Size and Type Validation', () => {
 });
 
 describe('email-attachments/Binary File Detection', () => {
+  // ZIP local file header (PK\x03\x04) — shared by plain archives and all
+  // OOXML/ODF documents.
+  const ZIP_BYTES = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x06, 0x00]);
+
   it('Scenario: MIME type detected from bytes', () => {
     // JPEG magic bytes (FF D8 FF)
     const jpegContent = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
@@ -298,6 +302,49 @@ describe('email-attachments/Binary File Detection', () => {
 
     // Should detect as image/jpeg despite declared text/plain
     expect(detected).toBe('image/jpeg');
+  });
+
+  it('Scenario: OOXML/ODF extensions disambiguate the generic ZIP magic (#98)', () => {
+    const cases: [string, string][] = [
+      ['report.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+      ['sheet.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+      ['deck.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+      ['macro.docm', 'application/vnd.ms-word.document.macroEnabled.12'],
+      ['notes.odt', 'application/vnd.oasis.opendocument.text'],
+      ['data.ods', 'application/vnd.oasis.opendocument.spreadsheet'],
+      ['slides.odp', 'application/vnd.oasis.opendocument.presentation'],
+    ];
+    for (const [filename, expected] of cases) {
+      expect(detectMimeType(ZIP_BYTES, undefined, filename)).toBe(expected);
+    }
+  });
+
+  it('Scenario: extension match is case-insensitive', () => {
+    expect(detectMimeType(ZIP_BYTES, undefined, 'REPORT.DOCX'))
+      .toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+  });
+
+  it('Scenario: a plain .zip archive still detects as application/zip', () => {
+    expect(detectMimeType(ZIP_BYTES, undefined, 'archive.zip')).toBe('application/zip');
+    expect(detectMimeType(ZIP_BYTES, undefined, 'no-extension')).toBe('application/zip');
+    expect(detectMimeType(ZIP_BYTES)).toBe('application/zip');
+  });
+
+  it('Scenario: declared type wins over the generic ZIP magic', () => {
+    expect(detectMimeType(ZIP_BYTES, 'application/epub+zip', 'book.epub')).toBe('application/epub+zip');
+    // Declared beats the extension map too — an explicit override is authoritative.
+    expect(detectMimeType(ZIP_BYTES, 'application/zip', 'report.docx')).toBe('application/zip');
+  });
+
+  it('Scenario: specific magic matches still win over declared type', () => {
+    const pdfContent = Buffer.from('%PDF-1.4 body');
+    expect(detectMimeType(pdfContent, 'application/octet-stream', 'file.docx')).toBe('application/pdf');
+  });
+
+  it('Scenario: validateAttachment threads the filename into detection (#98)', () => {
+    const result = validateAttachment(ZIP_BYTES, 'contract.docx');
+    expect(result.valid).toBe(true);
+    expect(result.detectedMimeType).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document');
   });
 });
 
