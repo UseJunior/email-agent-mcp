@@ -1272,6 +1272,38 @@ describe('provider-microsoft/Thread Lookup', () => {
     expect(thread.messageCount).toBe(3);
     expect(thread.messages.some(message => message.id === 'msg-newest')).toBe(true);
   });
+
+  it('Scenario: getThread stops at the pagination safety bound instead of looping forever', async () => {
+    // A pathological/looping @odata.nextLink (same URL returned repeatedly) must
+    // trip the visitedUrls guard: getThread breaks, warns to stderr, and returns
+    // what it fetched flagged as truncated — never hangs and never crashes.
+    const loopLink = 'https://graph.microsoft.com/v1.0/me/messages?$skiptoken=loop';
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const graphMessage = {
+      id: 'msg-loop',
+      subject: 'Looping thread',
+      conversationId: 'conv-loop',
+      from: { emailAddress: { address: 'alice@corp.com' } },
+      receivedDateTime: '2024-03-15T10:00:00Z',
+    };
+    const client = createMockClient({
+      get: vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/messages/msg-loop')) {
+          return Promise.resolve(graphMessage); // getMessage(anchor)
+        }
+        // Conversation query and every nextLink return the SAME nextLink.
+        return Promise.resolve({ value: [graphMessage], '@odata.nextLink': loopLink });
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const thread = await provider.getThread('msg-loop');
+
+    expect(thread.isTruncated).toBe(true);
+    expect(thread.messages.some(message => message.id === 'msg-loop')).toBe(true);
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
 });
 
 describe('provider-microsoft/Email Categorizer', () => {
