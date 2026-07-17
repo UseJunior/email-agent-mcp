@@ -40,12 +40,25 @@ export const getThreadAction: EmailAction<
   run: async (ctx, input) => {
     const thread = await ctx.provider.getThread(input.message_id);
 
-    // Gmail 100-message cap
+    // Keep the queried message available as the anchor even when it falls
+    // outside the newest window returned for a very long conversation.
     const MAX_THREAD_MESSAGES = 100;
-    const isTruncated = thread.messages.length > MAX_THREAD_MESSAGES;
-    const messages = isTruncated
-      ? thread.messages.slice(-MAX_THREAD_MESSAGES)
-      : thread.messages;
+    const messageCount = Math.max(thread.messageCount, thread.messages.length);
+    let messages = thread.messages.slice(-MAX_THREAD_MESSAGES);
+    const queriedMessage = thread.messages.find(message => message.id === input.message_id);
+
+    if (queriedMessage && !messages.some(message => message.id === input.message_id)) {
+      // The queried message is older than the newest window; keep it as the
+      // anchor. Prepend rather than re-sort: `receivedAt` is a provider-formatted
+      // string that is not guaranteed lexically chronological (Gmail carries the
+      // raw RFC 2822 Date header), and the anchor is by construction older than
+      // every message in the retained newest window, so position 0 is correct.
+      messages = [queriedMessage, ...messages.slice(-(MAX_THREAD_MESSAGES - 1))];
+    }
+
+    // Honor an explicit provider truncation signal (e.g. Gmail caps threads at
+    // 100 messages) as well as the count-derived check.
+    const isTruncated = thread.isTruncated === true || messages.length < messageCount;
 
     return {
       id: thread.id,
@@ -61,7 +74,7 @@ export const getThreadAction: EmailAction<
         body: m.body,
         isRead: m.isRead,
       })),
-      messageCount: thread.messages.length,
+      messageCount,
       isTruncated,
     };
   },

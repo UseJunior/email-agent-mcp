@@ -1170,9 +1170,139 @@ describe('provider-microsoft/Thread Lookup', () => {
     const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[1]![0] as string;
     const decodedUrl = decodeURIComponent(url).replaceAll('+', ' ');
     expect(decodedUrl).toContain("conversationId eq 'conv-123'");
-    expect(decodedUrl).not.toContain('$orderby=');
+    // No $orderby: Graph rejects an $orderby whose property isn't the $filter
+    // property (InefficientFilter); messages are sorted locally instead.
+    expect(decodedUrl).not.toContain('$orderby');
+    expect(decodedUrl).toContain('$top=50');
     expect(thread.messages[0]!.id).toBe('msg-1');
     expect(thread.messages[1]!.id).toBe('msg-2');
+  });
+
+  it('Scenario: getThread includes the queried message even when the conversation page omits it', async () => {
+    // Graph's conversationId index can lag a just-arrived message; the paged
+    // results below do NOT contain msg-new, but getThread must still surface it.
+    const client = createSchemaValidatingClient([
+      {
+        id: 'msg-new',
+        subject: 'Re: Thread root',
+        conversationId: 'conv-123',
+        from: { emailAddress: { address: 'carol@corp.com' } },
+        receivedDateTime: '2024-03-15T13:00:00Z',
+      },
+      {
+        value: [
+          {
+            id: 'msg-1',
+            subject: 'Thread root',
+            conversationId: 'conv-123',
+            from: { emailAddress: { address: 'alice@corp.com' } },
+            receivedDateTime: '2024-03-15T10:00:00Z',
+          },
+          {
+            id: 'msg-2',
+            subject: 'Re: Thread root',
+            conversationId: 'conv-123',
+            from: { emailAddress: { address: 'bob@corp.com' } },
+            receivedDateTime: '2024-03-15T11:00:00Z',
+          },
+        ],
+      },
+    ]);
+    const provider = new GraphEmailProvider(client);
+
+    const thread = await provider.getThread('msg-new');
+
+    expect(thread.messages.map(message => message.id)).toEqual(['msg-1', 'msg-2', 'msg-new']);
+    expect(thread.messageCount).toBe(3);
+    expect(thread.messages.some(message => message.id === 'msg-new')).toBe(true);
+  });
+
+  it('Scenario: getThread follows every page and includes the queried newest message', async () => {
+    const nextLink = 'https://graph.microsoft.com/v1.0/me/messages?$skiptoken=page-2';
+    const client = createSchemaValidatingClient([
+      {
+        id: 'msg-newest',
+        subject: 'Re: Thread root',
+        conversationId: 'conv-123',
+        from: { emailAddress: { address: 'alice@corp.com' } },
+        receivedDateTime: '2024-03-15T12:00:00Z',
+      },
+      {
+        value: [
+          {
+            id: 'msg-newest',
+            subject: 'Re: Thread root',
+            conversationId: 'conv-123',
+            from: { emailAddress: { address: 'alice@corp.com' } },
+            receivedDateTime: '2024-03-15T12:00:00Z',
+          },
+          {
+            id: 'msg-middle',
+            subject: 'Re: Thread root',
+            conversationId: 'conv-123',
+            from: { emailAddress: { address: 'bob@corp.com' } },
+            receivedDateTime: '2024-03-15T11:00:00Z',
+          },
+        ],
+        '@odata.nextLink': nextLink,
+      },
+      {
+        value: [
+          {
+            id: 'msg-oldest',
+            subject: 'Thread root',
+            conversationId: 'conv-123',
+            from: { emailAddress: { address: 'alice@corp.com' } },
+            receivedDateTime: '2024-03-15T10:00:00Z',
+          },
+        ],
+      },
+    ]);
+    const provider = new GraphEmailProvider(client);
+
+    const thread = await provider.getThread('msg-newest');
+
+    expect(client.get).toHaveBeenCalledTimes(3);
+    expect(client.get).toHaveBeenNthCalledWith(3, nextLink);
+    expect(thread.messages.map(message => message.id)).toEqual([
+      'msg-oldest',
+      'msg-middle',
+      'msg-newest',
+    ]);
+    expect(thread.messageCount).toBe(3);
+    expect(thread.messages.some(message => message.id === 'msg-newest')).toBe(true);
+  });
+
+  it('Scenario: getThread stops at the pagination safety bound instead of looping forever', async () => {
+    // A pathological/looping @odata.nextLink (same URL returned repeatedly) must
+    // trip the visitedUrls guard: getThread breaks, warns to stderr, and returns
+    // what it fetched flagged as truncated — never hangs and never crashes.
+    const loopLink = 'https://graph.microsoft.com/v1.0/me/messages?$skiptoken=loop';
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const graphMessage = {
+      id: 'msg-loop',
+      subject: 'Looping thread',
+      conversationId: 'conv-loop',
+      from: { emailAddress: { address: 'alice@corp.com' } },
+      receivedDateTime: '2024-03-15T10:00:00Z',
+    };
+    const client = createMockClient({
+      get: vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/messages/msg-loop')) {
+          return Promise.resolve(graphMessage); // getMessage(anchor)
+        }
+        // Conversation query and every nextLink return the SAME nextLink.
+        return Promise.resolve({ value: [graphMessage], '@odata.nextLink': loopLink });
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const thread = await provider.getThread('msg-loop');
+
+    expect(thread.isTruncated).toBe(true);
+    expect(thread.messages.some(message => message.id === 'msg-loop')).toBe(true);
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 });
 
