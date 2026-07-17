@@ -34,6 +34,7 @@ describe('email-threading/Get Thread', () => {
 
     expect(result.messages).toHaveLength(3);
     expect(result.messageCount).toBe(3);
+    expect(result.isTruncated).toBe(false);
     // Chronological order
     expect(result.messages[0]!.id).toBe('msg1');
     expect(result.messages[2]!.id).toBe('msg3');
@@ -105,10 +106,12 @@ describe('email-threading/Get Thread', () => {
 
     const result = await getThreadAction.run(ctx, { message_id: 'msg-0' });
 
-    // Returns most recent 100 and indicates truncation
+    // Returns the queried anchor plus the most recent 99 and indicates truncation
     expect(result.messages).toHaveLength(100);
     expect(result.messageCount).toBe(120);
     expect(result.isTruncated).toBe(true);
+    expect(result.messages.map(message => message.id)).toContain('msg-0');
+    expect(result.messages.at(-1)!.id).toBe('msg-119');
   });
 });
 

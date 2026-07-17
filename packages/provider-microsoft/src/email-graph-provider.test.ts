@@ -1170,9 +1170,66 @@ describe('provider-microsoft/Thread Lookup', () => {
     const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[1]![0] as string;
     const decodedUrl = decodeURIComponent(url).replaceAll('+', ' ');
     expect(decodedUrl).toContain("conversationId eq 'conv-123'");
-    expect(decodedUrl).not.toContain('$orderby=');
+    expect(decodedUrl).toContain('$orderby=receivedDateTime desc');
+    expect(decodedUrl).toContain('$top=50');
     expect(thread.messages[0]!.id).toBe('msg-1');
     expect(thread.messages[1]!.id).toBe('msg-2');
+  });
+
+  it('Scenario: getThread follows every page and includes the queried newest message', async () => {
+    const nextLink = 'https://graph.microsoft.com/v1.0/me/messages?$skiptoken=page-2';
+    const client = createSchemaValidatingClient([
+      {
+        id: 'msg-newest',
+        subject: 'Re: Thread root',
+        conversationId: 'conv-123',
+        from: { emailAddress: { address: 'alice@corp.com' } },
+        receivedDateTime: '2024-03-15T12:00:00Z',
+      },
+      {
+        value: [
+          {
+            id: 'msg-newest',
+            subject: 'Re: Thread root',
+            conversationId: 'conv-123',
+            from: { emailAddress: { address: 'alice@corp.com' } },
+            receivedDateTime: '2024-03-15T12:00:00Z',
+          },
+          {
+            id: 'msg-middle',
+            subject: 'Re: Thread root',
+            conversationId: 'conv-123',
+            from: { emailAddress: { address: 'bob@corp.com' } },
+            receivedDateTime: '2024-03-15T11:00:00Z',
+          },
+        ],
+        '@odata.nextLink': nextLink,
+      },
+      {
+        value: [
+          {
+            id: 'msg-oldest',
+            subject: 'Thread root',
+            conversationId: 'conv-123',
+            from: { emailAddress: { address: 'alice@corp.com' } },
+            receivedDateTime: '2024-03-15T10:00:00Z',
+          },
+        ],
+      },
+    ]);
+    const provider = new GraphEmailProvider(client);
+
+    const thread = await provider.getThread('msg-newest');
+
+    expect(client.get).toHaveBeenCalledTimes(3);
+    expect(client.get).toHaveBeenNthCalledWith(3, nextLink);
+    expect(thread.messages.map(message => message.id)).toEqual([
+      'msg-oldest',
+      'msg-middle',
+      'msg-newest',
+    ]);
+    expect(thread.messageCount).toBe(3);
+    expect(thread.messages.some(message => message.id === 'msg-newest')).toBe(true);
   });
 });
 

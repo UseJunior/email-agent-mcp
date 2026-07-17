@@ -321,8 +321,28 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     if (conversationId) {
       const params = new URLSearchParams();
       params.set('$filter', `conversationId eq '${conversationId}'`);
-      const response = await this.client.get(`${this.basePath}/messages?${params}`);
-      const messages = ((response.value ?? []) as GraphMessage[])
+      params.set('$orderby', 'receivedDateTime desc');
+      params.set('$top', '50');
+
+      const graphMessages: GraphMessage[] = [];
+      const visitedUrls = new Set<string>();
+      const maxPages = 100;
+      let url: string | undefined = `${this.basePath}/messages?${params}`;
+      let pageCount = 0;
+
+      while (url) {
+        if (pageCount >= maxPages || visitedUrls.has(url)) {
+          throw new Error(`Thread pagination safety limit exceeded for conversation ${conversationId}`);
+        }
+        visitedUrls.add(url);
+        pageCount += 1;
+
+        const response = await this.client.get(url) as GraphMessagePageResponse;
+        graphMessages.push(...(response.value ?? []));
+        url = response['@odata.nextLink'];
+      }
+
+      const messages = graphMessages
         .map(mapGraphMessage)
         .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
 
@@ -802,6 +822,11 @@ interface GraphMessage {
   internetMessageId?: string;
   internetMessageHeaders?: Array<{ name: string; value: string }>;
   attachments?: GraphAttachment[];
+}
+
+interface GraphMessagePageResponse {
+  value?: GraphMessage[];
+  '@odata.nextLink'?: string;
 }
 
 interface GraphAttachment {
