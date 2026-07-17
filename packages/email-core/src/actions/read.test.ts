@@ -42,7 +42,7 @@ describe('email-read/Read Email', () => {
     expect(result.attachments![0]!.filename).toBe('contract.pdf');
   });
 
-  it('Scenario: Read email surfaces cc and bcc recipients (issue #102)', async () => {
+  it('Scenario: Cc and Bcc recipients are always reported', async () => {
     provider.addMessage({
       id: 'msg-cc',
       subject: 'Re: follow-up from coffee',

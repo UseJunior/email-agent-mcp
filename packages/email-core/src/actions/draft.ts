@@ -220,9 +220,13 @@ export const sendDraftAction: EmailAction<
       };
     }
 
+    // All effective recipients — to, cc, AND bcc — must be gated. Providers now
+    // surface bcc on the sender's own copy (issue #102), so a bcc recipient that
+    // wasn't checked would be a silent allowlist bypass. Fail closed on every one.
     const recipients = [
       ...(draftMessage.to?.map(a => a.email) ?? []),
       ...(draftMessage.cc?.map(a => a.email) ?? []),
+      ...(draftMessage.bcc?.map(a => a.email) ?? []),
     ];
     if (recipients.length === 0) {
       return {

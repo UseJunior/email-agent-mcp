@@ -737,16 +737,17 @@ describe('mcp-transport/Lazy Provider State', () => {
     ]);
   });
 
-  it('Scenario: read_email omits cc field even when provider returns it (wire-shape parity with pre-PR MCP tool)', async () => {
-    // The pre-PR hand-rolled MCP `read_email` did not surface `cc`. The refactor delegates
-    // to readEmailAction (which returns `cc`), but the MCP adapter must drop it so the wire
-    // shape stays unchanged. Adding cc to the MCP surface is a separate, additive change.
+  it('Scenario: read_email surfaces cc and bcc on the MCP wire (issue #102)', async () => {
+    // Regression for issue #102: the MCP adapter used to strip `cc` and never
+    // surfaced `bcc`, so a caller could not tell "no Cc" from "Cc not reported"
+    // and could silently drop stakeholders when reasoning about reply-all scope.
     const getMessage = vi.fn().mockResolvedValue({
       id: 'msg-cc',
       subject: 'Has cc',
       from: { email: 'alice@corp.com', name: 'Alice' },
       to: [{ email: 'bob@corp.com', name: 'Bob' }],
       cc: [{ email: 'carol@corp.com', name: 'Carol' }],
+      bcc: [{ email: 'audit@corp.com' }],
       receivedAt: '2026-04-09T12:00:00.000Z',
       body: 'Hello.',
     });
@@ -773,13 +774,51 @@ describe('mcp-transport/Lazy Provider State', () => {
     const readEmail = actions.find(a => a.name === 'read_email')!;
     const result = await readEmail.run({}, { id: 'msg-cc' }) as Record<string, unknown>;
 
-    expect(result).not.toHaveProperty('cc');
     expect(result.id).toBe('msg-cc');
     expect(result.to).toEqual(['Bob <bob@corp.com>']);
-    // The action's full schema includes cc; the MCP output schema does NOT.
+    expect(result.cc).toEqual(['Carol <carol@corp.com>']);
+    expect(result.bcc).toEqual(['audit@corp.com']);
+    // The MCP output schema advertises cc and bcc as arrays.
     const schema = readEmail.output as { shape?: Record<string, unknown> };
     expect(schema.shape).toBeDefined();
-    expect(schema.shape!.cc).toBeUndefined();
+    expect(schema.shape!.cc).toBeDefined();
+    expect(schema.shape!.bcc).toBeDefined();
+  });
+
+  it('Scenario: read_email normalizes absent cc/bcc to empty arrays on the MCP wire (issue #102)', async () => {
+    const getMessage = vi.fn().mockResolvedValue({
+      id: 'msg-nocc',
+      subject: 'No cc',
+      from: { email: 'alice@corp.com', name: 'Alice' },
+      to: [{ email: 'bob@corp.com', name: 'Bob' }],
+      receivedAt: '2026-04-09T12:00:00.000Z',
+      body: 'Hello.',
+    });
+
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { getMessage } as never;
+    state.connectedMailbox = 'alice@corp.com';
+    state.mailboxes = [
+      {
+        name: 'alice',
+        emailAddress: 'alice@corp.com',
+        displayName: 'alice@corp.com',
+        providerType: 'gmail',
+        provider: { getMessage } as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const readEmail = actions.find(a => a.name === 'read_email')!;
+    const result = await readEmail.run({}, { id: 'msg-nocc' }) as Record<string, unknown>;
+
+    expect(result.cc).toEqual([]);
+    expect(result.bcc).toEqual([]);
   });
 
   it('Scenario: read_email exposes strip_quoted_history with default false', async () => {

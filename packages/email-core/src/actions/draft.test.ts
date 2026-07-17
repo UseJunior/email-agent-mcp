@@ -213,6 +213,25 @@ describe('email-write/Send Draft', () => {
     expect(result.error!.code).toBe('ALLOWLIST_BLOCKED');
   });
 
+  it('Scenario: send_draft with allowed To but blocked Bcc is blocked by allowlist (issue #102)', async () => {
+    // Providers now surface bcc on the sender's own copy of a draft, so bcc must
+    // be gated too — otherwise a blocked bcc recipient slips past the allowlist.
+    provider.addMessage({
+      id: 'draft-with-bcc',
+      subject: 'Bcc bypass attempt',
+      from: { email: 'me@company.com' },
+      to: [{ email: 'alice@allowed.com' }],
+      bcc: [{ email: 'hacker@evil.com' }],
+      body: 'Body',
+    });
+
+    const result = await sendDraftAction.run(ctx, { draft_id: 'draft-with-bcc' });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('ALLOWLIST_BLOCKED');
+    expect(provider.getSentMessages()).toHaveLength(0);
+  });
+
   it('Scenario: send_draft when draft lookup fails is blocked (fail closed)', async () => {
     // Use a draft_id that doesn't exist in drafts or messages
     const result = await sendDraftAction.run(ctx, {

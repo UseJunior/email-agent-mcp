@@ -305,11 +305,10 @@ const EmailAddressSchema = z.object({
 export const DraftPreviewSchema = z.object({
   to: z.array(EmailAddressSchema).optional(),
   cc: z.array(EmailAddressSchema).optional(),
-  // bcc intentionally omitted in v1: Gmail's mapGmailMessage at
-  // packages/provider-gmail/src/email-gmail-provider.ts (mapGmailMessage) does
-  // not parse the Bcc header, and Graph's mapGraphMessage similarly does not
-  // surface bcc on EmailMessage. Action-layer read-back cannot make
-  // preview.bcc meaningful without provider work; tracked as a follow-up.
+  // bcc is surfaced from the provider read-back: both Gmail's mapGmailMessage and
+  // Graph's mapGraphMessage now parse bcc on the sender's own copy (issue #102),
+  // so a draft preview can report the full recipient topology it will send with.
+  bcc: z.array(EmailAddressSchema).optional(),
   subject: z.string().optional(),
   body: z.string().optional(),
   bodyHtml: z.string().optional(),
@@ -407,6 +406,7 @@ export async function buildDraftPreview(
   const preview: DraftPreview = {
     to: persisted.to,
     cc: persisted.cc,
+    bcc: persisted.bcc,
     subject: persisted.subject,
   };
   if (persisted.body !== undefined) {
