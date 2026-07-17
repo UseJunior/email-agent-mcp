@@ -743,6 +743,8 @@ export async function buildLazyActions(
     subject: 'Demo mode',
     from: 'system@email-agent-mcp.dev',
     to: ['user@example.com'],
+    cc: [],
+    bcc: [],
     body: NO_MAILBOX_CONFIGURED_MESSAGE,
     receivedAt: new Date().toISOString(),
   });
@@ -789,7 +791,11 @@ export async function buildLazyActions(
         id: z.string(),
         subject: z.string(),
         from: z.string(),
+        // Recipient topology surfaced as explicit arrays (`[]` when none) so a
+        // caller can distinguish "no Cc" from "Cc not reported" — issue #102.
         to: z.array(z.string()),
+        cc: z.array(z.string()),
+        bcc: z.array(z.string()),
         body: z.string(),
         receivedAt: z.string(),
         attachments: z.array(z.object({
@@ -821,11 +827,11 @@ export async function buildLazyActions(
             strip_quoted_history: inp.strip_quoted_history ?? false,
           },
         );
-        // Drop `cc` — the pre-PR hand-rolled MCP tool did not return cc, so omit it
-        // here to keep the MCP wire shape unchanged. Adding cc to the MCP surface is
-        // a separate, additive wire change and is tracked separately.
-        const { cc: _cc, ...rest } = actionResult;
-        return rest;
+        // Return the canonical action result verbatim, including `cc`/`bcc`.
+        // Surfacing recipient topology is the fix for issue #102 — a caller
+        // deciding reply-all scope must see who was on Cc, and an omitted key
+        // reads as "no Cc" and silently drops recipients.
+        return actionResult;
       },
     },
     {

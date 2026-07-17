@@ -28,9 +28,16 @@ The system SHALL provide a `list_emails` action that returns recent emails filte
 
 The system SHALL provide a `read_email` action that returns the full content of a single email by ID, with the body transformed to token-efficient markdown via the content engine.
 
+The response SHALL surface recipient topology — `to`, `cc`, and `bcc` — as explicit arrays of `Name <email>` strings, returning an empty array `[]` (never a missing key) when a field has no recipients, so a caller can distinguish "no Cc recipients" from "Cc not reported." `bcc` is only populated on the sender's own copy of a message and is otherwise `[]`.
+
 #### Scenario: Read email with body and metadata
 - **WHEN** `read_email` is called with `{id: "msg123"}`
 - **THEN** the system returns the full email body as token-efficient markdown, sender, recipients, subject, timestamp, and attachment list
+
+#### Scenario: Cc and Bcc recipients are always reported
+- **WHEN** `read_email` is called for a message with Cc (and, on the sender's copy, Bcc) recipients
+- **THEN** the response includes `cc` (and `bcc`) as arrays of `Name <email>` entries
+- **AND** when a message has no Cc or Bcc recipients, `cc` and `bcc` are returned as empty arrays `[]` rather than omitted
 
 ### Requirement: Search Emails
 

@@ -121,6 +121,7 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
         from: { email: 'me@company.com' },
         to: draft.to,
         cc: draft.cc,
+        bcc: draft.bcc,
         receivedAt: new Date().toISOString(),
         isRead: true,
         hasAttachments: (attachments?.length ?? 0) > 0,

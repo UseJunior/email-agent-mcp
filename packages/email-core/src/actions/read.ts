@@ -16,8 +16,13 @@ const ReadEmailOutput = z.object({
   id: z.string(),
   subject: z.string(),
   from: z.string(),
+  // Recipient topology is always surfaced as explicit arrays so a caller can
+  // distinguish "no Cc recipients" (`[]`) from "not reported" — see issue #102.
+  // bcc is only ever populated on the sender's own copy of a message (the field
+  // is stripped from recipients' copies by design), so it is `[]` for most reads.
   to: z.array(z.string()),
-  cc: z.array(z.string()).optional(),
+  cc: z.array(z.string()),
+  bcc: z.array(z.string()),
   receivedAt: z.string(),
   body: z.string(),
   attachments: z.array(z.object({
@@ -58,7 +63,8 @@ export const readEmailAction: EmailAction<
       subject: msg.subject,
       from: msg.from.name ? `${msg.from.name} <${msg.from.email}>` : msg.from.email,
       to: msg.to.map(a => a.name ? `${a.name} <${a.email}>` : a.email),
-      cc: msg.cc?.map(a => a.name ? `${a.name} <${a.email}>` : a.email),
+      cc: (msg.cc ?? []).map(a => a.name ? `${a.name} <${a.email}>` : a.email),
+      bcc: (msg.bcc ?? []).map(a => a.name ? `${a.name} <${a.email}>` : a.email),
       receivedAt: msg.receivedAt,
       body,
       attachments: msg.attachments?.map(a => ({

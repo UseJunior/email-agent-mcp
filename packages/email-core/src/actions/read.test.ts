@@ -42,6 +42,48 @@ describe('email-read/Read Email', () => {
     expect(result.attachments![0]!.filename).toBe('contract.pdf');
   });
 
+  it('Scenario: Cc and Bcc recipients are always reported', async () => {
+    provider.addMessage({
+      id: 'msg-cc',
+      subject: 'Re: follow-up from coffee',
+      from: { email: 'alice@corp.com', name: 'Alice Smith' },
+      to: [
+        { email: 'bob@corp.com', name: 'Bob Jones' },
+        { email: 'nandita@corp.com', name: 'Nandita Sethi' },
+      ],
+      cc: [
+        { email: 'nadim@corp.com', name: 'Nadim Cheaib' },
+        { email: 'tiffany@corp.com', name: 'Tiffany Loer' },
+      ],
+      bcc: [{ email: 'audit@corp.com' }],
+      body: 'See you then.',
+    });
+
+    const result = await readEmailAction.run(ctx, { id: 'msg-cc' });
+
+    expect(result.to).toEqual(['Bob Jones <bob@corp.com>', 'Nandita Sethi <nandita@corp.com>']);
+    expect(result.cc).toEqual(['Nadim Cheaib <nadim@corp.com>', 'Tiffany Loer <tiffany@corp.com>']);
+    expect(result.bcc).toEqual(['audit@corp.com']);
+  });
+
+  it('Scenario: cc and bcc are explicit empty arrays when absent, never dropped (issue #102)', async () => {
+    // Absence of Cc must be unambiguous: an empty array, not a missing key. A
+    // missing key silently reads as "no Cc" and can drop stakeholders on a reply.
+    provider.addMessage({
+      id: 'msg-nocc',
+      from: { email: 'alice@corp.com', name: 'Alice Smith' },
+      to: [{ email: 'bob@corp.com', name: 'Bob Jones' }],
+      body: 'One-to-one note.',
+    });
+
+    const result = await readEmailAction.run(ctx, { id: 'msg-nocc' });
+
+    expect(result.cc).toEqual([]);
+    expect(result.bcc).toEqual([]);
+    expect('cc' in result).toBe(true);
+    expect('bcc' in result).toBe(true);
+  });
+
   it('Scenario: strip_quoted_history omitted preserves full thread', async () => {
     provider.addMessage({
       id: 'msg-thread',

@@ -328,7 +328,10 @@ export class GmailEmailProvider {
       const merged: ComposeMessage = {
         to: msg.to ?? current.to,
         cc: msg.cc ?? current.cc,
-        bcc: msg.bcc, // bcc is never exposed on EmailMessage, so only caller can set it
+        // Preserve the draft's existing bcc on a partial update: providers now
+        // read bcc back on the sender's own copy (issue #102), so falling back to
+        // current.bcc (like cc) keeps a bcc from being silently dropped.
+        bcc: msg.bcc ?? current.bcc,
         subject: msg.subject ?? current.subject,
         body: msg.body ?? current.body ?? '',
         bodyHtml: msg.bodyHtml ?? current.bodyHtml,
@@ -431,11 +434,12 @@ function collectPayloadContent(msg: GmailMessage): {
 
 function mapGmailMessage(msg: GmailMessage): EmailMessage {
   const from = parseEmailAddress(getHeader(msg, 'From') ?? '');
-  const to = (getHeader(msg, 'To') ?? '').split(',').map(a => parseEmailAddress(a.trim())).filter(a => a.email);
-  const ccHeader = getHeader(msg, 'Cc');
-  const cc = ccHeader
-    ? ccHeader.split(',').map(a => parseEmailAddress(a.trim())).filter(a => a.email)
-    : undefined;
+  const to = parseAddressList(getHeader(msg, 'To')) ?? [];
+  const cc = parseAddressList(getHeader(msg, 'Cc'));
+  // A Bcc header only survives on the sender's own copy of a message; recipients'
+  // copies have it stripped. Surface it when present for full recipient topology
+  // on read_email (issue #102).
+  const bcc = parseAddressList(getHeader(msg, 'Bcc'));
   const subject = getHeader(msg, 'Subject') ?? '';
   const date = getHeader(msg, 'Date') ?? new Date(parseInt(msg.internalDate ?? '0', 10)).toISOString();
 
@@ -457,6 +461,7 @@ function mapGmailMessage(msg: GmailMessage): EmailMessage {
     from,
     to,
     cc,
+    bcc,
     receivedAt: date,
     isRead: !labels.includes('UNREAD'),
     hasAttachments: attachments.length > 0,
@@ -543,6 +548,39 @@ function isNotFoundError(err: unknown): boolean {
   if (record.code === 404) return true;
   if (record.response && typeof record.response === 'object' && record.response.status === 404) return true;
   return false;
+}
+
+/**
+ * Split an RFC 5322 address-list header into individual mailbox tokens on the
+ * commas that separate addresses, ignoring commas inside a quoted display name.
+ * A plain `.split(',')` corrupts last-name-first display names such as
+ * `"Doe, Jane" <jane@x>` into bogus entries (`"Doe` / `Jane" <jane@x>`).
+ * Returns `undefined` when the header is absent/empty so callers can leave the
+ * field unset; otherwise an array of parsed addresses (empty if none valid).
+ */
+function parseAddressList(header: string | undefined): { email: string; name?: string }[] | undefined {
+  if (!header) return undefined;
+  const tokens: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < header.length; i++) {
+    const ch = header[i]!;
+    if (ch === '\\' && inQuotes) {
+      // Preserve an escaped character (e.g. `\"`) verbatim inside a quoted name.
+      current += ch + (header[i + 1] ?? '');
+      i++;
+    } else if (ch === '"') {
+      inQuotes = !inQuotes;
+      current += ch;
+    } else if (ch === ',' && !inQuotes) {
+      tokens.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  tokens.push(current);
+  return tokens.map(t => parseEmailAddress(t.trim())).filter(a => a.email);
 }
 
 function parseEmailAddress(raw: string): { email: string; name?: string } {

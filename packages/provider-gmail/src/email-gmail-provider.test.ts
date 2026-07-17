@@ -50,6 +50,87 @@ describe('provider-gmail/Message Mapping', () => {
     expect(msg.isRead).toBe(false); // Has UNREAD label
   });
 
+  it('Scenario: Cc and Bcc headers map to cc/bcc arrays (issue #102)', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue({
+        id: 'msg-cc',
+        threadId: 'thread-cc',
+        labelIds: ['INBOX'],
+        payload: {
+          headers: [
+            { name: 'From', value: '"Alice Smith" <alice@corp.com>' },
+            { name: 'To', value: '"Bob Jones" <bob@corp.com>' },
+            { name: 'Cc', value: '"Nadim Cheaib" <nadim@corp.com>, "Tiffany Loer" <tiffany@corp.com>' },
+            { name: 'Bcc', value: 'audit@corp.com' },
+            { name: 'Subject', value: 'Re: follow-up from coffee' },
+            { name: 'Date', value: '2024-03-15T10:00:00Z' },
+          ],
+          body: { data: Buffer.from('See you then.').toString('base64url') },
+        },
+      }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const msg = await provider.getMessage('msg-cc');
+
+    expect(msg.cc).toEqual([
+      { email: 'nadim@corp.com', name: 'Nadim Cheaib' },
+      { email: 'tiffany@corp.com', name: 'Tiffany Loer' },
+    ]);
+    expect(msg.bcc).toEqual([{ email: 'audit@corp.com', name: undefined }]);
+  });
+
+  it('Scenario: To/Cc/Bcc with quoted-comma display names parse without corruption (issue #102)', async () => {
+    // Last-name-first display names like "Doe, Jane" contain a comma inside the
+    // quoted name. A naive split(',') would shatter them into bogus addresses.
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue({
+        id: 'msg-quoted',
+        threadId: 'thread-quoted',
+        labelIds: ['INBOX'],
+        payload: {
+          headers: [
+            { name: 'From', value: 'alice@corp.com' },
+            { name: 'To', value: '"Doe, Jane" <jane@example.com>, audit@example.com' },
+            { name: 'Cc', value: '"Loer, Tiffany" <tiffany@corp.com>, "Cheaib, Nadim" <nadim@corp.com>' },
+            { name: 'Bcc', value: '"Smith, Bob" <bob@corp.com>, ops@corp.com' },
+            { name: 'Subject', value: 'Quoted commas' },
+            { name: 'Date', value: '2024-03-15T10:00:00Z' },
+          ],
+          body: { data: Buffer.from('Body').toString('base64url') },
+        },
+      }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const msg = await provider.getMessage('msg-quoted');
+
+    expect(msg.to).toEqual([
+      { email: 'jane@example.com', name: 'Doe, Jane' },
+      { email: 'audit@example.com', name: undefined },
+    ]);
+    expect(msg.cc).toEqual([
+      { email: 'tiffany@corp.com', name: 'Loer, Tiffany' },
+      { email: 'nadim@corp.com', name: 'Cheaib, Nadim' },
+    ]);
+    expect(msg.bcc).toEqual([
+      { email: 'bob@corp.com', name: 'Smith, Bob' },
+      { email: 'ops@corp.com', name: undefined },
+    ]);
+  });
+
+  it('Scenario: cc/bcc are undefined when the message carries no such headers (issue #102)', async () => {
+    // The provider leaves cc/bcc undefined; the read_email action normalizes the
+    // absence to an explicit [] so callers never see a dropped key.
+    const client = createMockGmailClient();
+    const provider = new GmailEmailProvider(client);
+
+    const msg = await provider.getMessage('msg-1');
+
+    expect(msg.cc).toBeUndefined();
+    expect(msg.bcc).toBeUndefined();
+  });
+
   it('Scenario: multipart Gmail messages expose attachment metadata and inline content ids', async () => {
     const client = createMockGmailClient({
       getMessage: vi.fn().mockResolvedValue({

@@ -39,6 +39,31 @@ describe('email-threading/Get Thread', () => {
     expect(result.messages[2]!.id).toBe('msg3');
   });
 
+  it('Scenario: Thread messages surface recipient topology as explicit arrays (issue #102)', async () => {
+    provider.addMessage({
+      id: 'm1', subject: 'Re: follow-up from coffee', conversationId: 'conv-x',
+      from: { email: 'alice@corp.com', name: 'Alice Smith' },
+      to: [{ email: 'bob@corp.com', name: 'Bob Jones' }],
+      cc: [{ email: 'nadim@corp.com', name: 'Nadim Cheaib' }],
+      receivedAt: '2024-03-15T10:00:00Z', isRead: true, hasAttachments: false,
+    });
+    // Second message has no cc/bcc — must come back as [] arrays, not missing keys.
+    provider.addMessage({
+      id: 'm2', subject: 'Re: follow-up from coffee', conversationId: 'conv-x',
+      from: { email: 'bob@corp.com', name: 'Bob Jones' },
+      to: [{ email: 'alice@corp.com', name: 'Alice Smith' }],
+      receivedAt: '2024-03-15T11:00:00Z', isRead: false, hasAttachments: false,
+    });
+
+    const result = await getThreadAction.run(ctx, { message_id: 'm1' });
+
+    expect(result.messages[0]!.to).toEqual(['Bob Jones <bob@corp.com>']);
+    expect(result.messages[0]!.cc).toEqual(['Nadim Cheaib <nadim@corp.com>']);
+    expect(result.messages[0]!.bcc).toEqual([]);
+    expect(result.messages[1]!.cc).toEqual([]);
+    expect(result.messages[1]!.bcc).toEqual([]);
+  });
+
   it('Scenario: Graph subject-change breakage', async () => {
     // Messages in same thread but Graph broke conversationId due to subject change
     // Use RFC headers to reconstruct
