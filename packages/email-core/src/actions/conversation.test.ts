@@ -113,6 +113,59 @@ describe('email-threading/Get Thread', () => {
     expect(result.messages.map(message => message.id)).toContain('msg-0');
     expect(result.messages.at(-1)!.id).toBe('msg-119');
   });
+
+  it('Scenario: honors a provider-reported isTruncated flag even when counts match', async () => {
+    // A provider may cap a thread and report it explicitly (e.g. Gmail's 100-msg
+    // cap) without the returned array being shorter than messageCount. The action
+    // must not report the thread as complete in that case.
+    const truncatingCtx = {
+      provider: {
+        getThread: async () => ({
+          id: 'conv-capped',
+          subject: 'Capped',
+          messages: [
+            { id: 'a', subject: 'Capped', from: { email: 'x@corp.com' }, to: [], cc: [], bcc: [], receivedAt: '2024-03-15T10:00:00Z', isRead: true },
+          ],
+          messageCount: 1,
+          isTruncated: true,
+        }),
+      },
+    } as unknown as ActionContext;
+
+    const result = await getThreadAction.run(truncatingCtx, { message_id: 'a' });
+
+    expect(result.isTruncated).toBe(true);
+  });
+
+  it('Scenario: anchor is placed chronologically when receivedAt is not lexically sortable', async () => {
+    // Gmail carries the raw RFC 2822 Date header in receivedAt; weekday-prefixed
+    // strings do NOT sort lexically by time. With 101 messages the queried oldest
+    // message falls outside the newest-100 window and is re-inserted as the
+    // anchor — this must stay chronological (prepend), not re-sort lexically.
+    for (let i = 0; i <= 100; i++) {
+      provider.addMessage({
+        id: `msg-${i}`,
+        subject: 'RFC Thread',
+        conversationId: 'rfc-thread',
+        from: { email: 'alice@corp.com' },
+        // One message per day → weekday prefix cycles, so lexical order != time order.
+        receivedAt: new Date(Date.UTC(2024, 0, 1 + i)).toUTCString(),
+        isRead: true,
+        hasAttachments: false,
+      });
+    }
+
+    const result = await getThreadAction.run(ctx, { message_id: 'msg-0' });
+
+    expect(result.messages).toHaveLength(100);
+    expect(result.messages[0]!.id).toBe('msg-0'); // anchor first
+    expect(result.messages.at(-1)!.id).toBe('msg-100'); // newest last
+    // The retained window (after the anchor) is strictly increasing in time.
+    const times = result.messages.slice(1).map(m => new Date(m.receivedAt).getTime());
+    for (let i = 1; i < times.length; i++) {
+      expect(times[i]!).toBeGreaterThan(times[i - 1]!);
+    }
+  });
 });
 
 describe('email-threading/RFC Header Fallback', () => {

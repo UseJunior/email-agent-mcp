@@ -48,11 +48,17 @@ export const getThreadAction: EmailAction<
     const queriedMessage = thread.messages.find(message => message.id === input.message_id);
 
     if (queriedMessage && !messages.some(message => message.id === input.message_id)) {
-      messages = [queriedMessage, ...messages.slice(-(MAX_THREAD_MESSAGES - 1))]
-        .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
+      // The queried message is older than the newest window; keep it as the
+      // anchor. Prepend rather than re-sort: `receivedAt` is a provider-formatted
+      // string that is not guaranteed lexically chronological (Gmail carries the
+      // raw RFC 2822 Date header), and the anchor is by construction older than
+      // every message in the retained newest window, so position 0 is correct.
+      messages = [queriedMessage, ...messages.slice(-(MAX_THREAD_MESSAGES - 1))];
     }
 
-    const isTruncated = messages.length < messageCount;
+    // Honor an explicit provider truncation signal (e.g. Gmail caps threads at
+    // 100 messages) as well as the count-derived check.
+    const isTruncated = thread.isTruncated === true || messages.length < messageCount;
 
     return {
       id: thread.id,

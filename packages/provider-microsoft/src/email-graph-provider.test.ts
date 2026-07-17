@@ -1170,10 +1170,51 @@ describe('provider-microsoft/Thread Lookup', () => {
     const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[1]![0] as string;
     const decodedUrl = decodeURIComponent(url).replaceAll('+', ' ');
     expect(decodedUrl).toContain("conversationId eq 'conv-123'");
-    expect(decodedUrl).toContain('$orderby=receivedDateTime desc');
+    // No $orderby: Graph rejects an $orderby whose property isn't the $filter
+    // property (InefficientFilter); messages are sorted locally instead.
+    expect(decodedUrl).not.toContain('$orderby');
     expect(decodedUrl).toContain('$top=50');
     expect(thread.messages[0]!.id).toBe('msg-1');
     expect(thread.messages[1]!.id).toBe('msg-2');
+  });
+
+  it('Scenario: getThread includes the queried message even when the conversation page omits it', async () => {
+    // Graph's conversationId index can lag a just-arrived message; the paged
+    // results below do NOT contain msg-new, but getThread must still surface it.
+    const client = createSchemaValidatingClient([
+      {
+        id: 'msg-new',
+        subject: 'Re: Thread root',
+        conversationId: 'conv-123',
+        from: { emailAddress: { address: 'carol@corp.com' } },
+        receivedDateTime: '2024-03-15T13:00:00Z',
+      },
+      {
+        value: [
+          {
+            id: 'msg-1',
+            subject: 'Thread root',
+            conversationId: 'conv-123',
+            from: { emailAddress: { address: 'alice@corp.com' } },
+            receivedDateTime: '2024-03-15T10:00:00Z',
+          },
+          {
+            id: 'msg-2',
+            subject: 'Re: Thread root',
+            conversationId: 'conv-123',
+            from: { emailAddress: { address: 'bob@corp.com' } },
+            receivedDateTime: '2024-03-15T11:00:00Z',
+          },
+        ],
+      },
+    ]);
+    const provider = new GraphEmailProvider(client);
+
+    const thread = await provider.getThread('msg-new');
+
+    expect(thread.messages.map(message => message.id)).toEqual(['msg-1', 'msg-2', 'msg-new']);
+    expect(thread.messageCount).toBe(3);
+    expect(thread.messages.some(message => message.id === 'msg-new')).toBe(true);
   });
 
   it('Scenario: getThread follows every page and includes the queried newest message', async () => {

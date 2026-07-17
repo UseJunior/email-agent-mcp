@@ -321,36 +321,55 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     if (conversationId) {
       const params = new URLSearchParams();
       params.set('$filter', `conversationId eq '${conversationId}'`);
-      params.set('$orderby', 'receivedDateTime desc');
+      // No `$orderby`: Graph rejects (`InefficientFilter`) an `$orderby` on a
+      // property that isn't also the `$filter` property, and we fetch every
+      // page and sort locally anyway — so ordering server-side buys nothing.
       params.set('$top', '50');
 
       const graphMessages: GraphMessage[] = [];
       const visitedUrls = new Set<string>();
       const maxPages = 100;
       let url: string | undefined = `${this.basePath}/messages?${params}`;
-      let pageCount = 0;
+      let truncated = false;
 
+      // Page through the whole conversation (follow @odata.nextLink). The
+      // maxPages / visitedUrls guards bound a pathological or looping nextLink;
+      // on hitting them we stop and return what we have (flagged truncated)
+      // rather than throwing away every message already fetched.
       while (url) {
-        if (pageCount >= maxPages || visitedUrls.has(url)) {
-          throw new Error(`Thread pagination safety limit exceeded for conversation ${conversationId}`);
+        if (visitedUrls.size >= maxPages || visitedUrls.has(url)) {
+          console.warn(
+            `[GraphEmailProvider] getThread hit pagination safety limit for conversation ${conversationId}; returning ${graphMessages.length} messages fetched so far`,
+          );
+          truncated = true;
+          break;
         }
         visitedUrls.add(url);
-        pageCount += 1;
 
         const response = await this.client.get(url) as GraphMessagePageResponse;
         graphMessages.push(...(response.value ?? []));
         url = response['@odata.nextLink'];
       }
 
-      const messages = graphMessages
+      let messages = graphMessages
         .map(mapGraphMessage)
         .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
+
+      // Guarantee the queried message is present. The conversationId index can
+      // lag a just-arrived message (Graph eventual consistency), so if the
+      // paged results omit it, splice in the copy we already fetched above so
+      // get_thread(id) always anchors on and includes the passed id.
+      // receivedDateTime is ISO 8601 here, so localeCompare sorts chronologically.
+      if (!messages.some(m => m.id === message.id)) {
+        messages = [...messages, message].sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
+      }
 
       return {
         id: conversationId,
         subject: message.subject,
         messages,
         messageCount: messages.length,
+        ...(truncated ? { isTruncated: true } : {}),
       };
     }
 
