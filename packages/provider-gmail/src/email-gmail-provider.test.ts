@@ -50,6 +50,48 @@ describe('provider-gmail/Message Mapping', () => {
     expect(msg.isRead).toBe(false); // Has UNREAD label
   });
 
+  it('Scenario: Cc and Bcc headers map to cc/bcc arrays (issue #102)', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue({
+        id: 'msg-cc',
+        threadId: 'thread-cc',
+        labelIds: ['INBOX'],
+        payload: {
+          headers: [
+            { name: 'From', value: '"Alice Smith" <alice@corp.com>' },
+            { name: 'To', value: '"Bob Jones" <bob@corp.com>' },
+            { name: 'Cc', value: '"Nadim Cheaib" <nadim@corp.com>, "Tiffany Loer" <tiffany@corp.com>' },
+            { name: 'Bcc', value: 'audit@corp.com' },
+            { name: 'Subject', value: 'Re: follow-up from coffee' },
+            { name: 'Date', value: '2024-03-15T10:00:00Z' },
+          ],
+          body: { data: Buffer.from('See you then.').toString('base64url') },
+        },
+      }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const msg = await provider.getMessage('msg-cc');
+
+    expect(msg.cc).toEqual([
+      { email: 'nadim@corp.com', name: 'Nadim Cheaib' },
+      { email: 'tiffany@corp.com', name: 'Tiffany Loer' },
+    ]);
+    expect(msg.bcc).toEqual([{ email: 'audit@corp.com', name: undefined }]);
+  });
+
+  it('Scenario: cc/bcc are undefined when the message carries no such headers (issue #102)', async () => {
+    // The provider leaves cc/bcc undefined; the read_email action normalizes the
+    // absence to an explicit [] so callers never see a dropped key.
+    const client = createMockGmailClient();
+    const provider = new GmailEmailProvider(client);
+
+    const msg = await provider.getMessage('msg-1');
+
+    expect(msg.cc).toBeUndefined();
+    expect(msg.bcc).toBeUndefined();
+  });
+
   it('Scenario: multipart Gmail messages expose attachment metadata and inline content ids', async () => {
     const client = createMockGmailClient({
       getMessage: vi.fn().mockResolvedValue({

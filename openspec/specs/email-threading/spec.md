@@ -9,11 +9,12 @@ Defines conversation thread retrieval and assembly. Uses provider-native thread 
 
 ### Requirement: Get Thread
 
-The system SHALL provide a `get_thread` action that returns all messages in a conversation, ordered chronologically, with content engine transformations applied per message.
+The system SHALL provide a `get_thread` action that returns all messages in a conversation, ordered chronologically, with content engine transformations applied per message. Each returned message SHALL surface recipient topology — `to`, `cc`, and `bcc` — as explicit arrays of `Name <email>` strings, returning an empty array `[]` (never a missing key) when a field has no recipients, so a caller reasoning about reply-all scope can see who was on each message.
 
 #### Scenario: Retrieve thread by message ID
 - **WHEN** `get_thread` is called with `{message_id: "msg123"}`
 - **THEN** the system identifies the conversation and returns all messages in chronological order
+- **AND** each message reports `to`, `cc`, and `bcc` as arrays of `Name <email>` entries, using `[]` when a field has no recipients
 
 #### Scenario: Graph subject-change breakage
 - **WHEN** the conversation subject was changed mid-thread (Graph breaks `conversationId`)

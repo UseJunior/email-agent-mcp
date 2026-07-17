@@ -791,6 +791,7 @@ interface GraphMessage {
   from?: { emailAddress: { address: string; name?: string } };
   toRecipients?: Array<{ emailAddress: { address: string; name?: string } }>;
   ccRecipients?: Array<{ emailAddress: { address: string; name?: string } }>;
+  bccRecipients?: Array<{ emailAddress: { address: string; name?: string } }>;
   receivedDateTime?: string;
   isRead?: boolean;
   hasAttachments?: boolean;
@@ -848,6 +849,13 @@ function mapGraphMessage(msg: GraphMessage): EmailMessage {
       name: r.emailAddress.name,
     })),
     cc: (msg.ccRecipients ?? []).map(r => ({
+      email: r.emailAddress.address,
+      name: r.emailAddress.name,
+    })),
+    // bccRecipients is only populated by Graph on the sender's own copy of a
+    // message; recipients' copies omit it. Surface it when present so read_email
+    // can report full recipient topology (issue #102).
+    bcc: (msg.bccRecipients ?? []).map(r => ({
       email: r.emailAddress.address,
       name: r.emailAddress.name,
     })),

@@ -232,6 +232,52 @@ describe('provider-microsoft/Message Mapping', () => {
       '/me/messages/msg-attachments/attachments?$select=id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId',
     );
   });
+
+  it('Scenario: getMessage maps ccRecipients and bccRecipients (issue #102)', async () => {
+    const client = createSchemaValidatingClient([
+      {
+        id: 'msg-cc',
+        subject: 'Re: follow-up from coffee',
+        from: { emailAddress: { address: 'alice@corp.com', name: 'Alice Smith' } },
+        toRecipients: [{ emailAddress: { address: 'bob@corp.com', name: 'Bob Jones' } }],
+        ccRecipients: [
+          { emailAddress: { address: 'nadim@corp.com', name: 'Nadim Cheaib' } },
+          { emailAddress: { address: 'tiffany@corp.com', name: 'Tiffany Loer' } },
+        ],
+        bccRecipients: [{ emailAddress: { address: 'audit@corp.com' } }],
+        receivedDateTime: '2026-04-09T12:00:00Z',
+        hasAttachments: false,
+      },
+    ]);
+    const provider = new GraphEmailProvider(client);
+
+    const msg = await provider.getMessage('msg-cc');
+
+    expect(msg.cc).toEqual([
+      { email: 'nadim@corp.com', name: 'Nadim Cheaib' },
+      { email: 'tiffany@corp.com', name: 'Tiffany Loer' },
+    ]);
+    expect(msg.bcc).toEqual([{ email: 'audit@corp.com', name: undefined }]);
+  });
+
+  it('Scenario: getMessage yields empty cc/bcc arrays when Graph omits them (issue #102)', async () => {
+    const client = createSchemaValidatingClient([
+      {
+        id: 'msg-nocc',
+        subject: 'One-to-one',
+        from: { emailAddress: { address: 'alice@corp.com' } },
+        toRecipients: [{ emailAddress: { address: 'bob@corp.com' } }],
+        receivedDateTime: '2026-04-09T12:00:00Z',
+        hasAttachments: false,
+      },
+    ]);
+    const provider = new GraphEmailProvider(client);
+
+    const msg = await provider.getMessage('msg-nocc');
+
+    expect(msg.cc).toEqual([]);
+    expect(msg.bcc).toEqual([]);
+  });
 });
 
 describe('provider-microsoft/Attachment Download', () => {

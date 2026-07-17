@@ -436,6 +436,13 @@ function mapGmailMessage(msg: GmailMessage): EmailMessage {
   const cc = ccHeader
     ? ccHeader.split(',').map(a => parseEmailAddress(a.trim())).filter(a => a.email)
     : undefined;
+  // A Bcc header only survives on the sender's own copy of a message; recipients'
+  // copies have it stripped. Surface it when present for full recipient topology
+  // on read_email (issue #102).
+  const bccHeader = getHeader(msg, 'Bcc');
+  const bcc = bccHeader
+    ? bccHeader.split(',').map(a => parseEmailAddress(a.trim())).filter(a => a.email)
+    : undefined;
   const subject = getHeader(msg, 'Subject') ?? '';
   const date = getHeader(msg, 'Date') ?? new Date(parseInt(msg.internalDate ?? '0', 10)).toISOString();
 
@@ -457,6 +464,7 @@ function mapGmailMessage(msg: GmailMessage): EmailMessage {
     from,
     to,
     cc,
+    bcc,
     receivedAt: date,
     isRead: !labels.includes('UNREAD'),
     hasAttachments: attachments.length > 0,

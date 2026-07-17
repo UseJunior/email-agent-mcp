@@ -14,6 +14,12 @@ const GetThreadOutput = z.object({
     id: z.string(),
     subject: z.string(),
     from: z.string(),
+    // Recipient topology per message as explicit arrays (`[]` when none), so a
+    // caller reasoning about reply-all scope on a multi-party thread can see who
+    // was on To/Cc rather than inferring absence from a missing field — issue #102.
+    to: z.array(z.string()),
+    cc: z.array(z.string()),
+    bcc: z.array(z.string()),
     receivedAt: z.string(),
     body: z.string().optional(),
     isRead: z.boolean(),
@@ -48,6 +54,9 @@ export const getThreadAction: EmailAction<
         id: m.id,
         subject: m.subject,
         from: m.from.name ? `${m.from.name} <${m.from.email}>` : m.from.email,
+        to: m.to.map(a => a.name ? `${a.name} <${a.email}>` : a.email),
+        cc: (m.cc ?? []).map(a => a.name ? `${a.name} <${a.email}>` : a.email),
+        bcc: (m.bcc ?? []).map(a => a.name ? `${a.name} <${a.email}>` : a.email),
         receivedAt: m.receivedAt,
         body: m.body,
         isRead: m.isRead,
