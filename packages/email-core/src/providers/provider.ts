@@ -53,8 +53,60 @@ export interface EmailAttachmentHandler {
   downloadAttachment(messageId: string, attachmentId: string): Promise<DownloadedAttachment>;
 }
 
+export interface EmailFolder {
+  id: string;
+  displayName: string;
+  path: string;
+  parentFolderId?: string;
+  childFolderCount?: number;
+  unreadItemCount?: number;
+  totalItemCount?: number;
+  isHidden?: boolean;
+  [key: string]: unknown;
+}
+
+export interface EmailFolderManager {
+  listFolders(): Promise<EmailFolder[]>;
+  createFolder(displayName: string, parentFolder?: string): Promise<EmailFolder>;
+  deleteFolder(folder: string): Promise<void>;
+}
+
+export interface InboxRule {
+  id?: string;
+  displayName?: string;
+  sequence?: number;
+  isEnabled?: boolean;
+  hasError?: boolean;
+  isReadOnly?: boolean;
+  conditions?: Record<string, unknown>;
+  exceptions?: Record<string, unknown>;
+  actions?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface CreateInboxRule {
+  displayName: string;
+  sequence?: number;
+  isEnabled?: boolean;
+  conditions: Record<string, unknown>;
+  exceptions?: Record<string, unknown>;
+  actions: Record<string, unknown>;
+}
+
+export interface EmailRuleManager {
+  listInboxRules(): Promise<InboxRule[]>;
+  createInboxRule(rule: CreateInboxRule): Promise<InboxRule>;
+  deleteInboxRule(id: string): Promise<void>;
+}
+
 // Combined provider type — providers implement what they support
-export type EmailProvider = EmailReader & EmailSender & Partial<EmailSubscriber> & Partial<EmailCategorizer> & Partial<EmailAttachmentHandler>;
+export type EmailProvider = EmailReader
+  & EmailSender
+  & Partial<EmailSubscriber>
+  & Partial<EmailCategorizer>
+  & Partial<EmailAttachmentHandler>
+  & Partial<EmailFolderManager>
+  & Partial<EmailRuleManager>;
 
 // Provider metadata for registration
 export interface ProviderInfo {
@@ -65,7 +117,7 @@ export interface ProviderInfo {
   // support both. Note: no provider currently exports a ProviderInfo value —
   // this is a forward-compat type surface; wiring a real metadata surface
   // that declares these is a follow-up.
-  capabilities: ('read' | 'send' | 'subscribe' | 'categorize' | 'attachments' | 'outbound-attachments')[];
+  capabilities: ('read' | 'send' | 'subscribe' | 'categorize' | 'attachments' | 'outbound-attachments' | 'folders' | 'rules')[];
 }
 
 // Error normalization

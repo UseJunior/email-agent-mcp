@@ -23,6 +23,12 @@ describe('provider-interface/Dynamic discovery — dist exports', () => {
     expect(emailCore.markReadAction).toBeDefined();
     expect(emailCore.moveToFolderAction).toBeDefined();
     expect(emailCore.deleteEmailAction).toBeDefined();
+    expect(emailCore.listFoldersAction).toBeDefined();
+    expect(emailCore.createFolderAction).toBeDefined();
+    expect(emailCore.deleteFolderAction).toBeDefined();
+    expect(emailCore.listInboxRulesAction).toBeDefined();
+    expect(emailCore.createInboxRuleAction).toBeDefined();
+    expect(emailCore.deleteInboxRuleAction).toBeDefined();
   });
 
   it('Scenario: Microsoft provider exports all public symbols', async () => {

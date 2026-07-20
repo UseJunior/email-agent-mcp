@@ -14,9 +14,14 @@ import type {
   EmailSender,
   EmailCategorizer,
   EmailAttachmentHandler,
+  EmailFolderManager,
+  EmailRuleManager,
+  EmailFolder,
+  InboxRule,
+  CreateInboxRule,
   DownloadedAttachment,
 } from '@usejunior/email-core';
-import { AttachmentNotSupportedError, AttachmentNotFoundError } from '@usejunior/email-core';
+import { AttachmentNotSupportedError, AttachmentNotFoundError, ProviderError } from '@usejunior/email-core';
 
 const BODY_SIZE_LIMIT = 3.5 * 1024 * 1024; // 3.5MB
 const SUBJECT_MAX_LENGTH = 255;
@@ -107,6 +112,33 @@ const WELL_KNOWN_FOLDER_ALIASES: Record<string, string> = {
   spam: 'junkemail',
   trash: 'deleteditems',
 };
+
+const SYSTEM_FOLDER_NAMES = [
+  'archive',
+  'clutter',
+  'conflicts',
+  'conversationhistory',
+  'deleteditems',
+  'drafts',
+  'inbox',
+  'junkemail',
+  'localfailures',
+  'msgfolderroot',
+  'outbox',
+  'recoverableitemsdeletions',
+  'scheduled',
+  'searchfolders',
+  'sentitems',
+  'serverfailures',
+  'syncissues',
+] as const;
+
+const SYSTEM_FOLDER_NAME_SET = new Set<string>([
+  ...SYSTEM_FOLDER_NAMES,
+  ...Object.keys(WELL_KNOWN_FOLDER_ALIASES),
+]);
+const FOLDER_CACHE_TTL_MS = 60_000;
+const FOLDER_SELECT = '$select=id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount,isHidden';
 
 export interface GraphApiClient {
   get(url: string): Promise<{ value?: unknown[]; [key: string]: unknown }>;
@@ -231,9 +263,11 @@ export class GraphApiError extends Error {
   }
 }
 
-export class GraphEmailProvider implements EmailReader, EmailSender, EmailCategorizer, EmailAttachmentHandler {
+export class GraphEmailProvider implements EmailReader, EmailSender, EmailCategorizer, EmailAttachmentHandler, EmailFolderManager, EmailRuleManager {
   private client: GraphApiClient;
   private basePath: string;
+  private folderCache?: { expiresAt: number; folders: EmailFolder[] };
+  private systemFolderIdsCache?: { expiresAt: number; ids: Set<string> };
 
   constructor(client: GraphApiClient, userId = 'me') {
     this.client = client;
@@ -481,10 +515,99 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
 
   async moveToFolder(messageId: string, folder: string): Promise<string> {
     // Graph POST /move returns the moved message with a NEW id
+    const destinationId = await this.resolveFolderId(folder);
     const result = await this.client.post(`${this.basePath}/messages/${encodeGraphPathId(messageId)}/move`, {
-      destinationId: normalizeFolderId(folder),
+      destinationId,
     });
     return result.id ?? messageId;
+  }
+
+  async listFolders(): Promise<EmailFolder[]> {
+    const folders = await this.getFolderSnapshot();
+    return folders.map(folder => ({ ...folder }));
+  }
+
+  async createFolder(displayName: string, parentFolder = 'inbox'): Promise<EmailFolder> {
+    const trimmedName = displayName.trim();
+    if (!trimmedName) {
+      throw new ProviderError('INVALID_FOLDER_NAME', 'Folder display name cannot be empty', 'microsoft', false);
+    }
+
+    const parentId = await this.resolveFolderId(parentFolder);
+    const parentPath = await this.folderPathFor(parentFolder, parentId);
+    const created = await this.client.post(
+      `${this.basePath}/mailFolders/${encodeGraphPathId(parentId)}/childFolders`,
+      { displayName: trimmedName },
+    ) as unknown as GraphMailFolder;
+
+    this.invalidateFolderCaches();
+    return mapGraphFolder(created, parentPath ? `${parentPath}/${trimmedName}` : trimmedName);
+  }
+
+  async deleteFolder(folder: string): Promise<void> {
+    const normalizedInput = normalizeFolderLookup(folder);
+    if (SYSTEM_FOLDER_NAME_SET.has(normalizedInput)) {
+      throw systemFolderProtectedError(folder);
+    }
+
+    const folderId = await this.resolveFolderId(folder);
+    const systemFolderIds = await this.getSystemFolderIds();
+    if (systemFolderIds.has(folderId)) {
+      throw systemFolderProtectedError(folder);
+    }
+
+    await this.client.delete(`${this.basePath}/mailFolders/${encodeGraphPathId(folderId)}`);
+    this.invalidateFolderCaches();
+  }
+
+  async listInboxRules(): Promise<InboxRule[]> {
+    const rules: InboxRule[] = [];
+    const visitedUrls = new Set<string>();
+    let url: string | undefined = `${this.basePath}/mailFolders/inbox/messageRules`;
+
+    while (url) {
+      if (visitedUrls.has(url) || visitedUrls.size >= 100) {
+        throw new ProviderError('PAGINATION_LIMIT', 'Inbox rule pagination exceeded its safety limit', 'microsoft', false);
+      }
+      visitedUrls.add(url);
+      const response = await this.client.get(url) as GraphRulePageResponse;
+      rules.push(...(response.value ?? []));
+      url = response['@odata.nextLink'];
+    }
+
+    return rules;
+  }
+
+  async createInboxRule(rule: CreateInboxRule): Promise<InboxRule> {
+    for (const blocked of ['forwardTo', 'forwardAsAttachmentTo', 'redirectTo', 'delete']) {
+      if (Object.hasOwn(rule.actions, blocked)) {
+        throw new ProviderError(
+          'UNSAFE_RULE_ACTION',
+          `Inbox rule action '${blocked}' is blocked for security`,
+          'microsoft',
+          false,
+        );
+      }
+    }
+
+    const actions = { ...rule.actions };
+    for (const folderAction of ['moveToFolder', 'copyToFolder'] as const) {
+      const destination = actions[folderAction];
+      if (typeof destination === 'string') {
+        actions[folderAction] = await this.resolveFolderId(destination);
+      }
+    }
+
+    return await this.client.post(`${this.basePath}/mailFolders/inbox/messageRules`, {
+      ...rule,
+      actions,
+    }) as InboxRule;
+  }
+
+  async deleteInboxRule(id: string): Promise<void> {
+    await this.client.delete(
+      `${this.basePath}/mailFolders/inbox/messageRules/${encodeGraphPathId(id)}`,
+    );
   }
 
   async deleteMessage(messageId: string, hard = false): Promise<void> {
@@ -822,6 +945,127 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       ? response.categories.filter((value): value is string => typeof value === 'string')
       : [];
   }
+
+  private async getFolderSnapshot(): Promise<EmailFolder[]> {
+    const now = Date.now();
+    if (this.folderCache && this.folderCache.expiresAt > now) {
+      return this.folderCache.folders;
+    }
+
+    const folders = await this.fetchFolderCollection(
+      `${this.basePath}/mailFolders?${FOLDER_SELECT}&$top=100&includeHiddenFolders=true`,
+      '',
+      new Set<string>(),
+    );
+    this.folderCache = { expiresAt: now + FOLDER_CACHE_TTL_MS, folders };
+    return folders;
+  }
+
+  private async fetchFolderCollection(
+    initialUrl: string,
+    parentPath: string,
+    visitedFolderIds: Set<string>,
+  ): Promise<EmailFolder[]> {
+    const folders: EmailFolder[] = [];
+    const visitedUrls = new Set<string>();
+    let url: string | undefined = initialUrl;
+
+    while (url) {
+      if (visitedUrls.has(url) || visitedUrls.size >= 100) {
+        throw new ProviderError('PAGINATION_LIMIT', 'Folder pagination exceeded its safety limit', 'microsoft', false);
+      }
+      visitedUrls.add(url);
+      const response = await this.client.get(url) as GraphFolderPageResponse;
+
+      for (const graphFolder of response.value ?? []) {
+        if (!graphFolder.id || visitedFolderIds.has(graphFolder.id)) continue;
+        visitedFolderIds.add(graphFolder.id);
+        const path = parentPath ? `${parentPath}/${graphFolder.displayName}` : graphFolder.displayName;
+        folders.push(mapGraphFolder(graphFolder, path));
+
+        if ((graphFolder.childFolderCount ?? 0) > 0) {
+          folders.push(...await this.fetchFolderCollection(
+            `${this.basePath}/mailFolders/${encodeGraphPathId(graphFolder.id)}/childFolders?${FOLDER_SELECT}&$top=100&includeHiddenFolders=true`,
+            path,
+            visitedFolderIds,
+          ));
+        }
+      }
+
+      url = response['@odata.nextLink'];
+    }
+
+    return folders;
+  }
+
+  private async resolveFolderId(folder: string): Promise<string> {
+    const trimmed = folder.trim();
+    const normalized = normalizeFolderLookup(trimmed);
+    const wellKnown = WELL_KNOWN_FOLDER_ALIASES[normalized]
+      ?? (SYSTEM_FOLDER_NAME_SET.has(normalized) ? normalized : undefined);
+    if (wellKnown) return wellKnown;
+
+    const folders = await this.getFolderSnapshot();
+    const idMatch = folders.find(candidate => candidate.id === trimmed);
+    if (idMatch) return idMatch.id;
+
+    const pathMatches = folders.filter(candidate => normalizeFolderLookup(candidate.path) === normalized);
+    if (pathMatches.length === 1) return pathMatches[0]!.id;
+
+    const nameMatches = folders.filter(
+      candidate => normalizeFolderLookup(candidate.displayName) === normalized,
+    );
+    if (nameMatches.length === 1) return nameMatches[0]!.id;
+    if (nameMatches.length > 1) {
+      throw new ProviderError(
+        'AMBIGUOUS_FOLDER',
+        `Folder name '${folder}' is ambiguous; use a full folder path`,
+        'microsoft',
+        false,
+      );
+    }
+
+    throw new ProviderError('FOLDER_NOT_FOUND', `Folder '${folder}' was not found`, 'microsoft', false);
+  }
+
+  private async folderPathFor(folder: string, folderId: string): Promise<string> {
+    const normalized = normalizeFolderLookup(folder);
+    const wellKnown = WELL_KNOWN_FOLDER_ALIASES[normalized]
+      ?? (SYSTEM_FOLDER_NAME_SET.has(normalized) ? normalized : undefined);
+    if (wellKnown) return displayNameForWellKnownFolder(wellKnown);
+
+    const folders = await this.getFolderSnapshot();
+    return folders.find(candidate => candidate.id === folderId)?.path ?? folder.trim();
+  }
+
+  private async getSystemFolderIds(): Promise<Set<string>> {
+    const now = Date.now();
+    if (this.systemFolderIdsCache && this.systemFolderIdsCache.expiresAt > now) {
+      return this.systemFolderIdsCache.ids;
+    }
+
+    const ids = new Set<string>();
+    for (const name of SYSTEM_FOLDER_NAMES) {
+      try {
+        const folder = await this.client.get(
+          `${this.basePath}/mailFolders/${encodeGraphPathId(name)}?${FOLDER_SELECT}`,
+        ) as unknown as GraphMailFolder;
+        if (folder.id) ids.add(folder.id);
+      } catch (err) {
+        // Some tenants do not provision every optional system folder.
+        if (err instanceof GraphApiError && err.status === 404) continue;
+        throw err;
+      }
+    }
+
+    this.systemFolderIdsCache = { expiresAt: now + FOLDER_CACHE_TTL_MS, ids };
+    return ids;
+  }
+
+  private invalidateFolderCaches(): void {
+    this.folderCache = undefined;
+    this.systemFolderIdsCache = undefined;
+  }
 }
 
 interface GraphMessage {
@@ -845,6 +1089,27 @@ interface GraphMessage {
 
 interface GraphMessagePageResponse {
   value?: GraphMessage[];
+  '@odata.nextLink'?: string;
+}
+
+interface GraphMailFolder {
+  id: string;
+  displayName: string;
+  parentFolderId?: string;
+  childFolderCount?: number;
+  unreadItemCount?: number;
+  totalItemCount?: number;
+  isHidden?: boolean;
+  [key: string]: unknown;
+}
+
+interface GraphFolderPageResponse {
+  value?: GraphMailFolder[];
+  '@odata.nextLink'?: string;
+}
+
+interface GraphRulePageResponse {
+  value?: InboxRule[];
   '@odata.nextLink'?: string;
 }
 
@@ -918,6 +1183,36 @@ function mapGraphMessage(msg: GraphMessage): EmailMessage {
 
 function normalizeFolderId(folder: string): string {
   return WELL_KNOWN_FOLDER_ALIASES[folder.trim().toLowerCase()] ?? folder;
+}
+
+function normalizeFolderLookup(folder: string): string {
+  return folder.trim().replace(/^\/+|\/+$/g, '').toLowerCase();
+}
+
+function displayNameForWellKnownFolder(folder: string): string {
+  const names: Record<string, string> = {
+    archive: 'Archive',
+    deleteditems: 'Deleted Items',
+    drafts: 'Drafts',
+    inbox: 'Inbox',
+    junkemail: 'Junk Email',
+    outbox: 'Outbox',
+    sentitems: 'Sent Items',
+  };
+  return names[folder] ?? folder;
+}
+
+function mapGraphFolder(folder: GraphMailFolder, path: string): EmailFolder {
+  return { ...folder, path };
+}
+
+function systemFolderProtectedError(folder: string): ProviderError {
+  return new ProviderError(
+    'SYSTEM_FOLDER_PROTECTED',
+    `System folder '${folder}' cannot be deleted`,
+    'microsoft',
+    false,
+  );
 }
 
 /**

@@ -11,12 +11,13 @@ import { GraphApiError } from './email-graph-provider.js';
 // Enable MSAL persistent cache (OS keychain on macOS, DPAPI on Windows, libsecret on Linux)
 useIdentityPlugin(cachePersistencePlugin);
 
-export const GRAPH_SCOPES = ['Mail.Read', 'Mail.ReadWrite', 'Mail.Send', 'User.Read', 'offline_access'];
+export const GRAPH_SCOPES = ['Mail.Read', 'Mail.ReadWrite', 'Mail.Send', 'MailboxSettings.ReadWrite', 'User.Read', 'offline_access'];
 // Full URL scopes for device code flow (ensures correct audience in the token)
 export const GRAPH_SCOPES_FULL = [
   'https://graph.microsoft.com/Mail.Read',
   'https://graph.microsoft.com/Mail.ReadWrite',
   'https://graph.microsoft.com/Mail.Send',
+  'https://graph.microsoft.com/MailboxSettings.ReadWrite',
   'https://graph.microsoft.com/User.Read',
   'offline_access',
 ];

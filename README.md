@@ -142,7 +142,7 @@ If your mailbox status name is not an email address, pass `--reply-sender <email
 
 ## Tool Reference
 
-Agent Email exposes 15 MCP tools:
+Agent Email exposes 23 MCP tools:
 
 | Tool | Description | Type |
 |------|-------------|------|
@@ -151,6 +151,8 @@ Agent Email exposes 15 MCP tools:
 | `search_emails` | Full-text search across mailboxes | read |
 | `get_mailbox_status` | Connection status and warnings | read |
 | `get_thread` | Full conversation context | read |
+| `list_attachments` | List attachment metadata for an email | read |
+| `download_attachment` | Download a file attachment as base64 | read |
 | `send_email` | Send new email (allowlist-gated) | write |
 | `reply_to_email` | Reply within thread (allowlist-gated on send) | write |
 | `create_draft` | Create email draft | write |
@@ -161,6 +163,14 @@ Agent Email exposes 15 MCP tools:
 | `mark_read` | Mark as read/unread | write |
 | `move_to_folder` | Move between folders | write |
 | `delete_email` | Delete (requires operator env + caller flag) | destructive |
+| `list_folders` | Recursively list folders and computed paths (Microsoft 365) | read |
+| `create_folder` | Create a custom child folder (Microsoft 365) | write |
+| `delete_folder` | Delete a custom folder; system folders are protected (Microsoft 365) | destructive |
+| `list_inbox_rules` | List server-side inbox rules (Microsoft 365) | read |
+| `create_inbox_rule` | Create a human-approved safe inbox rule; forwarding/redirection/deletion are blocked (Microsoft 365) | write |
+| `delete_inbox_rule` | Delete a server-side inbox rule (Microsoft 365) | destructive |
+
+Folder and inbox-rule management requires Microsoft Graph `MailboxSettings.ReadWrite` consent. Existing Microsoft mailbox connections must re-consent after upgrading. Gmail uses labels rather than hierarchical folders/server-side Exchange rules, so these six tools return `NOT_SUPPORTED` for Gmail mailboxes.
 
 ### Outbound attachments
 
