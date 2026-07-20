@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { GraphEmailProvider, type GraphApiClient } from './email-graph-provider.js';
+import { GraphEmailProvider, GraphApiError, type GraphApiClient } from './email-graph-provider.js';
 
 function createMockClient(overrides: Partial<GraphApiClient> = {}): GraphApiClient {
   return {
@@ -423,7 +423,8 @@ describe('provider-microsoft/Round-2 Codex probes (PR #106)', () => {
       if (url.startsWith('/me/mailFolders?') || url.includes('/childFolders?')) {
         return { value: [{ id: `f-${get.mock.calls.length}`, displayName: 'Target', childFolderCount: 1 }] };
       }
-      throw new Error(`Unexpected URL: ${url}`);
+      // 'Target' is a name, not an id — the direct-GET fallback 404s.
+      throw new GraphApiError(404, 'ErrorItemNotFound');
     });
     const provider = new GraphEmailProvider(createMockClient({ get }));
 
@@ -432,12 +433,17 @@ describe('provider-microsoft/Round-2 Codex probes (PR #106)', () => {
     });
   });
 
-  it('Scenario: An exact folder id still resolves against a truncated tree', async () => {
+  it('Scenario: An exact folder id resolves even when it lies beyond the truncation prefix', async () => {
+    // The wanted id is NEVER in the traversed tree (every listed folder is a
+    // decoy that claims a child, forcing truncation). Resolution must fall back
+    // to a direct GET of the id rather than failing with FOLDER_TRAVERSAL_LIMIT.
     const get = vi.fn(async (url: string) => {
       if (url.startsWith('/me/mailFolders?') || url.includes('/childFolders?')) {
         const n = get.mock.calls.length;
-        return { value: [{ id: n === 1 ? 'wanted-id' : `f-${n}`, displayName: `F${n}`, childFolderCount: 1 }] };
+        return { value: [{ id: `decoy-${n}`, displayName: `F${n}`, childFolderCount: 1 }] };
       }
+      // Direct single-folder GET fallback for the exact id.
+      if (url.includes('/mailFolders/wanted-id')) return { id: 'wanted-id' };
       throw new Error(`Unexpected URL: ${url}`);
     });
     const post = vi.fn().mockResolvedValue({ id: 'moved-id' });
@@ -446,5 +452,24 @@ describe('provider-microsoft/Round-2 Codex probes (PR #106)', () => {
     const newId = await provider.moveToFolder('msg-1', 'wanted-id');
     expect(newId).toBe('moved-id');
     expect(post).toHaveBeenCalledWith('/me/messages/msg-1/move', { destinationId: 'wanted-id' });
+  });
+
+  it('Scenario: A non-id name beyond the truncation prefix still fails closed', async () => {
+    // The direct-GET fallback 404s for a name, so we must NOT misroute — the
+    // move fails with FOLDER_TRAVERSAL_LIMIT rather than guessing.
+    const get = vi.fn(async (url: string) => {
+      if (url.startsWith('/me/mailFolders?') || url.includes('/childFolders?')) {
+        const n = get.mock.calls.length;
+        return { value: [{ id: `decoy-${n}`, displayName: `F${n}`, childFolderCount: 1 }] };
+      }
+      throw new GraphApiError(404, 'ErrorItemNotFound');
+    });
+    const post = vi.fn();
+    const provider = new GraphEmailProvider(createMockClient({ get, post }));
+
+    await expect(provider.moveToFolder('msg-1', 'Some Folder Name')).rejects.toMatchObject({
+      code: 'FOLDER_TRAVERSAL_LIMIT',
+    });
+    expect(post).not.toHaveBeenCalled();
   });
 });

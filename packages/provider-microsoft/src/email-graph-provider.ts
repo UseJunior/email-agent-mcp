@@ -1125,6 +1125,12 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     // exist beyond the request budget), so refuse to guess — returning a
     // visible-but-maybe-not-unique match could misroute a write. Ids only.
     if (truncated) {
+      // The exact id might simply lie beyond the truncated prefix. An id is
+      // globally unique, so a direct GET is a safe, O(1) way to honor
+      // "exact ids resolve without depending on a full traversal".
+      const directId = await this.tryResolveFolderById(trimmed);
+      if (directId) return directId;
+
       throw new ProviderError(
         'FOLDER_TRAVERSAL_LIMIT',
         `Folder '${folder}' could not be uniquely resolved: this mailbox has more folders than a single traversal enumerates (${MAX_FOLDER_REQUESTS_PER_SNAPSHOT} requests). Specify the folder by id.`,
@@ -1158,6 +1164,25 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     }
 
     throw new ProviderError('FOLDER_NOT_FOUND', `Folder '${folder}' was not found`, 'microsoft', false);
+  }
+
+  /**
+   * Verify a string is a real folder id via a direct GET. Returns the id on a
+   * 200, undefined on 404 (not an id / no such folder). Used only as a fallback
+   * when the tree was truncated, so a valid id past the budget still resolves.
+   */
+  private async tryResolveFolderById(id: string): Promise<string | undefined> {
+    try {
+      const folder = await this.client.get(
+        `${this.basePath}/mailFolders/${encodeGraphPathId(id)}?$select=id`,
+      ) as unknown as GraphMailFolder;
+      return folder.id ?? undefined;
+    } catch (err) {
+      if (err instanceof GraphApiError && (err.status === 404 || err.status === 400)) {
+        return undefined;
+      }
+      throw err;
+    }
   }
 
   /**
