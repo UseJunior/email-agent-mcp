@@ -77,13 +77,21 @@ const CreateInboxRuleOutput = z.object({
 
 const BLOCKED_ACTIONS = ['forwardTo', 'forwardAsAttachmentTo', 'redirectTo', 'delete'] as const;
 // Destinations that discard mail — filing into these is equivalent to `delete`.
-// Covers the user-facing aliases providers map onto the deleted-items folder.
+// Covers the user-facing aliases plus the system-managed non-user folders the
+// provider also rejects (kept in sync with DESTRUCTIVE_RULE_DESTINATIONS in the
+// Microsoft provider). This is a fast, provider-independent reject; the provider
+// re-checks by resolved id in case a custom folder name maps onto one of these.
 const DESTRUCTIVE_DESTINATIONS = new Set([
   'trash',
   'deleted',
   'deleteditems',
   'deleted items',
   'recoverableitemsdeletions',
+  'scheduled',
+  'serverfailures',
+  'localfailures',
+  'syncissues',
+  'conflicts',
 ]);
 const SAFE_ACTIONS = new Set([
   'assignCategories',
@@ -137,8 +145,11 @@ export const createInboxRuleAction: EmailAction<
     // aliases; this is the fast, provider-independent rejection.
     for (const folderAction of ['moveToFolder', 'copyToFolder'] as const) {
       const destination = input.actions[folderAction];
+      // Normalize the same way the provider resolves (strip surrounding slashes
+      // + lowercase), so alias tricks like `/trash/` don't slip past this
+      // fast-path pre-filter. The provider re-checks the fully resolved folder.
       if (typeof destination === 'string'
-        && DESTRUCTIVE_DESTINATIONS.has(destination.trim().toLowerCase())) {
+        && DESTRUCTIVE_DESTINATIONS.has(destination.trim().replace(/^\/+|\/+$/g, '').toLowerCase())) {
         return actionError(
           'UNSAFE_RULE_DESTINATION',
           `Inbox rule destination '${destination}' discards mail and is blocked for security`,

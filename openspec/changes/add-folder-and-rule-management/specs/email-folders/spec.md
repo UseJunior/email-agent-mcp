@@ -60,16 +60,29 @@ Recursive folder traversal MUST be bounded by a request budget shared across the
 - **THEN** the result is not written to the folder cache, so the next call retries from scratch
 
 #### Scenario: Refuse to infer absence from a truncated tree
-- **WHEN** a folder name cannot be found in a truncated snapshot
-- **THEN** the system returns `FOLDER_TRAVERSAL_LIMIT`, not `FOLDER_NOT_FOUND`
+- **WHEN** a folder NAME or PATH match is the only candidate in a truncated snapshot
+- **THEN** the system returns `FOLDER_TRAVERSAL_LIMIT` rather than assuming the visible match is unique
+- **AND** an exact folder-id match still resolves, because ids are globally unique
 
-### Requirement: Fresh Resolution For Write Operations
+### Requirement: Fresh Resolution For Structural And Rule Writes
 
-Folder name/path resolution for mutating operations (message moves, folder create/delete, rule destinations) MUST NOT be answered from the cached folder snapshot. A cached path-to-id mapping can point at a folder that was renamed or relocated out from under it, silently writing to the wrong destination.
+Folder name/path resolution for operations that MUTATE the folder tree (`create_folder` parent, `delete_folder` target) and for inbox-rule destinations MUST NOT be answered from the cached folder snapshot. These are low-frequency and either unrecoverable (deleting the wrong folder) or persistent (a rule that acts 24/7), so a stale path-to-id mapping is worth one fresh traversal to avoid.
 
-#### Scenario: Re-resolve before a move
-- **WHEN** `move_to_folder` resolves a custom folder name
-- **THEN** the provider refreshes the folder tree before selecting the destination id
+#### Scenario: Re-resolve before a structural mutation
+- **WHEN** `create_folder` or `delete_folder` resolves its target folder
+- **THEN** the provider refreshes the folder tree before selecting the id
+
+#### Scenario: Re-resolve a rule destination
+- **WHEN** `create_inbox_rule` resolves a custom folder destination
+- **THEN** the provider refreshes the folder tree and resolves to an opaque folder id
+
+### Requirement: Cached Resolution For Message Moves
+
+`move_to_folder` name resolution SHALL be permitted to use the cached folder snapshot rather than forcing a fresh traversal. A move does not alter the folder tree, runs in high-volume triage loops, and its worst-case staleness (a message filed into a renamed-but-valid folder within the 60s TTL) is recoverable — so forcing a fresh traversal per move, which would trip Graph throttling on the exact workload this feature targets, is the wrong trade. An exact folder id MUST still resolve without depending on a fresh traversal.
+
+#### Scenario: Repeated moves reuse the cache
+- **WHEN** several `move_to_folder` calls target custom folders within the cache TTL
+- **THEN** only the first performs a folder traversal; the rest are served from cache
 
 #### Scenario: Reads still use the cache
 - **WHEN** `list_folders` is called twice within the cache TTL

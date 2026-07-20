@@ -164,14 +164,17 @@ const BLOCKED_RULE_ACTIONS = new Set([
   'redirectto',
   'delete',
 ]);
-const SAFE_RULE_ACTIONS = new Set([
-  'assigncategories',
-  'copytofolder',
-  'markasread',
-  'markimportance',
-  'movetofolder',
-  'stopprocessingrules',
-]);
+// Normalized (lowercased) safe action key -> canonical Graph camelCase key.
+// Doubles as the allowlist: a key absent here is rejected. Keys are normalized
+// before lookup so `MoveToFolder`/`MOVETOFOLDER` all map to `moveToFolder`.
+const CANONICAL_RULE_ACTIONS: Record<string, string> = {
+  assigncategories: 'assignCategories',
+  copytofolder: 'copyToFolder',
+  markasread: 'markAsRead',
+  markimportance: 'markImportance',
+  movetofolder: 'moveToFolder',
+  stopprocessingrules: 'stopProcessingRules',
+};
 const FOLDER_SELECT = '$select=id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount,isHidden';
 
 export interface GraphApiClient {
@@ -301,7 +304,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   private client: GraphApiClient;
   private basePath: string;
   private folderCache?: { expiresAt: number; folders: EmailFolder[] };
-  private systemFolderIdsCache?: { expiresAt: number; ids: Set<string> };
+  private systemFolderIdsCache?: { expiresAt: number; idsByName: Map<string, string> };
 
   constructor(client: GraphApiClient, userId = 'me') {
     this.client = client;
@@ -548,8 +551,13 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   }
 
   async moveToFolder(messageId: string, folder: string): Promise<string> {
-    // Graph POST /move returns the moved message with a NEW id
-    const destinationId = await this.resolveFolderId(folder, true);
+    // Graph POST /move returns the moved message with a NEW id.
+    // Resolve against the cache (not forWrite): a move does not alter the folder
+    // tree, and a triage loop can move dozens of messages per pass — forcing a
+    // fresh traversal per move would trip Graph throttling. The residual risk is
+    // the same 60s rename-race we accept for reads: at worst a message lands in
+    // a renamed-but-valid folder, which is recoverable, not lost.
+    const destinationId = await this.resolveFolderId(folder);
     const result = await this.client.post(`${this.basePath}/messages/${encodeGraphPathId(messageId)}/move`, {
       destinationId,
     });
@@ -619,7 +627,14 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     // case-insensitively, so a case-sensitive blocklist alone would let
     // `ForwardTo` through — match on the normalized key and allowlist rather
     // than blocklist, so unknown future Graph actions fail closed.
-    for (const key of Object.keys(rule.actions)) {
+    // Rebuild the actions object with canonical camelCase keys. Graph accepts
+    // keys case-insensitively, so a caller passing `MoveToFolder` would pass
+    // the normalized allowlist check yet slip past a case-sensitive
+    // `actions['moveToFolder']` destructive-destination check below. Normalizing
+    // keys up front closes that bypass and guarantees the payload we POST uses
+    // exactly the safe keys we validated.
+    const actions: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(rule.actions)) {
       const normalized = key.trim().toLowerCase();
       if (BLOCKED_RULE_ACTIONS.has(normalized)) {
         throw new ProviderError(
@@ -629,7 +644,8 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
           false,
         );
       }
-      if (!SAFE_RULE_ACTIONS.has(normalized)) {
+      const canonical = CANONICAL_RULE_ACTIONS[normalized];
+      if (!canonical) {
         throw new ProviderError(
           'UNSUPPORTED_RULE_ACTION',
           `Inbox rule action '${key}' is not supported for creation`,
@@ -637,40 +653,32 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
           false,
         );
       }
+      // Validate value shapes locally instead of forwarding wrong-typed values
+      // to Graph. A non-string moveToFolder would otherwise skip the
+      // destructive-destination inspection entirely (it only fires on strings).
+      if (!isValidRuleActionValue(canonical, value)) {
+        throw new ProviderError(
+          'INVALID_RULE_ACTION_VALUE',
+          `Inbox rule action '${key}' has an invalid value for its type`,
+          'microsoft',
+          false,
+        );
+      }
+      actions[canonical] = value;
     }
 
-    const actions = { ...rule.actions };
+    // Resolve folder destinations to opaque ids and reject mail-discarding ones.
+    // resolveRuleDestinationId does the destructive check on the canonical
+    // resolved folder, closing alias/slash/case bypasses like `/trash/`.
     for (const folderAction of ['moveToFolder', 'copyToFolder'] as const) {
       const destination = actions[folderAction];
       if (typeof destination === 'string') {
-        // A rule that files mail into Deleted Items (or the recoverable-items
-        // dumpster) is functionally the blocked `delete` action, so the
-        // destination has to be policed after alias resolution — `trash`,
-        // `deleted`, and `deleteditems` all normalize to the same folder.
-        const wellKnown = normalizeFolderId(destination).toLowerCase();
-        if (DESTRUCTIVE_RULE_DESTINATIONS.has(wellKnown)) {
-          throw new ProviderError(
-            'UNSAFE_RULE_DESTINATION',
-            `Inbox rule destination '${destination}' discards mail and is blocked for security`,
-            'microsoft',
-            false,
-          );
-        }
-        const resolvedId = await this.resolveFolderId(destination, true);
-        // Re-check by resolved id: a custom folder name could still map onto a
-        // system folder id that the alias check above never sees.
-        if ((await this.getSystemFolderIds()).has(resolvedId)) {
-          throw new ProviderError(
-            'UNSAFE_RULE_DESTINATION',
-            `Inbox rule destination '${destination}' resolves to a system folder and is blocked for security`,
-            'microsoft',
-            false,
-          );
-        }
-        actions[folderAction] = resolvedId;
+        actions[folderAction] = await this.resolveRuleDestinationId(destination);
       }
     }
 
+    // Spread `actions` last so the canonicalized/resolved actions replace the
+    // caller's original (possibly mis-cased) actions in the payload.
     return await this.client.post(`${this.basePath}/mailFolders/inbox/messageRules`, {
       ...rule,
       actions,
@@ -1090,11 +1098,13 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   /**
    * Resolve a folder name/path/id to a Graph folder id.
    *
-   * `forWrite` callers (moves, rule destinations, folder create/delete) must
-   * pass true: resolving a *write* target from the 60s cache can silently
-   * target a folder that was renamed or moved out from under the cached path,
-   * landing mail somewhere the user didn't ask for. Reads tolerate a stale
-   * snapshot; writes re-fetch so the path→id mapping is current.
+   * `forWrite` is reserved for operations that MUTATE the folder tree
+   * (createFolder's parent, deleteFolder's target): these are low-frequency and
+   * high-harm — deleting or nesting under a stale-cached id is unrecoverable —
+   * so they re-fetch to get a current path→id mapping. Message moves and rule
+   * destinations deliberately do NOT pass forWrite: they don't change the tree,
+   * they run in high-volume loops, and their worst-case staleness (the 60s
+   * rename race) is the same recoverable risk we already accept for reads.
    */
   private async resolveFolderId(folder: string, forWrite = false): Promise<string> {
     const trimmed = folder.trim();
@@ -1105,11 +1115,34 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
 
     if (forWrite) this.invalidateFolderCaches();
     const { folders, truncated } = await this.getFolderSnapshot();
+
+    // Exact id match is safe even against a truncated tree — ids are globally
+    // unique, so a visible match is THE match regardless of unseen folders.
     const idMatch = folders.find(candidate => candidate.id === trimmed);
     if (idMatch) return idMatch.id;
 
+    // A truncated tree cannot prove a NAME or PATH is unique (a duplicate could
+    // exist beyond the request budget), so refuse to guess — returning a
+    // visible-but-maybe-not-unique match could misroute a write. Ids only.
+    if (truncated) {
+      throw new ProviderError(
+        'FOLDER_TRAVERSAL_LIMIT',
+        `Folder '${folder}' could not be uniquely resolved: this mailbox has more folders than a single traversal enumerates (${MAX_FOLDER_REQUESTS_PER_SNAPSHOT} requests). Specify the folder by id.`,
+        'microsoft',
+        false,
+      );
+    }
+
     const pathMatches = folders.filter(candidate => normalizeFolderLookup(candidate.path) === normalized);
     if (pathMatches.length === 1) return pathMatches[0]!.id;
+    if (pathMatches.length > 1) {
+      throw new ProviderError(
+        'AMBIGUOUS_FOLDER',
+        `Folder path '${folder}' is ambiguous; use the folder id`,
+        'microsoft',
+        false,
+      );
+    }
 
     const nameMatches = folders.filter(
       candidate => normalizeFolderLookup(candidate.displayName) === normalized,
@@ -1124,18 +1157,56 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       );
     }
 
-    // A truncated tree cannot prove absence — reporting FOLDER_NOT_FOUND here
-    // would be a lie that could route a write to the wrong place on retry.
-    if (truncated) {
+    throw new ProviderError('FOLDER_NOT_FOUND', `Folder '${folder}' was not found`, 'microsoft', false);
+  }
+
+  /**
+   * Resolve a rule-action destination to an OPAQUE Graph folder id.
+   *
+   * Unlike the /messages/{id}/move endpoint (which accepts well-known names),
+   * Graph's messageRule action contract wants a folder id — so well-known names
+   * are mapped through to their ids here. Resolution is `forWrite` (fresh): a
+   * rule persists and acts 24/7, so a stale destination is worth one traversal
+   * to avoid. The destructive check runs on the CANONICAL resolved value, so
+   * alias/slash/case tricks (`/trash/`, `DeletedItems`) that reach the same
+   * folder are all rejected.
+   */
+  private async resolveRuleDestinationId(destination: string): Promise<string> {
+    const normalized = normalizeFolderLookup(destination);
+    const wellKnown = WELL_KNOWN_FOLDER_ALIASES[normalized]
+      ?? (SYSTEM_FOLDER_NAME_SET.has(normalized) ? normalized : undefined);
+
+    if (wellKnown) {
+      if (DESTRUCTIVE_RULE_DESTINATIONS.has(wellKnown)) {
+        throw new ProviderError(
+          'UNSAFE_RULE_DESTINATION',
+          `Inbox rule destination '${destination}' discards mail and is blocked for security`,
+          'microsoft',
+          false,
+        );
+      }
+      const id = (await this.getSystemFolderIdMap()).get(wellKnown);
+      if (!id) {
+        throw new ProviderError(
+          'FOLDER_NOT_FOUND',
+          `Inbox rule destination '${destination}' is not provisioned on this mailbox`,
+          'microsoft',
+          false,
+        );
+      }
+      return id;
+    }
+
+    const resolvedId = await this.resolveFolderId(destination, true);
+    if ((await this.getDestructiveFolderIds()).has(resolvedId)) {
       throw new ProviderError(
-        'FOLDER_TRAVERSAL_LIMIT',
-        `Folder '${folder}' could not be resolved: this mailbox has more folders than a single traversal enumerates (${MAX_FOLDER_REQUESTS_PER_SNAPSHOT} requests). Specify the folder by id.`,
+        'UNSAFE_RULE_DESTINATION',
+        `Inbox rule destination '${destination}' resolves to a mail-discarding system folder and is blocked for security`,
         'microsoft',
         false,
       );
     }
-
-    throw new ProviderError('FOLDER_NOT_FOUND', `Folder '${folder}' was not found`, 'microsoft', false);
+    return resolvedId;
   }
 
   private async folderPathFor(folder: string, folderId: string): Promise<string> {
@@ -1148,19 +1219,20 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     return folders.find(candidate => candidate.id === folderId)?.path ?? folder.trim();
   }
 
-  private async getSystemFolderIds(): Promise<Set<string>> {
+  /** Well-known-name -> resolved id for every provisioned system folder. */
+  private async getSystemFolderIdMap(): Promise<Map<string, string>> {
     const now = Date.now();
     if (this.systemFolderIdsCache && this.systemFolderIdsCache.expiresAt > now) {
-      return this.systemFolderIdsCache.ids;
+      return this.systemFolderIdsCache.idsByName;
     }
 
-    const ids = new Set<string>();
+    const idsByName = new Map<string, string>();
     for (const name of SYSTEM_FOLDER_NAMES) {
       try {
         const folder = await this.client.get(
           `${this.basePath}/mailFolders/${encodeGraphPathId(name)}?${FOLDER_SELECT}`,
         ) as unknown as GraphMailFolder;
-        if (folder.id) ids.add(folder.id);
+        if (folder.id) idsByName.set(name, folder.id);
       } catch (err) {
         // Some tenants do not provision every optional system folder.
         if (err instanceof GraphApiError && err.status === 404) continue;
@@ -1168,7 +1240,27 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       }
     }
 
-    this.systemFolderIdsCache = { expiresAt: now + FOLDER_CACHE_TTL_MS, ids };
+    this.systemFolderIdsCache = { expiresAt: now + FOLDER_CACHE_TTL_MS, idsByName };
+    return idsByName;
+  }
+
+  /** Ids of ALL system folders — none may be deleted. */
+  private async getSystemFolderIds(): Promise<Set<string>> {
+    return new Set((await this.getSystemFolderIdMap()).values());
+  }
+
+  /**
+   * Ids of only the mail-discarding system folders. Rule destinations are
+   * checked against THIS set, not the full system set: filing into Archive or
+   * Junk via a rule is legitimate, so blocking every system folder would reject
+   * ordinary rules. Derived from the same cached sweep as getSystemFolderIds.
+   */
+  private async getDestructiveFolderIds(): Promise<Set<string>> {
+    const idsByName = await this.getSystemFolderIdMap();
+    const ids = new Set<string>();
+    for (const [name, id] of idsByName) {
+      if (DESTRUCTIVE_RULE_DESTINATIONS.has(name)) ids.add(id);
+    }
     return ids;
   }
 
@@ -1293,6 +1385,27 @@ function mapGraphMessage(msg: GraphMessage): EmailMessage {
 
 function normalizeFolderId(folder: string): string {
   return WELL_KNOWN_FOLDER_ALIASES[folder.trim().toLowerCase()] ?? folder;
+}
+
+// Graph's messageRuleActions value contract. Wrong-typed values (e.g. a boolean
+// moveToFolder, or a string markAsRead) are rejected locally rather than sent to
+// Graph — and a non-string folder value would otherwise dodge the destructive
+// destination check, which only inspects strings.
+function isValidRuleActionValue(canonicalKey: string, value: unknown): boolean {
+  switch (canonicalKey) {
+    case 'moveToFolder':
+    case 'copyToFolder':
+      return typeof value === 'string' && value.trim().length > 0;
+    case 'markAsRead':
+    case 'stopProcessingRules':
+      return typeof value === 'boolean';
+    case 'markImportance':
+      return value === 'low' || value === 'normal' || value === 'high';
+    case 'assignCategories':
+      return Array.isArray(value) && value.every(item => typeof item === 'string');
+    default:
+      return false;
+  }
 }
 
 function normalizeFolderLookup(folder: string): string {

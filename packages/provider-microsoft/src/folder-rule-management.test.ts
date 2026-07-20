@@ -50,7 +50,7 @@ describe('provider-microsoft/Folder Management', () => {
     ]);
   });
 
-  it('Scenario: Custom moves re-resolve the folder tree on every write', async () => {
+  it('Scenario: Repeated custom moves reuse the cached folder tree', async () => {
     const get = vi.fn().mockResolvedValue({
       value: [
         { id: 'inbox-id', displayName: 'Inbox', childFolderCount: 1 },
@@ -73,11 +73,12 @@ describe('provider-microsoft/Folder Management', () => {
 
     expect(client.post).toHaveBeenNthCalledWith(1, '/me/messages/msg-1/move', { destinationId: 'news-id' });
     expect(client.post).toHaveBeenNthCalledWith(2, '/me/messages/msg-2/move', { destinationId: 'news-id' });
-    // Writes deliberately bypass the 60s cache: a cached path->id mapping can
-    // point at a folder that was renamed/moved out from under it, which would
-    // silently file mail somewhere the user never asked for. Each move costs
-    // one extra traversal; reads still use the cache.
-    expect(get).toHaveBeenCalledTimes(4);
+    // A move does not alter the folder tree, and triage loops move many
+    // messages per pass — so moves resolve against the 60s cache. The first
+    // move populates it (root + inbox children = 2 gets); the second is a cache
+    // hit with no further traversal. Re-resolving per move would trip Graph
+    // throttling on the exact high-volume loop this feature targets.
+    expect(get).toHaveBeenCalledTimes(2);
   });
 
   it('Scenario: Well-known moves retain alias behavior without folder traversal', async () => {
@@ -299,5 +300,151 @@ describe('provider-microsoft/Destructive rule destinations (PR #106 review)', ()
     // A cached truncated tree would have made the second call free — and would
     // have made "folder not found" sticky for 60s on folders that do exist.
     expect(get.mock.calls.length).toBeGreaterThan(before);
+  });
+});
+
+describe('provider-microsoft/Round-2 review hardening (PR #106)', () => {
+  it('Scenario: Case-variant moveToFolder to trash cannot bypass the destructive check', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    // Graph is case-insensitive, so `MoveToFolder` passes the normalized
+    // allowlist. The destructive-destination check must see it too — a
+    // case-sensitive lookup here would let it file the mailbox into trash.
+    for (const key of ['MoveToFolder', 'MOVETOFOLDER', 'movetofolder']) {
+      await expect(provider.createInboxRule({
+        displayName: 'Discard via case trick',
+        conditions: {},
+        actions: { [key]: 'trash' },
+      })).rejects.toMatchObject({ code: 'UNSAFE_RULE_DESTINATION' });
+    }
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Rules moving mail to Archive or Junk are allowed, not over-blocked', async () => {
+    // getSystemFolderIdMap resolves each well-known name; archive/junkemail are
+    // legitimate rule destinations and must survive the destructive-id re-check.
+    const get = vi.fn(async (url: string) => {
+      const m = /\/me\/mailFolders\/([a-z]+)\?/.exec(url);
+      if (m) return { id: `system-${m[1]}` };
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const post = vi.fn().mockResolvedValue({ id: 'rule-1', displayName: 'Archive old' });
+    const provider = new GraphEmailProvider(createMockClient({ get, post }));
+
+    for (const destination of ['archive', 'junkemail']) {
+      const rule = await provider.createInboxRule({
+        displayName: `File to ${destination}`,
+        conditions: {},
+        actions: { moveToFolder: destination },
+      });
+      expect(rule).toMatchObject({ id: 'rule-1' });
+    }
+    // Rule destinations resolve to opaque ids (Graph's rule contract wants an
+    // id, not a well-known name). Archive/Junk are legitimate and must NOT be
+    // rejected by the destructive re-check, which covers only deleted-items.
+    expect(post).toHaveBeenNthCalledWith(1, '/me/mailFolders/inbox/messageRules',
+      expect.objectContaining({ actions: { moveToFolder: 'system-archive' } }));
+    expect(post).toHaveBeenNthCalledWith(2, '/me/mailFolders/inbox/messageRules',
+      expect.objectContaining({ actions: { moveToFolder: 'system-junkemail' } }));
+  });
+
+  it('Scenario: Mis-cased action keys are canonicalized before hitting Graph', async () => {
+    const get = vi.fn(async (url: string) => {
+      if (url.startsWith('/me/mailFolders?')) {
+        return { value: [{ id: 'news-id', displayName: 'Newsletters', childFolderCount: 0 }] };
+      }
+      const m = /\/me\/mailFolders\/([a-z]+)\?/.exec(url);
+      if (m) return { id: `system-${m[1]}` };
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const post = vi.fn().mockResolvedValue({ id: 'rule-1', displayName: 'GitHub' });
+    const provider = new GraphEmailProvider(createMockClient({ get, post }));
+
+    await provider.createInboxRule({
+      displayName: 'GitHub',
+      conditions: {},
+      actions: { MoveToFolder: 'Newsletters', MarkAsRead: true },
+    });
+
+    expect(post).toHaveBeenCalledWith('/me/mailFolders/inbox/messageRules',
+      expect.objectContaining({ actions: { moveToFolder: 'news-id', markAsRead: true } }));
+  });
+});
+
+describe('provider-microsoft/Round-2 Codex probes (PR #106)', () => {
+  const systemIdMock = (extra?: (url: string) => unknown) => vi.fn(async (url: string) => {
+    if (extra) {
+      const r = extra(url);
+      if (r !== undefined) return r;
+    }
+    const m = /\/me\/mailFolders\/([a-z]+)\?/.exec(url);
+    if (m) return { id: `system-${m[1]}` };
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  it('Scenario: Slash/alias-padded destructive destinations cannot bypass the check', async () => {
+    // `/trash/`, `/deleteditems/` etc. normalize to the deleted-items folder
+    // once surrounding slashes are stripped — they must be rejected.
+    for (const destination of ['/trash/', '/deleteditems/', '  /Deleted/  ', '/recoverableitemsdeletions/']) {
+      const post = vi.fn();
+      const provider = new GraphEmailProvider(createMockClient({ get: systemIdMock(), post }));
+      await expect(provider.createInboxRule({
+        displayName: 'Slash bypass',
+        conditions: {},
+        actions: { moveToFolder: destination },
+      })).rejects.toMatchObject({ code: 'UNSAFE_RULE_DESTINATION' });
+      expect(post).not.toHaveBeenCalled();
+    }
+  });
+
+  it('Scenario: Wrong-typed action values fail closed before hitting Graph', async () => {
+    const cases: Array<Record<string, unknown>> = [
+      { moveToFolder: true },
+      { markAsRead: 'false' },
+      { markImportance: 'urgent' },
+      { assignCategories: 'work' },
+      { copyToFolder: 42 },
+    ];
+    for (const actions of cases) {
+      const post = vi.fn();
+      const provider = new GraphEmailProvider(createMockClient({ get: systemIdMock(), post }));
+      await expect(provider.createInboxRule({
+        displayName: 'Bad value', conditions: {}, actions,
+      })).rejects.toMatchObject({ code: 'INVALID_RULE_ACTION_VALUE' });
+      expect(post).not.toHaveBeenCalled();
+    }
+  });
+
+  it('Scenario: A truncated tree refuses a name match rather than misrouting a move', async () => {
+    // Every folder claims a child so the traversal truncates; the target name
+    // is visible but cannot be proven unique, so resolution must refuse.
+    const get = vi.fn(async (url: string) => {
+      if (url.startsWith('/me/mailFolders?') || url.includes('/childFolders?')) {
+        return { value: [{ id: `f-${get.mock.calls.length}`, displayName: 'Target', childFolderCount: 1 }] };
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const provider = new GraphEmailProvider(createMockClient({ get }));
+
+    await expect(provider.moveToFolder('msg-1', 'Target')).rejects.toMatchObject({
+      code: 'FOLDER_TRAVERSAL_LIMIT',
+    });
+  });
+
+  it('Scenario: An exact folder id still resolves against a truncated tree', async () => {
+    const get = vi.fn(async (url: string) => {
+      if (url.startsWith('/me/mailFolders?') || url.includes('/childFolders?')) {
+        const n = get.mock.calls.length;
+        return { value: [{ id: n === 1 ? 'wanted-id' : `f-${n}`, displayName: `F${n}`, childFolderCount: 1 }] };
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const post = vi.fn().mockResolvedValue({ id: 'moved-id' });
+    const provider = new GraphEmailProvider(createMockClient({ get, post }));
+
+    const newId = await provider.moveToFolder('msg-1', 'wanted-id');
+    expect(newId).toBe('moved-id');
+    expect(post).toHaveBeenCalledWith('/me/messages/msg-1/move', { destinationId: 'wanted-id' });
   });
 });
