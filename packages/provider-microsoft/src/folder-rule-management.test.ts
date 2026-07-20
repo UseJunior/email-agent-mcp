@@ -174,6 +174,10 @@ describe('provider-microsoft/Inbox Rule Management', () => {
       if (url.startsWith('/me/mailFolders?')) {
         return { value: [{ id: 'news-id', displayName: 'Newsletters', childFolderCount: 0 }] };
       }
+      // No sequence supplied → the provider lists existing rules to append.
+      if (url === '/me/mailFolders/inbox/messageRules') {
+        return { value: [{ id: 'r1', sequence: 1 }, { id: 'r2', sequence: 3 }] };
+      }
       // The destination is re-checked against resolved system folder ids, so a
       // custom folder can't sneak through by mapping onto a system folder.
       const systemLookup = /^\/me\/mailFolders\/([a-z]+)\?/.exec(url);
@@ -191,9 +195,49 @@ describe('provider-microsoft/Inbox Rule Management', () => {
 
     expect(post).toHaveBeenCalledWith('/me/mailFolders/inbox/messageRules', {
       displayName: 'GitHub',
+      // Appended after the existing max sequence (3) → 4, never Graph's
+      // invalid default of 0.
+      sequence: 4,
       conditions: { senderContains: ['github.com'] },
       actions: { moveToFolder: 'news-id', markAsRead: true },
     });
+  });
+
+  it('Scenario: Omitted sequence is auto-assigned, never 0 (live Graph rejects 0)', async () => {
+    // Empty mailbox → first rule gets sequence 1.
+    const get = vi.fn(async (url: string) => {
+      if (url === '/me/mailFolders/inbox/messageRules') return { value: [] };
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const post = vi.fn().mockResolvedValue({ id: 'rule-1' });
+    const provider = new GraphEmailProvider(createMockClient({ get, post }));
+
+    await provider.createInboxRule({
+      displayName: 'First rule',
+      conditions: {},
+      actions: { markAsRead: true },
+    });
+
+    const body = post.mock.calls[0]![1] as { sequence: number };
+    expect(body.sequence).toBe(1);
+    expect(body.sequence).not.toBe(0);
+  });
+
+  it('Scenario: An explicit sequence is preserved and skips the rule lookup', async () => {
+    const get = vi.fn(async () => { throw new Error('should not list rules when sequence is explicit'); });
+    const post = vi.fn().mockResolvedValue({ id: 'rule-1' });
+    const provider = new GraphEmailProvider(createMockClient({ get, post }));
+
+    await provider.createInboxRule({
+      displayName: 'Explicit',
+      sequence: 7,
+      conditions: {},
+      actions: { markAsRead: true },
+    });
+
+    expect(get).not.toHaveBeenCalled();
+    expect(post).toHaveBeenCalledWith('/me/mailFolders/inbox/messageRules',
+      expect.objectContaining({ sequence: 7 }));
   });
 
   it('Scenario: Rejects unsafe actions even when the provider is called directly', async () => {
@@ -325,6 +369,7 @@ describe('provider-microsoft/Round-2 review hardening (PR #106)', () => {
     // getSystemFolderIdMap resolves each well-known name; archive/junkemail are
     // legitimate rule destinations and must survive the destructive-id re-check.
     const get = vi.fn(async (url: string) => {
+      if (url === '/me/mailFolders/inbox/messageRules') return { value: [] };
       const m = /\/me\/mailFolders\/([a-z]+)\?/.exec(url);
       if (m) return { id: `system-${m[1]}` };
       throw new Error(`Unexpected URL: ${url}`);
@@ -354,6 +399,7 @@ describe('provider-microsoft/Round-2 review hardening (PR #106)', () => {
       if (url.startsWith('/me/mailFolders?')) {
         return { value: [{ id: 'news-id', displayName: 'Newsletters', childFolderCount: 0 }] };
       }
+      if (url === '/me/mailFolders/inbox/messageRules') return { value: [] };
       const m = /\/me\/mailFolders\/([a-z]+)\?/.exec(url);
       if (m) return { id: `system-${m[1]}` };
       throw new Error(`Unexpected URL: ${url}`);
@@ -471,5 +517,35 @@ describe('provider-microsoft/Round-2 Codex probes (PR #106)', () => {
       code: 'FOLDER_TRAVERSAL_LIMIT',
     });
     expect(post).not.toHaveBeenCalled();
+  });
+});
+
+describe('provider-microsoft/Rule sequence bounds (PR #109 review)', () => {
+  it('Scenario: Rejects an explicit out-of-range sequence at the provider', async () => {
+    const post = vi.fn();
+    const provider = new GraphEmailProvider(createMockClient({ post }));
+
+    for (const bad of [0, -1, 1.5, 2_147_483_648]) {
+      await expect(provider.createInboxRule({
+        displayName: 'Bad seq', sequence: bad, conditions: {}, actions: { markAsRead: true },
+      })).rejects.toMatchObject({ code: 'INVALID_RULE_SEQUENCE' });
+    }
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Auto-assigned sequence never exceeds the Int32 ceiling', async () => {
+    const get = vi.fn(async (url: string) => {
+      if (url === '/me/mailFolders/inbox/messageRules') {
+        return { value: [{ id: 'r', sequence: 2_147_483_647 }] };
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const post = vi.fn().mockResolvedValue({ id: 'rule-1' });
+    const provider = new GraphEmailProvider(createMockClient({ get, post }));
+
+    await provider.createInboxRule({ displayName: 'Ceiling', conditions: {}, actions: { markAsRead: true } });
+
+    const body = post.mock.calls[0]![1] as { sequence: number };
+    expect(body.sequence).toBe(2_147_483_647);
   });
 });
