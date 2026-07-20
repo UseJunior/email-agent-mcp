@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DelegatedAuthManager, ClientCredentialsAuthManager, toFilesystemSafeKey, listConfiguredMailboxesWithMetadata, getConfigDir, isAuthError } from './auth.js';
+import { DelegatedAuthManager, ClientCredentialsAuthManager, toFilesystemSafeKey, listConfiguredMailboxesWithMetadata, getConfigDir, GRAPH_SCOPES, GRAPH_SCOPES_FULL, isAuthError } from './auth.js';
 import { GraphApiError } from './email-graph-provider.js';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
@@ -58,6 +58,13 @@ vi.mock('@azure/identity', () => {
 vi.mock('@azure/identity-cache-persistence', () => ({
   cachePersistencePlugin: {},
 }));
+
+describe('provider-interface/Microsoft Mailbox Settings Consent', () => {
+  it('Scenario: Both delegated scope lists request MailboxSettings.ReadWrite', () => {
+    expect(GRAPH_SCOPES).toContain('MailboxSettings.ReadWrite');
+    expect(GRAPH_SCOPES_FULL).toContain('https://graph.microsoft.com/MailboxSettings.ReadWrite');
+  });
+});
 
 describe('provider-microsoft/Delegated OAuth Authentication', () => {
   let savedAgentEmailHome: string | undefined;

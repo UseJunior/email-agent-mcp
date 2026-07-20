@@ -680,6 +680,12 @@ export async function buildLazyActions(
     markReadAction,
     moveToFolderAction,
     deleteEmailAction,
+    listFoldersAction,
+    createFolderAction,
+    deleteFolderAction,
+    listInboxRulesAction,
+    createInboxRuleAction,
+    deleteInboxRuleAction,
   } = await import('@usejunior/email-core');
 
   // Structured "provider unavailable" error — matches the shape of email-core errors.
@@ -975,6 +981,12 @@ export async function buildLazyActions(
     wrapAction(markReadAction),
     wrapAction(moveToFolderAction),
     wrapAction(deleteEmailAction),
+    wrapAction(listFoldersAction),
+    wrapAction(createFolderAction),
+    wrapAction(deleteFolderAction),
+    wrapAction(listInboxRulesAction),
+    wrapAction(createInboxRuleAction),
+    wrapAction(deleteInboxRuleAction),
   ];
 }
 

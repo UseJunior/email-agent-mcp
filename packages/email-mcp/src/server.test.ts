@@ -293,8 +293,8 @@ describe('mcp-transport/Lazy Provider State', () => {
     // No init has been triggered — state is still 'pending'.
     const actions = await buildLazyActions(state, noAllowlist);
 
-    // 4 custom tools + 13 email-core actions = 17 tools, no auth performed.
-    expect(actions.length).toBe(17);
+    // 4 custom tools + 19 email-core actions = 23 tools, no auth performed.
+    expect(actions.length).toBe(23);
     expect(state.status).toBe('pending');
     expect(state.initPromise).toBeNull();
     expect(state.provider).toBeNull();
@@ -305,6 +305,14 @@ describe('mcp-transport/Lazy Provider State', () => {
     expect(tools.map(t => t.name)).toContain('list_attachments');
     expect(tools.map(t => t.name)).toContain('download_attachment');
     expect(tools.map(t => t.name)).toContain('send_email');
+    expect(tools.map(t => t.name)).toEqual(expect.arrayContaining([
+      'list_folders',
+      'create_folder',
+      'delete_folder',
+      'list_inbox_rules',
+      'create_inbox_rule',
+      'delete_inbox_rule',
+    ]));
   });
 
   it('Scenario: get_mailbox_status is non-blocking during pending/connecting', async () => {

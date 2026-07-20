@@ -20,11 +20,16 @@ export type {
   EmailSubscriber,
   EmailCategorizer,
   EmailAttachmentHandler,
+  EmailFolder,
+  EmailFolderManager,
+  InboxRule,
+  CreateInboxRule,
+  EmailRuleManager,
   DownloadedAttachment,
   EmailProvider,
   AuthManager,
 } from './providers/provider.js';
-export { AttachmentNotSupportedError, AttachmentNotFoundError } from './providers/provider.js';
+export { ProviderError, AttachmentNotSupportedError, AttachmentNotFoundError } from './providers/provider.js';
 export {
   isAllowedSender,
   loadReceiveAllowlist,
@@ -54,6 +59,16 @@ export { getThreadAction } from './actions/conversation.js';
 export { listAttachmentsAction, downloadAttachmentAction } from './actions/attachments.js';
 export { labelEmailAction, flagEmailAction, markReadAction, deleteEmailAction } from './actions/label.js';
 export { moveToFolderAction } from './actions/move.js';
+export {
+  listFoldersAction, // list_folders
+  createFolderAction, // create_folder
+  deleteFolderAction, // delete_folder
+} from './actions/folders.js';
+export {
+  listInboxRulesAction, // list_inbox_rules
+  createInboxRuleAction, // create_inbox_rule
+  deleteInboxRuleAction, // delete_inbox_rule
+} from './actions/rules.js';
 export { parseFrontmatter } from './content/frontmatter.js';
 export type { FrontmatterFields } from './content/frontmatter.js';
 export { resolveBodyFile, truncateBody, BODY_SIZE_LIMIT } from './content/body-loader.js';
