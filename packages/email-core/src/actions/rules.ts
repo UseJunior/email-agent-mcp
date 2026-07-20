@@ -2,6 +2,7 @@
 import { z } from 'zod';
 import type { EmailAction } from './registry.js';
 import { ProviderError } from '../providers/provider.js';
+import { checkDeletePolicy } from '../security/receive-allowlist.js';
 
 const ActionError = z.object({
   code: z.string(),
@@ -60,6 +61,10 @@ const CreateInboxRuleInput = z.object({
   conditions: JsonObject,
   exceptions: JsonObject.optional(),
   actions: JsonObject,
+  // NOTE: this is an intent affirmation, NOT a security boundary. The calling
+  // model supplies it, so it cannot enforce human approval on its own — it
+  // forces a deliberate second step and leaves an audit signal. Real
+  // human-in-the-loop must come from the MCP client's tool-approval UI.
   user_explicitly_approved: z.boolean().optional().default(false),
   mailbox: z.string().optional(),
 });
@@ -71,6 +76,15 @@ const CreateInboxRuleOutput = z.object({
 });
 
 const BLOCKED_ACTIONS = ['forwardTo', 'forwardAsAttachmentTo', 'redirectTo', 'delete'] as const;
+// Destinations that discard mail — filing into these is equivalent to `delete`.
+// Covers the user-facing aliases providers map onto the deleted-items folder.
+const DESTRUCTIVE_DESTINATIONS = new Set([
+  'trash',
+  'deleted',
+  'deleteditems',
+  'deleted items',
+  'recoverableitemsdeletions',
+]);
 const SAFE_ACTIONS = new Set([
   'assignCategories',
   'copyToFolder',
@@ -85,7 +99,7 @@ export const createInboxRuleAction: EmailAction<
   z.infer<typeof CreateInboxRuleOutput>
 > = {
   name: 'create_inbox_rule',
-  description: 'Create a human-approved server-side inbox rule using safe actions only; forwarding, redirection, and deletion are blocked',
+  description: 'Create a persistent server-side inbox rule using safe actions only; forwarding, redirection, and deletion are blocked. Confirm with the user before calling — this creates a rule that keeps acting on the mailbox 24/7 after the session ends.',
   input: CreateInboxRuleInput,
   output: CreateInboxRuleOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -93,7 +107,7 @@ export const createInboxRuleAction: EmailAction<
     if (!input.user_explicitly_approved) {
       return actionError(
         'APPROVAL_REQUIRED',
-        'A human must explicitly approve the inbox rule before creation',
+        'Set user_explicitly_approved once the user has confirmed this specific rule',
       );
     }
 
@@ -115,6 +129,21 @@ export const createInboxRuleAction: EmailAction<
 
     if (Object.keys(input.actions).length === 0) {
       return actionError('MISSING_RULE_ACTION', 'At least one safe inbox rule action is required');
+    }
+
+    // A rule filing mail into Deleted Items is the blocked `delete` action
+    // wearing a `moveToFolder` costume — and with empty conditions it would
+    // discard the whole mailbox. Providers re-check this after resolving
+    // aliases; this is the fast, provider-independent rejection.
+    for (const folderAction of ['moveToFolder', 'copyToFolder'] as const) {
+      const destination = input.actions[folderAction];
+      if (typeof destination === 'string'
+        && DESTRUCTIVE_DESTINATIONS.has(destination.trim().toLowerCase())) {
+        return actionError(
+          'UNSAFE_RULE_DESTINATION',
+          `Inbox rule destination '${destination}' discards mail and is blocked for security`,
+        );
+      }
     }
 
     if (!ctx.provider.createInboxRule) {
@@ -139,6 +168,7 @@ export const createInboxRuleAction: EmailAction<
 
 const DeleteInboxRuleInput = z.object({
   id: z.string().min(1),
+  user_explicitly_requested_deletion: z.boolean(),
   mailbox: z.string().optional(),
 });
 
@@ -152,11 +182,22 @@ export const deleteInboxRuleAction: EmailAction<
   z.infer<typeof DeleteInboxRuleOutput>
 > = {
   name: 'delete_inbox_rule',
-  description: 'Delete a server-side inbox rule by id',
+  description: 'Delete a server-side inbox rule by id (disabled by default, requires explicit configuration). Removing a rule can silently re-expose the mailbox to mail the rule was filtering.',
   input: DeleteInboxRuleInput,
   output: DeleteInboxRuleOutput,
   annotations: { readOnlyHint: false, destructiveHint: true },
   run: async (ctx, input) => {
+    // Same operator gate as delete_email / delete_folder: deleting a rule is a
+    // destructive, security-relevant change (it can remove an organization or
+    // anti-abuse rule), so it must not be an ungated capability.
+    const policyError = checkDeletePolicy(
+      ctx.deleteEnabled === true ? { enabled: true, hardDeleteAllowed: ctx.hardDeleteAllowed === true } : undefined,
+      input.user_explicitly_requested_deletion,
+      false,
+    );
+    if (policyError) {
+      return actionError('DELETE_DISABLED', policyError);
+    }
     if (!ctx.provider.deleteInboxRule) {
       return notSupported();
     }

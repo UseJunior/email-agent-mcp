@@ -50,7 +50,7 @@ describe('provider-microsoft/Folder Management', () => {
     ]);
   });
 
-  it('Scenario: Custom moves resolve a path and reuse the 60-second folder cache', async () => {
+  it('Scenario: Custom moves re-resolve the folder tree on every write', async () => {
     const get = vi.fn().mockResolvedValue({
       value: [
         { id: 'inbox-id', displayName: 'Inbox', childFolderCount: 1 },
@@ -73,7 +73,11 @@ describe('provider-microsoft/Folder Management', () => {
 
     expect(client.post).toHaveBeenNthCalledWith(1, '/me/messages/msg-1/move', { destinationId: 'news-id' });
     expect(client.post).toHaveBeenNthCalledWith(2, '/me/messages/msg-2/move', { destinationId: 'news-id' });
-    expect(get).toHaveBeenCalledTimes(2);
+    // Writes deliberately bypass the 60s cache: a cached path->id mapping can
+    // point at a folder that was renamed/moved out from under it, which would
+    // silently file mail somewhere the user never asked for. Each move costs
+    // one extra traversal; reads still use the cache.
+    expect(get).toHaveBeenCalledTimes(4);
   });
 
   it('Scenario: Well-known moves retain alias behavior without folder traversal', async () => {
@@ -107,7 +111,9 @@ describe('provider-microsoft/Folder Management', () => {
 
     expect(created.path).toBe('Parent/Child');
     expect(post).toHaveBeenCalledWith('/me/mailFolders/custom-id/childFolders', { displayName: 'Child' });
-    expect(rootReads).toBe(2);
+    // 1: initial listFolders. 2: write-path re-resolve of the parent.
+    // 3: post-create listFolders, the cache having been invalidated.
+    expect(rootReads).toBe(3);
   });
 
   it('Scenario: Refuses system folder deletion by well-known name', async () => {
@@ -167,6 +173,10 @@ describe('provider-microsoft/Inbox Rule Management', () => {
       if (url.startsWith('/me/mailFolders?')) {
         return { value: [{ id: 'news-id', displayName: 'Newsletters', childFolderCount: 0 }] };
       }
+      // The destination is re-checked against resolved system folder ids, so a
+      // custom folder can't sneak through by mapping onto a system folder.
+      const systemLookup = /^\/me\/mailFolders\/([a-z]+)\?/.exec(url);
+      if (systemLookup) return { id: `system-${systemLookup[1]}` };
       throw new Error(`Unexpected URL: ${url}`);
     });
     const post = vi.fn().mockResolvedValue({ id: 'rule-1', displayName: 'GitHub' });
@@ -206,5 +216,88 @@ describe('provider-microsoft/Inbox Rule Management', () => {
     expect(client.delete).toHaveBeenCalledWith(
       '/me/mailFolders/inbox/messageRules/rule%2F%2B%3Did',
     );
+  });
+});
+
+describe('provider-microsoft/Peer-review hardening (PR #106)', () => {
+  it('Scenario: Rejects case-variant forwarding actions called directly on the provider', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    // Graph treats JSON keys case-insensitively, so a case-sensitive blocklist
+    // would let these provision a real exfiltrating rule.
+    for (const key of ['ForwardTo', 'REDIRECTTO', 'forwardAsAttachmentTo', ' Delete ']) {
+      await expect(provider.createInboxRule({
+        displayName: 'Bypass attempt',
+        conditions: {},
+        actions: { [key]: [{ emailAddress: { address: 'attacker@evil.com' } }] },
+      })).rejects.toMatchObject({ code: 'UNSAFE_RULE_ACTION' });
+    }
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Fails closed on rule actions outside the safe allowlist', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.createInboxRule({
+      displayName: 'Unknown future Graph action',
+      conditions: {},
+      actions: { someFutureAction: true },
+    })).rejects.toMatchObject({ code: 'UNSUPPORTED_RULE_ACTION' });
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Caps total Graph requests across a wide recursive folder tree', async () => {
+    // Every folder claims a child, so an uncapped traversal recurses forever.
+    const get = vi.fn(async () => ({
+      value: [{ id: `f-${get.mock.calls.length}`, displayName: `F${get.mock.calls.length}`, childFolderCount: 1 }],
+    }));
+    const provider = new GraphEmailProvider(createMockClient({ get }));
+
+    // Truncates rather than throwing: a partial list beats a hard failure.
+    const folders = await provider.listFolders();
+    expect(folders.length).toBeGreaterThan(0);
+    // Budget is shared across the recursion, not reset per collection.
+    expect(get.mock.calls.length).toBeLessThanOrEqual(400);
+  });
+});
+
+describe('provider-microsoft/Destructive rule destinations (PR #106 review)', () => {
+  it('Scenario: Blocks a rule that files mail into Deleted Items via any alias', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    // `trash`/`deleted` both resolve to deleteditems — a `delete` action in
+    // disguise, and with empty conditions it would discard the whole mailbox.
+    for (const destination of ['trash', 'deleted', 'DeletedItems', ' Trash ']) {
+      await expect(provider.createInboxRule({
+        displayName: 'Discard everything',
+        conditions: {},
+        actions: { moveToFolder: destination },
+      })).rejects.toMatchObject({ code: 'UNSAFE_RULE_DESTINATION' });
+    }
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Does not cache a truncated folder snapshot', async () => {
+    let calls = 0;
+    const get = vi.fn(async () => {
+      calls += 1;
+      // First traversal is unbounded-wide (forces truncation); afterwards the
+      // mailbox settles into a single small folder.
+      if (calls < 405) {
+        return { value: [{ id: `f-${calls}`, displayName: `F${calls}`, childFolderCount: 1 }] };
+      }
+      return { value: [{ id: 'real-id', displayName: 'Newsletters', childFolderCount: 0 }] };
+    });
+    const provider = new GraphEmailProvider(createMockClient({ get }));
+
+    await provider.listFolders();
+    const before = get.mock.calls.length;
+    await provider.listFolders();
+    // A cached truncated tree would have made the second call free — and would
+    // have made "folder not found" sticky for 60s on folders that do exist.
+    expect(get.mock.calls.length).toBeGreaterThan(before);
   });
 });

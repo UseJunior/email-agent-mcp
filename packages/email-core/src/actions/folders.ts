@@ -2,6 +2,7 @@
 import { z } from 'zod';
 import type { EmailAction } from './registry.js';
 import { ProviderError } from '../providers/provider.js';
+import { checkDeletePolicy } from '../security/receive-allowlist.js';
 
 const ActionError = z.object({
   code: z.string(),
@@ -84,6 +85,7 @@ export const createFolderAction: EmailAction<
 
 const DeleteFolderInput = z.object({
   folder: z.string().min(1),
+  user_explicitly_requested_deletion: z.boolean(),
   mailbox: z.string().optional(),
 });
 
@@ -97,11 +99,21 @@ export const deleteFolderAction: EmailAction<
   z.infer<typeof DeleteFolderOutput>
 > = {
   name: 'delete_folder',
-  description: 'Delete a custom mail folder. Well-known/system folders are protected.',
+  description: 'Delete a custom mail folder, including any mail it contains (disabled by default, requires explicit configuration). Well-known/system folders are protected.',
   input: DeleteFolderInput,
   output: DeleteFolderOutput,
   annotations: { readOnlyHint: false, destructiveHint: true },
   run: async (ctx, input) => {
+    // Gated by the same operator policy as delete_email: deleting a folder can
+    // discard every message inside it, so it must not be an ungated capability.
+    const policyError = checkDeletePolicy(
+      ctx.deleteEnabled === true ? { enabled: true, hardDeleteAllowed: ctx.hardDeleteAllowed === true } : undefined,
+      input.user_explicitly_requested_deletion,
+      false,
+    );
+    if (policyError) {
+      return { success: false, error: { code: 'DELETE_DISABLED', message: policyError, recoverable: false } };
+    }
     if (!ctx.provider.deleteFolder) {
       return notSupported('Provider does not support folder management');
     }

@@ -4,8 +4,10 @@ import { MockEmailProvider } from '../testing/mock-provider.js';
 import { createInboxRuleAction, deleteInboxRuleAction, listInboxRulesAction } from './rules.js';
 import type { ActionContext } from './registry.js';
 
-function contextWith(methods: Partial<EmailProvider> = {}): ActionContext {
-  return { provider: Object.assign(new MockEmailProvider(), methods) };
+function contextWith(methods: Partial<EmailProvider> = {}, overrides: Partial<ActionContext> = {}): ActionContext {
+  // Rule deletion is gated by the same operator policy as delete_email;
+  // default to enabled here so non-deletion scenarios stay focused.
+  return { provider: Object.assign(new MockEmailProvider(), methods), deleteEnabled: true, ...overrides };
 }
 
 describe('email-inbox-rules/List Inbox Rules', () => {
@@ -100,15 +102,75 @@ describe('email-inbox-rules/Create Inbox Rule', () => {
 describe('email-inbox-rules/Delete Inbox Rule', () => {
   it('Scenario: Delete a rule', async () => {
     const deleteInboxRule = vi.fn().mockResolvedValue(undefined);
-    const result = await deleteInboxRuleAction.run(contextWith({ deleteInboxRule }), { id: 'rule-1' });
+    const result = await deleteInboxRuleAction.run(contextWith({ deleteInboxRule }), { id: 'rule-1', user_explicitly_requested_deletion: true });
 
     expect(result).toEqual({ success: true });
     expect(deleteInboxRule).toHaveBeenCalledWith('rule-1');
     expect(deleteInboxRuleAction.annotations.destructiveHint).toBe(true);
   });
 
+  it('Scenario: Deletion is disabled by default without operator opt-in', async () => {
+    const deleteInboxRule = vi.fn().mockResolvedValue(undefined);
+    const result = await deleteInboxRuleAction.run(
+      contextWith({ deleteInboxRule }, { deleteEnabled: false }),
+      { id: 'rule-1', user_explicitly_requested_deletion: true },
+    );
+
+    expect(result).toMatchObject({ success: false, error: { code: 'DELETE_DISABLED' } });
+    expect(deleteInboxRule).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Deletion requires an explicit caller affirmation', async () => {
+    const deleteInboxRule = vi.fn().mockResolvedValue(undefined);
+    const result = await deleteInboxRuleAction.run(
+      contextWith({ deleteInboxRule }),
+      { id: 'rule-1', user_explicitly_requested_deletion: false },
+    );
+
+    expect(result).toMatchObject({ success: false, error: { code: 'DELETE_DISABLED' } });
+    expect(deleteInboxRule).not.toHaveBeenCalled();
+  });
+
   it('Scenario: Unsupported provider returns NOT_SUPPORTED', async () => {
-    const result = await deleteInboxRuleAction.run(contextWith(), { id: 'rule-1' });
+    const result = await deleteInboxRuleAction.run(contextWith(), { id: 'rule-1', user_explicitly_requested_deletion: true });
     expect(result).toMatchObject({ success: false, error: { code: 'NOT_SUPPORTED' } });
+  });
+});
+
+describe('create_inbox_rule destructive destinations (PR #106 review)', () => {
+  it('Scenario: Rejects moveToFolder destinations that discard mail', async () => {
+    const createInboxRule = vi.fn();
+    const ctx = { provider: { createInboxRule } } as never;
+
+    for (const destination of ['trash', 'Deleted', 'DELETEDITEMS', ' trash ']) {
+      const result = await createInboxRuleAction.run(ctx, {
+        display_name: 'Discard everything',
+        conditions: {},
+        actions: { moveToFolder: destination },
+        is_enabled: true,
+        user_explicitly_approved: true,
+      });
+      expect(result).toMatchObject({
+        success: false,
+        error: { code: 'UNSAFE_RULE_DESTINATION' },
+      });
+    }
+    expect(createInboxRule).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Still allows moves to ordinary custom folders', async () => {
+    const createInboxRule = vi.fn().mockResolvedValue({ id: 'rule-1', displayName: 'GitHub' });
+    const ctx = { provider: { createInboxRule } } as never;
+
+    const result = await createInboxRuleAction.run(ctx, {
+      display_name: 'GitHub',
+      conditions: { senderContains: ['github.com'] },
+      actions: { moveToFolder: 'Inbox/Notifications' },
+      is_enabled: true,
+      user_explicitly_approved: true,
+    });
+
+    expect(result).toMatchObject({ success: true });
+    expect(createInboxRule).toHaveBeenCalled();
   });
 });

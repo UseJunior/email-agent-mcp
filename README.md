@@ -165,10 +165,10 @@ Agent Email exposes 23 MCP tools:
 | `delete_email` | Delete (requires operator env + caller flag) | destructive |
 | `list_folders` | Recursively list folders and computed paths (Microsoft 365) | read |
 | `create_folder` | Create a custom child folder (Microsoft 365) | write |
-| `delete_folder` | Delete a custom folder; system folders are protected (Microsoft 365) | destructive |
+| `delete_folder` | Delete a custom folder (requires operator env + caller flag); system folders are protected (Microsoft 365) | destructive |
 | `list_inbox_rules` | List server-side inbox rules (Microsoft 365) | read |
-| `create_inbox_rule` | Create a human-approved safe inbox rule; forwarding/redirection/deletion are blocked (Microsoft 365) | write |
-| `delete_inbox_rule` | Delete a server-side inbox rule (Microsoft 365) | destructive |
+| `create_inbox_rule` | Create a persistent safe inbox rule; forwarding, redirection, deletion, and discarding to Deleted Items are blocked (Microsoft 365) | write |
+| `delete_inbox_rule` | Delete a server-side inbox rule (requires operator env + caller flag) (Microsoft 365) | destructive |
 
 Folder and inbox-rule management requires Microsoft Graph `MailboxSettings.ReadWrite` consent. Existing Microsoft mailbox connections must re-consent after upgrading. Gmail uses labels rather than hierarchical folders/server-side Exchange rules, so these six tools return `NOT_SUPPORTED` for Gmail mailboxes.
 

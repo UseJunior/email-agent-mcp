@@ -138,6 +138,40 @@ const SYSTEM_FOLDER_NAME_SET = new Set<string>([
   ...Object.keys(WELL_KNOWN_FOLDER_ALIASES),
 ]);
 const FOLDER_CACHE_TTL_MS = 60_000;
+// Cap on Graph requests for a single folder-tree snapshot. Pagination is capped
+// per collection, but recursion across a deep/wide mailbox would otherwise
+// issue one request per folder — enough to blow the MCP request timeout or trip
+// Graph throttling. Exceeding this TRUNCATES the listing rather than failing:
+// a partial folder list is still useful, whereas a hard error would break
+// list_folders outright on legitimately large mailboxes. Truncated snapshots
+// are never cached, so the next call retries from scratch, and name resolution
+// refuses to answer from a truncated tree (see resolveFolderId).
+const MAX_FOLDER_REQUESTS_PER_SNAPSHOT = 400;
+// Filing mail into these is equivalent to the blocked `delete` rule action.
+const DESTRUCTIVE_RULE_DESTINATIONS = new Set([
+  'deleteditems',
+  'recoverableitemsdeletions',
+  'scheduled',
+  'serverfailures',
+  'localfailures',
+  'syncissues',
+  'conflicts',
+]);
+// Graph accepts rule action keys case-insensitively; compare normalized keys.
+const BLOCKED_RULE_ACTIONS = new Set([
+  'forwardto',
+  'forwardasattachmentto',
+  'redirectto',
+  'delete',
+]);
+const SAFE_RULE_ACTIONS = new Set([
+  'assigncategories',
+  'copytofolder',
+  'markasread',
+  'markimportance',
+  'movetofolder',
+  'stopprocessingrules',
+]);
 const FOLDER_SELECT = '$select=id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount,isHidden';
 
 export interface GraphApiClient {
@@ -515,7 +549,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
 
   async moveToFolder(messageId: string, folder: string): Promise<string> {
     // Graph POST /move returns the moved message with a NEW id
-    const destinationId = await this.resolveFolderId(folder);
+    const destinationId = await this.resolveFolderId(folder, true);
     const result = await this.client.post(`${this.basePath}/messages/${encodeGraphPathId(messageId)}/move`, {
       destinationId,
     });
@@ -523,7 +557,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   }
 
   async listFolders(): Promise<EmailFolder[]> {
-    const folders = await this.getFolderSnapshot();
+    const { folders } = await this.getFolderSnapshot();
     return folders.map(folder => ({ ...folder }));
   }
 
@@ -533,7 +567,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       throw new ProviderError('INVALID_FOLDER_NAME', 'Folder display name cannot be empty', 'microsoft', false);
     }
 
-    const parentId = await this.resolveFolderId(parentFolder);
+    const parentId = await this.resolveFolderId(parentFolder, true);
     const parentPath = await this.folderPathFor(parentFolder, parentId);
     const created = await this.client.post(
       `${this.basePath}/mailFolders/${encodeGraphPathId(parentId)}/childFolders`,
@@ -550,7 +584,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       throw systemFolderProtectedError(folder);
     }
 
-    const folderId = await this.resolveFolderId(folder);
+    const folderId = await this.resolveFolderId(folder, true);
     const systemFolderIds = await this.getSystemFolderIds();
     if (systemFolderIds.has(folderId)) {
       throw systemFolderProtectedError(folder);
@@ -579,11 +613,26 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   }
 
   async createInboxRule(rule: CreateInboxRule): Promise<InboxRule> {
-    for (const blocked of ['forwardTo', 'forwardAsAttachmentTo', 'redirectTo', 'delete']) {
-      if (Object.hasOwn(rule.actions, blocked)) {
+    // Defense in depth: the create_inbox_rule action already enforces an
+    // allowlist, but this method is part of the public EmailRuleManager
+    // interface and must be safe when called directly. Graph treats JSON keys
+    // case-insensitively, so a case-sensitive blocklist alone would let
+    // `ForwardTo` through — match on the normalized key and allowlist rather
+    // than blocklist, so unknown future Graph actions fail closed.
+    for (const key of Object.keys(rule.actions)) {
+      const normalized = key.trim().toLowerCase();
+      if (BLOCKED_RULE_ACTIONS.has(normalized)) {
         throw new ProviderError(
           'UNSAFE_RULE_ACTION',
-          `Inbox rule action '${blocked}' is blocked for security`,
+          `Inbox rule action '${key}' is blocked for security`,
+          'microsoft',
+          false,
+        );
+      }
+      if (!SAFE_RULE_ACTIONS.has(normalized)) {
+        throw new ProviderError(
+          'UNSUPPORTED_RULE_ACTION',
+          `Inbox rule action '${key}' is not supported for creation`,
           'microsoft',
           false,
         );
@@ -594,7 +643,31 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     for (const folderAction of ['moveToFolder', 'copyToFolder'] as const) {
       const destination = actions[folderAction];
       if (typeof destination === 'string') {
-        actions[folderAction] = await this.resolveFolderId(destination);
+        // A rule that files mail into Deleted Items (or the recoverable-items
+        // dumpster) is functionally the blocked `delete` action, so the
+        // destination has to be policed after alias resolution — `trash`,
+        // `deleted`, and `deleteditems` all normalize to the same folder.
+        const wellKnown = normalizeFolderId(destination).toLowerCase();
+        if (DESTRUCTIVE_RULE_DESTINATIONS.has(wellKnown)) {
+          throw new ProviderError(
+            'UNSAFE_RULE_DESTINATION',
+            `Inbox rule destination '${destination}' discards mail and is blocked for security`,
+            'microsoft',
+            false,
+          );
+        }
+        const resolvedId = await this.resolveFolderId(destination, true);
+        // Re-check by resolved id: a custom folder name could still map onto a
+        // system folder id that the alias check above never sees.
+        if ((await this.getSystemFolderIds()).has(resolvedId)) {
+          throw new ProviderError(
+            'UNSAFE_RULE_DESTINATION',
+            `Inbox rule destination '${destination}' resolves to a system folder and is blocked for security`,
+            'microsoft',
+            false,
+          );
+        }
+        actions[folderAction] = resolvedId;
       }
     }
 
@@ -946,25 +1019,34 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       : [];
   }
 
-  private async getFolderSnapshot(): Promise<EmailFolder[]> {
+  private async getFolderSnapshot(): Promise<{ folders: EmailFolder[]; truncated: boolean }> {
     const now = Date.now();
     if (this.folderCache && this.folderCache.expiresAt > now) {
-      return this.folderCache.folders;
+      return { folders: this.folderCache.folders, truncated: false };
     }
 
+    const budget = { remaining: MAX_FOLDER_REQUESTS_PER_SNAPSHOT, truncated: false };
     const folders = await this.fetchFolderCollection(
       `${this.basePath}/mailFolders?${FOLDER_SELECT}&$top=100&includeHiddenFolders=true`,
       '',
       new Set<string>(),
+      budget,
     );
-    this.folderCache = { expiresAt: now + FOLDER_CACHE_TTL_MS, folders };
-    return folders;
+    // Never cache a partial tree — a truncated snapshot would otherwise make
+    // "folder not found" sticky for 60s on a folder that does exist.
+    if (!budget.truncated) {
+      this.folderCache = { expiresAt: now + FOLDER_CACHE_TTL_MS, folders };
+    }
+    return { folders, truncated: budget.truncated };
   }
 
   private async fetchFolderCollection(
     initialUrl: string,
     parentPath: string,
     visitedFolderIds: Set<string>,
+    // Shared across the whole recursive traversal, not per collection, so a
+    // wide/deep folder tree can't fan out into hundreds of Graph requests.
+    budget: { remaining: number; truncated: boolean },
   ): Promise<EmailFolder[]> {
     const folders: EmailFolder[] = [];
     const visitedUrls = new Set<string>();
@@ -974,7 +1056,13 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       if (visitedUrls.has(url) || visitedUrls.size >= 100) {
         throw new ProviderError('PAGINATION_LIMIT', 'Folder pagination exceeded its safety limit', 'microsoft', false);
       }
+      if (budget.remaining <= 0) {
+        // Truncate rather than throw — see MAX_FOLDER_REQUESTS_PER_SNAPSHOT.
+        budget.truncated = true;
+        return folders;
+      }
       visitedUrls.add(url);
+      budget.remaining -= 1;
       const response = await this.client.get(url) as GraphFolderPageResponse;
 
       for (const graphFolder of response.value ?? []) {
@@ -988,6 +1076,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
             `${this.basePath}/mailFolders/${encodeGraphPathId(graphFolder.id)}/childFolders?${FOLDER_SELECT}&$top=100&includeHiddenFolders=true`,
             path,
             visitedFolderIds,
+            budget,
           ));
         }
       }
@@ -998,14 +1087,24 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     return folders;
   }
 
-  private async resolveFolderId(folder: string): Promise<string> {
+  /**
+   * Resolve a folder name/path/id to a Graph folder id.
+   *
+   * `forWrite` callers (moves, rule destinations, folder create/delete) must
+   * pass true: resolving a *write* target from the 60s cache can silently
+   * target a folder that was renamed or moved out from under the cached path,
+   * landing mail somewhere the user didn't ask for. Reads tolerate a stale
+   * snapshot; writes re-fetch so the path→id mapping is current.
+   */
+  private async resolveFolderId(folder: string, forWrite = false): Promise<string> {
     const trimmed = folder.trim();
     const normalized = normalizeFolderLookup(trimmed);
     const wellKnown = WELL_KNOWN_FOLDER_ALIASES[normalized]
       ?? (SYSTEM_FOLDER_NAME_SET.has(normalized) ? normalized : undefined);
     if (wellKnown) return wellKnown;
 
-    const folders = await this.getFolderSnapshot();
+    if (forWrite) this.invalidateFolderCaches();
+    const { folders, truncated } = await this.getFolderSnapshot();
     const idMatch = folders.find(candidate => candidate.id === trimmed);
     if (idMatch) return idMatch.id;
 
@@ -1025,6 +1124,17 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       );
     }
 
+    // A truncated tree cannot prove absence — reporting FOLDER_NOT_FOUND here
+    // would be a lie that could route a write to the wrong place on retry.
+    if (truncated) {
+      throw new ProviderError(
+        'FOLDER_TRAVERSAL_LIMIT',
+        `Folder '${folder}' could not be resolved: this mailbox has more folders than a single traversal enumerates (${MAX_FOLDER_REQUESTS_PER_SNAPSHOT} requests). Specify the folder by id.`,
+        'microsoft',
+        false,
+      );
+    }
+
     throw new ProviderError('FOLDER_NOT_FOUND', `Folder '${folder}' was not found`, 'microsoft', false);
   }
 
@@ -1034,7 +1144,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       ?? (SYSTEM_FOLDER_NAME_SET.has(normalized) ? normalized : undefined);
     if (wellKnown) return displayNameForWellKnownFolder(wellKnown);
 
-    const folders = await this.getFolderSnapshot();
+    const { folders } = await this.getFolderSnapshot();
     return folders.find(candidate => candidate.id === folderId)?.path ?? folder.trim();
   }
 

@@ -46,3 +46,43 @@ Folder actions SHALL return a typed `NOT_SUPPORTED` result when the selected pro
 #### Scenario: Gmail folder request
 - **WHEN** `list_folders` is called for a Gmail provider
 - **THEN** the action returns `{success: false, error: {code: "NOT_SUPPORTED", ...}}`
+
+### Requirement: Bounded Folder Traversal
+
+Recursive folder traversal MUST be bounded by a request budget shared across the entire traversal, not per collection. Exceeding the budget SHALL truncate the listing rather than fail it, and a truncated snapshot MUST NOT be cached.
+
+#### Scenario: Truncate rather than fail on a very large mailbox
+- **WHEN** enumerating folders would exceed the traversal request budget
+- **THEN** `list_folders` returns the folders discovered so far instead of erroring
+
+#### Scenario: Never cache a partial tree
+- **WHEN** a traversal was truncated
+- **THEN** the result is not written to the folder cache, so the next call retries from scratch
+
+#### Scenario: Refuse to infer absence from a truncated tree
+- **WHEN** a folder name cannot be found in a truncated snapshot
+- **THEN** the system returns `FOLDER_TRAVERSAL_LIMIT`, not `FOLDER_NOT_FOUND`
+
+### Requirement: Fresh Resolution For Write Operations
+
+Folder name/path resolution for mutating operations (message moves, folder create/delete, rule destinations) MUST NOT be answered from the cached folder snapshot. A cached path-to-id mapping can point at a folder that was renamed or relocated out from under it, silently writing to the wrong destination.
+
+#### Scenario: Re-resolve before a move
+- **WHEN** `move_to_folder` resolves a custom folder name
+- **THEN** the provider refreshes the folder tree before selecting the destination id
+
+#### Scenario: Reads still use the cache
+- **WHEN** `list_folders` is called twice within the cache TTL
+- **THEN** the second call is served from the cached snapshot
+
+### Requirement: Gated Folder Deletion
+
+`delete_folder` MUST be disabled by default and gated behind the same operator deletion policy as `delete_email`, because deleting a folder discards every message it contains. It MUST require an explicit `user_explicitly_requested_deletion` affirmation and MUST return a typed `DELETE_DISABLED` error when the policy is off or the affirmation is absent.
+
+#### Scenario: Folder deletion is disabled by default
+- **WHEN** `delete_folder` is called and the operator has not enabled deletion
+- **THEN** it returns `{success: false, error: {code: "DELETE_DISABLED", ...}}` without calling the provider
+
+#### Scenario: Folder deletion requires explicit affirmation
+- **WHEN** `delete_folder` is called with `user_explicitly_requested_deletion: false`
+- **THEN** it returns `DELETE_DISABLED` without calling the provider
