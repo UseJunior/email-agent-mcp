@@ -677,10 +677,22 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       }
     }
 
+    // Graph rejects sequence 0 (`MessageRuleValidationError` on Field 'Sequence'),
+    // which is exactly the value it assigns when a POST omits sequence. The tool
+    // exists so an agent can propose a rule without knowing Exchange internals,
+    // so when the caller doesn't specify one, append the rule after the existing
+    // rules (max existing sequence + 1, or 1 for an empty mailbox).
+    let sequence = rule.sequence;
+    if (sequence === undefined || sequence === null) {
+      const existing = await this.listInboxRules();
+      sequence = existing.reduce((max, r) => Math.max(max, r.sequence ?? 0), 0) + 1;
+    }
+
     // Spread `actions` last so the canonicalized/resolved actions replace the
     // caller's original (possibly mis-cased) actions in the payload.
     return await this.client.post(`${this.basePath}/mailFolders/inbox/messageRules`, {
       ...rule,
+      sequence,
       actions,
     }) as InboxRule;
   }
