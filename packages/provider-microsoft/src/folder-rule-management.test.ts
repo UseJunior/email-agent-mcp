@@ -519,3 +519,33 @@ describe('provider-microsoft/Round-2 Codex probes (PR #106)', () => {
     expect(post).not.toHaveBeenCalled();
   });
 });
+
+describe('provider-microsoft/Rule sequence bounds (PR #109 review)', () => {
+  it('Scenario: Rejects an explicit out-of-range sequence at the provider', async () => {
+    const post = vi.fn();
+    const provider = new GraphEmailProvider(createMockClient({ post }));
+
+    for (const bad of [0, -1, 1.5, 2_147_483_648]) {
+      await expect(provider.createInboxRule({
+        displayName: 'Bad seq', sequence: bad, conditions: {}, actions: { markAsRead: true },
+      })).rejects.toMatchObject({ code: 'INVALID_RULE_SEQUENCE' });
+    }
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Auto-assigned sequence never exceeds the Int32 ceiling', async () => {
+    const get = vi.fn(async (url: string) => {
+      if (url === '/me/mailFolders/inbox/messageRules') {
+        return { value: [{ id: 'r', sequence: 2_147_483_647 }] };
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const post = vi.fn().mockResolvedValue({ id: 'rule-1' });
+    const provider = new GraphEmailProvider(createMockClient({ get, post }));
+
+    await provider.createInboxRule({ displayName: 'Ceiling', conditions: {}, actions: { markAsRead: true } });
+
+    const body = post.mock.calls[0]![1] as { sequence: number };
+    expect(body.sequence).toBe(2_147_483_647);
+  });
+});

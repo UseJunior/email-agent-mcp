@@ -33,6 +33,18 @@ describe('email-inbox-rules/List Inbox Rules', () => {
 });
 
 describe('email-inbox-rules/Create Inbox Rule', () => {
+  it('Scenario: Schema rejects sequence 0 and out-of-range values (Graph requires 1..Int32)', () => {
+    const base = {
+      display_name: 'X', conditions: {}, actions: { markAsRead: true }, user_explicitly_approved: true,
+    };
+    for (const bad of [0, -1, 1.5, 2_147_483_648]) {
+      expect(createInboxRuleAction.input.safeParse({ ...base, sequence: bad }).success).toBe(false);
+    }
+    // Omitted and valid positive sequences pass.
+    expect(createInboxRuleAction.input.safeParse(base).success).toBe(true);
+    expect(createInboxRuleAction.input.safeParse({ ...base, sequence: 5 }).success).toBe(true);
+  });
+
   it('Scenario: Create an approved safe move rule', async () => {
     const rule = { id: 'rule-1', displayName: 'GitHub', actions: { moveToFolder: 'Newsletters' } };
     const createInboxRule = vi.fn().mockResolvedValue(rule);

@@ -56,7 +56,10 @@ export const listInboxRulesAction: EmailAction<
 
 const CreateInboxRuleInput = z.object({
   display_name: z.string().min(1),
-  sequence: z.number().int().nonnegative().optional(),
+  // Graph rejects sequence 0 and requires an Int32; forbid the invalid range at
+  // the boundary so a schema-valid request can't still fail live. Omit it to let
+  // the provider auto-assign the next sequence.
+  sequence: z.number().int().min(1).max(2_147_483_647).optional(),
   is_enabled: z.boolean().optional().default(true),
   conditions: JsonObject,
   exceptions: JsonObject.optional(),

@@ -682,10 +682,24 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     // exists so an agent can propose a rule without knowing Exchange internals,
     // so when the caller doesn't specify one, append the rule after the existing
     // rules (max existing sequence + 1, or 1 for an empty mailbox).
+    const GRAPH_MAX_SEQUENCE = 2_147_483_647; // Graph stores sequence as Int32.
     let sequence = rule.sequence;
     if (sequence === undefined || sequence === null) {
       const existing = await this.listInboxRules();
-      sequence = existing.reduce((max, r) => Math.max(max, r.sequence ?? 0), 0) + 1;
+      const maxExisting = existing.reduce((max, r) => Math.max(max, r.sequence ?? 0), 0);
+      // Defensive: never exceed Int32 (a pathological existing sequence at the
+      // ceiling would otherwise overflow to an invalid value).
+      sequence = Math.min(maxExisting + 1, GRAPH_MAX_SEQUENCE);
+    } else if (!Number.isInteger(sequence) || sequence < 1 || sequence > GRAPH_MAX_SEQUENCE) {
+      // The action schema already enforces this, but the provider is a public
+      // interface — reject an out-of-range explicit sequence rather than letting
+      // Graph fail it with an opaque 400.
+      throw new ProviderError(
+        'INVALID_RULE_SEQUENCE',
+        `Inbox rule sequence must be an integer between 1 and ${GRAPH_MAX_SEQUENCE}; received ${sequence}`,
+        'microsoft',
+        false,
+      );
     }
 
     // Spread `actions` last so the canonicalized/resolved actions replace the
