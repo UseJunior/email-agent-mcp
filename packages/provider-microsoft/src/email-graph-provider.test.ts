@@ -1914,7 +1914,8 @@ describe('provider-microsoft/Outbound Recipients', () => {
   // Issue #48: createDraft built its payload with toRecipients only, so a draft
   // created against a Graph mailbox silently lost cc/bcc. sendMessage and
   // updateDraft mapped cc but had the same bcc gap. Gmail has always honored
-  // both (buildMimeMessage), so this was a provider-parity bug.
+  // both (buildRawMessage, email-gmail-provider.ts:755), so this was a
+  // provider-parity bug.
   it('createDraft maps cc and bcc into the Graph payload', async () => {
     const client = createMockClient();
     const provider = new GraphEmailProvider(client);
@@ -1939,21 +1940,46 @@ describe('provider-microsoft/Outbound Recipients', () => {
     expect(msg.bccRecipients).toEqual([{ emailAddress: { address: 'dave@corp.com', name: undefined } }]);
   });
 
-  it('createDraft omits recipient keys entirely when cc/bcc are absent', async () => {
-    const client = createMockClient();
-    const provider = new GraphEmailProvider(client);
-
-    await provider.createDraft({
-      to: [{ email: 'alice@corp.com' }],
-      subject: 'No cc',
-      body: 'body',
+  // Asserted against the real wire body, not the provider-level payload: the
+  // whole reason `toGraphRecipients` returns undefined rather than [] is that
+  // JSON.stringify drops undefined keys. An absent list must never reach Graph
+  // as `null` or `[]`, because a PATCH that names the field replaces it —
+  // "Existing properties that are not included in the request body will
+  // maintain their previous values."
+  // https://learn.microsoft.com/en-us/graph/api/message-update?view=graph-rest-1.0#request-body
+  // Going through RealGraphApiClient keeps this honest if serialization changes.
+  it('an absent cc/bcc produces no key at all in the serialized request body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: 'new-id' }),
+      text: async () => '{"id":"new-id"}',
     });
+    vi.stubGlobal('fetch', fetchMock);
 
-    // JSON.stringify drops undefined keys, so an absent list must never reach
-    // Graph as an explicit null — that would clear the field server-side.
-    const payload = (client.post as MockFn).mock.calls[0]![1];
-    expect(JSON.parse(JSON.stringify(payload))).not.toHaveProperty('ccRecipients');
-    expect(JSON.parse(JSON.stringify(payload))).not.toHaveProperty('bccRecipients');
+    try {
+      const provider = new GraphEmailProvider(new RealGraphApiClient(async () => 'token'));
+      await provider.createDraft({
+        to: [{ email: 'alice@corp.com' }],
+        subject: 'No cc',
+        body: 'body',
+      });
+      await provider.updateDraft('draft-1', { subject: 'Retitled' });
+
+      const bodies = fetchMock.mock.calls.map(call => (call[1] as RequestInit).body as string);
+      expect(bodies).toHaveLength(2);
+      for (const body of bodies) {
+        expect(body).not.toContain('ccRecipients');
+        expect(body).not.toContain('bccRecipients');
+        expect(body).not.toContain('null');
+      }
+      // Sanity: the POST really did carry the recipients we did supply, so a
+      // silently-empty body can't make the assertions above pass vacuously.
+      expect(bodies[0]).toContain('"toRecipients"');
+      expect(bodies[0]).toContain('alice@corp.com');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('sendMessage maps bcc alongside cc', async () => {
