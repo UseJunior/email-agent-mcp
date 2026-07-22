@@ -291,6 +291,21 @@ $(gh pr diff $PR_NUMBER --repo "$REPO_NWO")
 ### Major Assumptions
 <list the load-bearing assumptions from your prompt to Codex>
 
+### Reviewer discipline (REQUIRED)
+
+This is a DYNAMIC review, not a static read. You MUST:
+1. Open every file listed in **Affected Files** and read the relevant sections — don't infer their content from the prompt.
+2. Verify every claimed line number, function signature, and CLI flag against the actual file (\`grep\`, \`sed -n\`, or your file-read tool). Reject the plan if any cited interface doesn't exist or has a different shape than described.
+3. For test claims: actually run the cited test/build commands and report exit code + failure summaries. Do not trust "passes locally" without verifying.
+4. For external-tool claims (e.g. "this MCP returns shape X"): inspect the tool's source/docs in the repo or run a real invocation against a small fixture. Do not infer behavior from a tool's README alone.
+5. State your verification methodology in the response — list each command you ran and what it returned. A review without this trace will be re-run.
+
+**Do NOT modify the working tree or git state.** You may read, build, and run tests, but do not edit tracked files, \`git checkout\`/\`switch\` branches, \`git stash\`, reset, or commit. If a check would require mutating state, describe it instead of doing it.
+
+**Anti-simulation rule (zero tolerance):** Do NOT substitute reading + reasoning for actual execution. "Logical simulation," "mental trace," or paraphrased command output are NOT verification and will cause the review to be discarded and re-run. Paste actual command output.
+
+**If you cannot execute commands** (no shell access, sandbox restriction, missing dependency), STATE THAT EXPLICITLY as the first line of your response: "**EXECUTION UNAVAILABLE — the following claims are UNVERIFIED:**" then enumerate them, and mark the review NEEDS-EXECUTION instead of proceeding to a verdict.
+
 ### Areas of Uncertainty
 <call out specific things you want both reviewers to focus on — e.g. trust boundaries, concurrency, API contract changes, security>
 
@@ -360,8 +375,8 @@ git worktree remove "$WT"
 
 ## Repo notes (email-agent-mcp)
 
-- **OpenSpec gate is scope-dependent.** Per `openspec/AGENTS.md`: bug fixes (restoring intended behavior), typos/formatting, non-breaking dependency bumps, config changes, and tests for existing behavior need **no** OpenSpec proposal. New features, breaking API/schema changes, architecture shifts, and behavior-changing performance/security work **do** — stop and surface the proposal step before delegating to Codex if the issue is the latter.
-- **Spec-coverage gate.** Run `npm run check:spec-coverage` in Step 6 alongside build/test/lint — it's this repo's check that OpenSpec deltas and code stay in sync, and CI will fail without it.
+- **OpenSpec gate is scope-dependent.** Per `openspec/AGENTS.md`: bug fixes (restoring intended behavior), typos/formatting, non-breaking dependency bumps, config changes, and tests for existing behavior need **no** OpenSpec proposal. New features, breaking API/schema changes, architecture shifts, behavior-changing performance optimizations, and updates to security patterns **do** — stop and surface the proposal step before delegating to Codex if the issue is one of those.
+- **Spec-coverage gate.** Run `npm run check:spec-coverage` in Step 6 alongside build/test/lint — it checks current OpenSpec scenario-to-test traceability (every `#### Scenario:` in `openspec/specs/*/spec.md` has a matching test) and is enforced by CI (`.github/workflows/ci.yml`, `.github/workflows/release.yml`).
 - **Provider-touching changes need a live smoke, not just mocks.** If the diff touches Graph/provider code (anything under the email actions layer that calls out to Microsoft Graph), a green mocked test suite is not sufficient evidence — mocks miss Graph's server-side validation. After merge (Step 10), run a live smoke against a real mailbox before considering the change verified.
 
 ## Lessons captured
