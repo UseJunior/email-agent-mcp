@@ -92,7 +92,7 @@ function constantTimeEqual(a: string, b: string): boolean {
 }
 
 class MemoryStore implements SessionStore {
-  private map = new Map<string, { session: Session; expiresAt: number }>();
+  private map = new Map<string, { session: Session; expiresAt: number; claiming?: boolean }>();
 
   async create(sessionId: string, session: Session): Promise<CreateResult> {
     if (this.map.has(sessionId) && this.map.get(sessionId)!.expiresAt > Date.now()) {
@@ -142,12 +142,21 @@ class MemoryStore implements SessionStore {
     }
     if (session.state !== 'ready') return { ok: false, reason: 'consumed' };
 
+    // sha256Hex awaits, which yields the event loop — a second concurrent
+    // claim() for the same session can run its own checks in that window.
+    // Synchronously stake a claim BEFORE the await so at most one caller
+    // ever reaches the hash comparison; everyone else fails closed as if
+    // the session were already consumed. On an invalid secret we release
+    // the stake so a subsequent correct attempt can still succeed.
+    if (entry.claiming) return { ok: false, reason: 'consumed' };
+    entry.claiming = true;
+
     const expectedHash = session.pickupHash;
     const presentedHash = await sha256Hex(pickupSecret);
     if (!constantTimeEqual(expectedHash, presentedHash)) {
+      entry.claiming = false;
       return { ok: false, reason: 'invalid_secret' };
     }
-    // Single-threaded JS: get-then-delete is atomic between awaits.
     this.map.delete(sessionId);
     if (!session.tokens) return { ok: false, reason: 'consumed' };
     return { ok: true, tokens: session.tokens };

@@ -63,7 +63,9 @@ describe('provider-gmail/OAuth2 Authentication (broker store)', () => {
   });
 
   it('Scenario: Atomic one-shot ticket claim', async () => {
-    // setReady → claim succeeds once and only once.
+    // setReady → claim succeeds once and only once — including when two
+    // claims race concurrently (claim() awaits a hash computation before
+    // deleting the session, so a real interleaving window exists).
     const store = getStore();
     const id = 'c'.repeat(40);
     const secret = 'secret-success';
@@ -74,13 +76,21 @@ describe('provider-gmail/OAuth2 Authentication (broker store)', () => {
       expires_in: 3600,
     });
 
-    const a = await store.claim(id, secret);
-    expect(a.ok).toBe(true);
-    if (a.ok) expect(a.tokens.access_token).toBe('at');
+    const [a, b] = await Promise.all([store.claim(id, secret), store.claim(id, secret)]);
+    const results = [a, b];
+    const succeeded = results.filter(r => r.ok);
+    const failed = results.filter(r => !r.ok);
 
-    const b = await store.claim(id, secret);
-    expect(b.ok).toBe(false);
-    if (!b.ok) expect(['consumed', 'not_found']).toContain(b.reason);
+    expect(succeeded).toHaveLength(1);
+    expect(failed).toHaveLength(1);
+    if (succeeded[0]!.ok) expect(succeeded[0]!.tokens.access_token).toBe('at');
+    if (!failed[0]!.ok) expect(['consumed', 'not_found']).toContain(failed[0]!.reason);
+
+    // A third claim after both have resolved must also fail — the session
+    // is gone, not merely "in use".
+    const c = await store.claim(id, secret);
+    expect(c.ok).toBe(false);
+    if (!c.ok) expect(['consumed', 'not_found']).toContain(c.reason);
   });
 
   it('Scenario: Public session_id is not a bearer credential', async () => {
@@ -106,16 +116,34 @@ describe('provider-gmail/OAuth2 Authentication (broker store)', () => {
     // setFailed surfaces denied vs exchange_failed distinctly; sibling
     // tests in this file cover the pending and expired terminal states.
     const store = getStore();
-    const id = 'e'.repeat(40);
+    const deniedId = 'e'.repeat(40);
     const secret = 'sec';
-    await store.create(id, freshSession(secret));
-    await store.setFailed(id, 'denied', 'user cancelled');
+    await store.create(deniedId, freshSession(secret));
+    await store.setFailed(deniedId, 'denied', 'user cancelled');
 
-    const result = await store.claim(id, secret);
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.reason).toBe('denied');
-      expect(result.errorMessage).toBe('user cancelled');
+    const deniedResult = await store.claim(deniedId, secret);
+    expect(deniedResult.ok).toBe(false);
+    if (!deniedResult.ok) {
+      expect(deniedResult.reason).toBe('denied');
+      expect(deniedResult.errorMessage).toBe('user cancelled');
+    }
+
+    const exchangeFailedId = 'a1'.repeat(20);
+    await store.create(exchangeFailedId, freshSession(secret));
+    await store.setFailed(exchangeFailedId, 'exchange_failed', 'invalid_grant');
+
+    const exchangeFailedResult = await store.claim(exchangeFailedId, secret);
+    expect(exchangeFailedResult.ok).toBe(false);
+    if (!exchangeFailedResult.ok) {
+      expect(exchangeFailedResult.reason).toBe('exchange_failed');
+      expect(exchangeFailedResult.errorMessage).toBe('invalid_grant');
+    }
+
+    // The two failure modes must be distinguishable from one another, not
+    // just each distinguishable from success.
+    expect(deniedResult.ok || exchangeFailedResult.ok).toBe(false);
+    if (!deniedResult.ok && !exchangeFailedResult.ok) {
+      expect(deniedResult.reason).not.toBe(exchangeFailedResult.reason);
     }
   });
 
