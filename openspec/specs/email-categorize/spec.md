@@ -6,7 +6,7 @@ feature: Email Classification & Labeling
 ## Purpose
 
 Defines actions for classifying and organizing existing emails: labeling, flagging, marking read/unread, and moving to folders. The MCP applies labels as directed — the AI agent does the thinking. No delete in v1. Provider mapping: Graph categories/flags to Gmail labels/stars.
-
+## Requirements
 ### Requirement: Label Email
 
 The system SHALL provide a `label_email` action that applies a label or category to an email as directed by the agent.

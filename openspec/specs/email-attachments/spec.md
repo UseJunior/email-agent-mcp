@@ -6,7 +6,7 @@ feature: Attachment Handling
 ## Purpose
 
 Defines attachment operations: downloading from inbound emails, attaching to outbound emails, embedded image handling, binary file detection, filename sanitization, and size/type validation. Outbound attachments are file-based only (no CID embedding in v1).
-
+## Requirements
 ### Requirement: Download Attachments
 
 The system SHALL download attachments from inbound emails using provider-specific retrieval and return metadata (filename, MIME type, size, contentId).

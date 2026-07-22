@@ -6,7 +6,7 @@ feature: Email Security Controls
 ## Purpose
 
 Defines security controls for email operations: send allowlist (gates all outbound including replies), receive allowlist (gates watcher triggers), delete policy, anti-spoofing (SPF/DKIM/DMARC), and rate limiting. Security-first defaults: all outbound blocked until explicitly configured.
-
+## Requirements
 ### Requirement: Send Allowlist
 
 The system SHALL gate ALL outbound email (both `send_email` and `reply_to_email`) against a configurable allowlist. The allowlist supports exact email addresses, domain wildcards (`*@example.com`), or both. Default is EMPTY — blocks all outbound until configured.
