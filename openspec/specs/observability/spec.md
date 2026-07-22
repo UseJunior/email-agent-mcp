@@ -6,7 +6,7 @@ feature: Observability & Logging
 ## Purpose
 
 Defines logging, error reporting, optional telemetry, and metrics for the email MCP server. Critical constraint: MUST log to stderr, NEVER stdout (stdout is the MCP stdio transport — logging there corrupts the protocol). Includes error sanitization to prevent exposing internal paths, API keys, or stack traces in MCP tool responses.
-
+## Requirements
 ### Requirement: Log Destination
 
 The system SHALL log exclusively to stderr. Logging to stdout SHALL be treated as a critical bug.

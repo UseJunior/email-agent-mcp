@@ -6,7 +6,7 @@ feature: Email Arrival Detection
 ## Purpose
 
 Defines the email watcher that monitors configured mailboxes for new emails and triggers agent wake via authenticated webhook POST. Uses timestamp-based polling to detect new messages. Monitors all configured mailboxes and includes mailbox email address in wake payloads. Wake payloads use text-only format for OpenClaw `/hooks/wake` compatibility. The watcher uses `receivedDateTime ge {since}` filtering with a checkpoint that advances only after a successful wake POST.
-
+## Requirements
 ### Requirement: Timestamp-Based Polling Protocol
 
 The watcher SHALL use timestamp-based polling to detect new emails. On first run, the checkpoint is set to the current time (no historical backfill). Subsequent polls filter messages using `receivedDateTime ge {since}`. The checkpoint advances only after a successful wake POST, ensuring no messages are lost on transient failures.

@@ -6,7 +6,7 @@ feature: MCP Server Adapter
 ## Purpose
 
 Defines the thin MCP transport adapter that maps the email-core action registry to MCP tools. Uses stdio transport. Auto-registers actions — adding a new action in email-core auto-exposes it as an MCP tool. The adapter is ~100 lines and contains no business logic.
-
+## Requirements
 ### Requirement: Action to Tool Mapping
 
 The system SHALL iterate the action registry and generate an MCP tool for each action, using Zod v4's built-in JSON Schema generation for input schemas.

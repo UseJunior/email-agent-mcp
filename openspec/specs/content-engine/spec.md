@@ -6,7 +6,7 @@ feature: AI-Ready Email Transformation
 ## Purpose
 
 Transforms raw email content (HTML or plaintext) into a token-efficient representation optimized for LLM consumption. Handles HTML sanitization, signature stripping, encoding normalization, and attachment summarization. Thread dedup is stubbed for v1 — rely on limit parameters instead.
-
+## Requirements
 ### Requirement: HTML to Token-Efficient Markdown
 
 The system SHALL convert HTML email bodies to token-efficient markdown, preserving tables, lists, links, and non-tracking images while stripping tracking pixels, data URI images, CSS, scripts, and hidden elements.

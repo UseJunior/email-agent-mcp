@@ -6,7 +6,7 @@ feature: Microsoft Graph Provider
 ## Purpose
 
 Implements the provider interface for Microsoft Graph API email operations. Supports delegated OAuth (device code/PKCE for end users) and client credentials (for daemon deployments). Handles Graph-specific concerns: createReplyAll for threading, validation token handling (GET + POST), webhook deduplication, zombie subscription detection, size limits, and anti-spoofing via authentication headers.
-
+## Requirements
 ### Requirement: Delegated OAuth Authentication
 
 The system SHALL support delegated OAuth as the primary auth mode for end users, using device code flow or authorization code flow with PKCE. This avoids requiring users to register an Azure AD daemon app. Refresh tokens SHALL be persisted (encrypted) for session continuity across restarts.
@@ -93,7 +93,7 @@ The system SHALL test that the validation endpoint responds correctly before cre
 
 ### Requirement: Size Limits
 
-Email body max 3.5MB (Graph allows ~4MB, leave headroom for JSON envelope). Attachment max 25MB. Subject max 255 characters.
+The system SHALL enforce an email body maximum of 3.5MB (Graph allows ~4MB; the remainder is headroom for the JSON envelope), an attachment maximum of 25MB, and a subject maximum of 255 characters.
 
 #### Scenario: Body size enforcement
 - **WHEN** email body exceeds 3.5MB
