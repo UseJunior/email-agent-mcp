@@ -78,8 +78,11 @@ function stubFetchOnce(impl: (input: string, init?: RequestInit) => Promise<Resp
   vi.spyOn(globalThis, 'fetch').mockImplementation(((input, init) => impl(String(input), init as RequestInit | undefined)) as typeof fetch);
 }
 
-describe('broker/routes happy path', () => {
-  it('register → start → callback → claim returns tokens once', async () => {
+describe('provider-gmail/OAuth2 Authentication (broker routes)', () => {
+  it('Scenario: Gmail OAuth via hosted broker', async () => {
+    // register → start → callback → claim returns tokens once: the broker
+    // exchanges Google's authorization code for tokens server-side and the
+    // CLI never sees the broker's client_secret.
     const sessionId = urlSafeRandom();
     const pickupSecret = urlSafeRandom();
     const pickupHash = createHash('sha256').update(pickupSecret).digest('hex');

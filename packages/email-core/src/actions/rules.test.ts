@@ -11,7 +11,7 @@ function contextWith(methods: Partial<EmailProvider> = {}, overrides: Partial<Ac
 }
 
 describe('email-inbox-rules/List Inbox Rules', () => {
-  it('Scenario: Faithfully list an externally created forwarding rule', async () => {
+  it('Scenario: List externally created forwarding rule', async () => {
     const rules = [{
       id: 'rule-1',
       displayName: 'External forwarding rule',
@@ -26,7 +26,9 @@ describe('email-inbox-rules/List Inbox Rules', () => {
     expect(listInboxRulesAction.annotations).toEqual({ readOnlyHint: true, destructiveHint: false });
   });
 
-  it('Scenario: Unsupported provider returns NOT_SUPPORTED', async () => {
+  it('Scenario: Gmail rule request', async () => {
+    // MockEmailProvider without listInboxRules stands in for a provider
+    // (e.g. Gmail) that does not implement EmailRuleManager.
     const result = await listInboxRulesAction.run(contextWith(), {});
     expect(result).toMatchObject({ success: false, error: { code: 'NOT_SUPPORTED' } });
   });
@@ -45,7 +47,7 @@ describe('email-inbox-rules/Create Inbox Rule', () => {
     expect(createInboxRuleAction.input.safeParse({ ...base, sequence: 5 }).success).toBe(true);
   });
 
-  it('Scenario: Create an approved safe move rule', async () => {
+  it('Scenario: Create attested move rule', async () => {
     const rule = { id: 'rule-1', displayName: 'GitHub', actions: { moveToFolder: 'Newsletters' } };
     const createInboxRule = vi.fn().mockResolvedValue(rule);
 
@@ -68,7 +70,7 @@ describe('email-inbox-rules/Create Inbox Rule', () => {
     });
   });
 
-  it('Scenario: Missing human approval returns APPROVAL_REQUIRED', async () => {
+  it('Scenario: Missing intent affirmation', async () => {
     const createInboxRule = vi.fn();
     const result = await createInboxRuleAction.run(contextWith({ createInboxRule }), {
       display_name: 'GitHub',
@@ -99,6 +101,23 @@ describe('email-inbox-rules/Create Inbox Rule', () => {
     },
   );
 
+  it('Scenario: Reject forwarding action', async () => {
+    // Non-parameterized instance of the it.each block above (that block's
+    // dynamic title isn't matched by the spec-coverage scanner), scoped to
+    // the exact forwardTo case the canonical scenario names.
+    const createInboxRule = vi.fn();
+    const result = await createInboxRuleAction.run(contextWith({ createInboxRule }), {
+      display_name: 'Unsafe',
+      is_enabled: true,
+      conditions: { subjectContains: ['invoice'] },
+      actions: { forwardTo: [] },
+      user_explicitly_approved: true,
+    });
+
+    expect(result).toMatchObject({ success: false, error: { code: 'UNSAFE_RULE_ACTION' } });
+    expect(createInboxRule).not.toHaveBeenCalled();
+  });
+
   it('Scenario: Unsupported provider returns NOT_SUPPORTED', async () => {
     const result = await createInboxRuleAction.run(contextWith(), {
       display_name: 'GitHub',
@@ -121,7 +140,7 @@ describe('email-inbox-rules/Delete Inbox Rule', () => {
     expect(deleteInboxRuleAction.annotations.destructiveHint).toBe(true);
   });
 
-  it('Scenario: Deletion is disabled by default without operator opt-in', async () => {
+  it('Scenario: Rule deletion is disabled by default', async () => {
     const deleteInboxRule = vi.fn().mockResolvedValue(undefined);
     const result = await deleteInboxRuleAction.run(
       contextWith({ deleteInboxRule }, { deleteEnabled: false }),
@@ -132,7 +151,7 @@ describe('email-inbox-rules/Delete Inbox Rule', () => {
     expect(deleteInboxRule).not.toHaveBeenCalled();
   });
 
-  it('Scenario: Deletion requires an explicit caller affirmation', async () => {
+  it('Scenario: Rule deletion requires explicit affirmation', async () => {
     const deleteInboxRule = vi.fn().mockResolvedValue(undefined);
     const result = await deleteInboxRuleAction.run(
       contextWith({ deleteInboxRule }),
@@ -150,7 +169,7 @@ describe('email-inbox-rules/Delete Inbox Rule', () => {
 });
 
 describe('create_inbox_rule destructive destinations (PR #106 review)', () => {
-  it('Scenario: Rejects moveToFolder destinations that discard mail', async () => {
+  it('Scenario: Reject a rule that files mail into Deleted Items', async () => {
     const createInboxRule = vi.fn();
     const ctx = { provider: { createInboxRule } } as never;
 

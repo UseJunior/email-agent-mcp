@@ -443,7 +443,9 @@ describe('cli/Configure Subcommand', () => {
     expect(opts.provider).toBe('microsoft');
   });
 
-  it('Gmail configure routes a brand-new mailbox through the OAuth broker (no client_secret on disk)', async () => {
+  it('Scenario: Direct Gmail configure (broker default)', async () => {
+    // Also verifies: routes a brand-new mailbox through the OAuth broker
+    // with no client_secret persisted to disk.
     // Isolate from the user's real ~/.email-agent-mcp so the saved-metadata
     // lookup does not pick up a default mailbox from the host machine.
     const tmpHome = await mkdtemp(join(tmpdir(), 'email-agent-mcp-broker-'));
@@ -490,6 +492,39 @@ describe('cli/Configure Subcommand', () => {
       if (originalBrokerUrl === undefined) delete process.env['AGENT_EMAIL_GMAIL_BROKER_URL'];
       else process.env['AGENT_EMAIL_GMAIL_BROKER_URL'] = originalBrokerUrl;
       gmailMockState.profileEmail = originalProfileEmail;
+      await rm(tmpHome, { recursive: true, force: true });
+    }
+  });
+
+  it('Scenario: Broker URL must be https (or http loopback)', async () => {
+    const tmpHome = await mkdtemp(join(tmpdir(), 'email-agent-mcp-broker-url-'));
+    const originalHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    const originalClientId = process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'];
+    const originalClientSecret = process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'];
+    const originalBrokerUrl = process.env['AGENT_EMAIL_GMAIL_BROKER_URL'];
+    process.env['EMAIL_AGENT_MCP_HOME'] = tmpHome;
+    delete process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'];
+    delete process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'];
+    process.env['AGENT_EMAIL_GMAIL_BROKER_URL'] = 'http://evil.example.com';
+    try {
+      const exitCode = await runCli([
+        'configure',
+        '--provider',
+        'gmail',
+        '--mailbox',
+        'fresh-user@gmail.com',
+      ]);
+      expect(exitCode).toBe(1);
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('Broker URL must be https'),
+      );
+    } finally {
+      if (originalHome === undefined) delete process.env['EMAIL_AGENT_MCP_HOME'];
+      else process.env['EMAIL_AGENT_MCP_HOME'] = originalHome;
+      if (originalClientId !== undefined) process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'] = originalClientId;
+      if (originalClientSecret !== undefined) process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'] = originalClientSecret;
+      if (originalBrokerUrl === undefined) delete process.env['AGENT_EMAIL_GMAIL_BROKER_URL'];
+      else process.env['AGENT_EMAIL_GMAIL_BROKER_URL'] = originalBrokerUrl;
       await rm(tmpHome, { recursive: true, force: true });
     }
   });
@@ -696,7 +731,34 @@ describe('cli/Gmail Configure', () => {
     expect(httpMockState.lastResponseBody).toContain('Authentication complete');
   });
 
-  it('Scenario: Gmail configure rejects partial BYOK credentials with a clear error', async () => {
+  it('Scenario: Direct Gmail configure (BYOK)', async () => {
+    // `configure --provider gmail --client-id/--client-secret` runs a local-loopback
+    // OAuth flow directly against Google and persists source: 'byok' metadata.
+    const exitCode = await runCli([
+      'configure',
+      '--provider',
+      'gmail',
+      '--mailbox',
+      'steven.obiajulu@gmail.com',
+      '--client-id',
+      'cli-client-id',
+      '--client-secret',
+      'cli-client-secret',
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.authUrlOptions).toBeTruthy();
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      provider: 'gmail',
+      source: 'byok',
+      mailboxName: 'steven.obiajulu@gmail.com',
+      emailAddress: 'steven.obiajulu@gmail.com',
+      clientId: 'cli-client-id',
+      clientSecret: 'cli-client-secret',
+    });
+  });
+
+  it('Scenario: Partial BYOK credentials are rejected', async () => {
     // Half-credentials are an obvious user mistake — fail fast rather
     // than silently dropping into broker mode (which would consent to a
     // different OAuth client than the user provided a clientId for).
@@ -842,6 +904,24 @@ describe('cli/Gmail Configure', () => {
     expect(gmailMockState.authUrlOptions).not.toBeNull();
     expect(vi.mocked(clackPrompts.text)).not.toHaveBeenCalled();
     expect(vi.mocked(clackPrompts.password)).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Reconfigure preserves saved mode', async () => {
+    // A mailbox that was originally configured BYOK must stay BYOK on a bare
+    // `configure --provider gmail --mailbox <existing>` with no explicit
+    // --client-id/--client-secret/--broker-url — it must not be silently
+    // routed through the broker.
+    await seedSavedGmailMetadata('personal', { source: 'byok' });
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail', '--mailbox', 'personal']);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      source: 'byok',
+      clientId: 'saved-client-id',
+      clientSecret: 'saved-client-secret',
+    });
+    expect(gmailMockState.savedMetadata?.['brokerUrl']).toBeUndefined();
   });
 
   it('Scenario: Gmail configure reuses saved OAuth credentials for the default mailbox when --mailbox is omitted', async () => {

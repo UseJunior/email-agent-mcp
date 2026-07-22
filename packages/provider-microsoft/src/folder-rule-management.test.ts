@@ -11,8 +11,10 @@ function createMockClient(overrides: Partial<GraphApiClient> = {}): GraphApiClie
   };
 }
 
-describe('provider-microsoft/Folder Management', () => {
-  it('Scenario: Recursively traverses paginated roots and children with computed paths', async () => {
+describe('email-folders/Folder Management (Microsoft Graph)', () => {
+  it('Scenario: Nested paginated folders', async () => {
+    // Also verifies: recursively traverses paginated roots and children
+    // with computed paths.
     const get = vi.fn(async (url: string) => {
       if (url.startsWith('/me/mailFolders?')) {
         return {
@@ -50,7 +52,40 @@ describe('provider-microsoft/Folder Management', () => {
     ]);
   });
 
-  it('Scenario: Repeated custom moves reuse the cached folder tree', async () => {
+  it('Scenario: Move to custom folder path', async () => {
+    const get = vi.fn(async (url: string) => {
+      if (url.startsWith('/me/mailFolders?')) {
+        return { value: [{ id: 'inbox-id', displayName: 'Inbox', childFolderCount: 1 }] };
+      }
+      if (url.includes('/mailFolders/inbox-id/childFolders?')) {
+        return { value: [{ id: 'news-id', displayName: 'Newsletters', childFolderCount: 0 }] };
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const client = createMockClient({ get });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.moveToFolder('msg123', 'Inbox/Newsletters');
+
+    expect(client.post).toHaveBeenCalledWith('/me/messages/msg123/move', { destinationId: 'news-id' });
+  });
+
+  it('Scenario: Reads still use the cache', async () => {
+    const get = vi.fn().mockResolvedValue({
+      value: [{ id: 'inbox-id', displayName: 'Inbox', childFolderCount: 0 }],
+    });
+    const provider = new GraphEmailProvider(createMockClient({ get }));
+
+    await provider.listFolders();
+    await provider.listFolders();
+
+    // The second call within the 60s TTL is served from the cached
+    // snapshot rather than re-traversing the tree.
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it('Scenario: Repeated moves reuse the cache', async () => {
+    // Repeated custom moves reuse the cached folder tree.
     const get = vi.fn().mockResolvedValue({
       value: [
         { id: 'inbox-id', displayName: 'Inbox', childFolderCount: 1 },
@@ -81,7 +116,8 @@ describe('provider-microsoft/Folder Management', () => {
     expect(get).toHaveBeenCalledTimes(2);
   });
 
-  it('Scenario: Well-known moves retain alias behavior without folder traversal', async () => {
+  it('Scenario: Preserve well-known move behavior', async () => {
+    // Well-known moves retain alias behavior without folder traversal.
     const client = createMockClient();
     const provider = new GraphEmailProvider(client);
 
@@ -91,7 +127,9 @@ describe('provider-microsoft/Folder Management', () => {
     expect(client.post).toHaveBeenCalledWith('/me/messages/msg-1/move', { destinationId: 'deleteditems' });
   });
 
-  it('Scenario: Creating a child folder invalidates the resolver cache', async () => {
+  it('Scenario: Re-resolve before a structural mutation', async () => {
+    // Creating a child folder invalidates the resolver cache — the write
+    // path re-resolves the parent before selecting its id.
     let rootReads = 0;
     const get = vi.fn(async (url: string) => {
       if (!url.startsWith('/me/mailFolders?')) throw new Error(`Unexpected URL: ${url}`);
@@ -128,7 +166,8 @@ describe('provider-microsoft/Folder Management', () => {
     expect(client.delete).not.toHaveBeenCalled();
   });
 
-  it('Scenario: Refuses system folder deletion by resolved id', async () => {
+  it('Scenario: Refuse system folder id', async () => {
+    // Refuses system folder deletion by resolved id.
     const get = vi.fn(async (url: string) => {
       if (url.startsWith('/me/mailFolders?')) {
         return { value: [{ id: 'inbox-opaque-id', displayName: 'Inbox', childFolderCount: 0 }] };
@@ -150,7 +189,7 @@ describe('provider-microsoft/Folder Management', () => {
   });
 });
 
-describe('provider-microsoft/Inbox Rule Management', () => {
+describe('email-inbox-rules/Inbox Rule Management (Microsoft Graph)', () => {
   it('Scenario: Lists every paginated rule without stripping fields', async () => {
     const firstRule = {
       id: 'rule-1',
@@ -169,10 +208,16 @@ describe('provider-microsoft/Inbox Rule Management', () => {
     expect(get).toHaveBeenNthCalledWith(2, 'https://graph.microsoft.com/rules-page-2');
   });
 
-  it('Scenario: Creates a rule after resolving its custom move destination', async () => {
+  it('Scenario: Re-resolve a rule destination', async () => {
+    // Creates a rule after resolving its custom move destination. Primes a
+    // STALE cache entry for "Newsletters" first (a plain listFolders()), so
+    // this only passes if createInboxRule forces a fresh traversal rather
+    // than reusing the (now-wrong) cached id — proving it does NOT share
+    // move_to_folder's cached-resolution behavior.
+    let newslettersId = 'stale-news-id';
     const get = vi.fn(async (url: string) => {
       if (url.startsWith('/me/mailFolders?')) {
-        return { value: [{ id: 'news-id', displayName: 'Newsletters', childFolderCount: 0 }] };
+        return { value: [{ id: newslettersId, displayName: 'Newsletters', childFolderCount: 0 }] };
       }
       // No sequence supplied → the provider lists existing rules to append.
       if (url === '/me/mailFolders/inbox/messageRules') {
@@ -187,6 +232,11 @@ describe('provider-microsoft/Inbox Rule Management', () => {
     const post = vi.fn().mockResolvedValue({ id: 'rule-1', displayName: 'GitHub' });
     const provider = new GraphEmailProvider(createMockClient({ get, post }));
 
+    // Prime the 60s move-to-folder cache with the stale id, then change
+    // what Graph would return for a fresh traversal.
+    await provider.listFolders();
+    newslettersId = 'news-id';
+
     await provider.createInboxRule({
       displayName: 'GitHub',
       conditions: { senderContains: ['github.com'] },
@@ -199,6 +249,8 @@ describe('provider-microsoft/Inbox Rule Management', () => {
       // invalid default of 0.
       sequence: 4,
       conditions: { senderContains: ['github.com'] },
+      // Resolves to the freshly-traversed id, not the primed stale one —
+      // proof the rule-destination path re-resolved rather than reusing cache.
       actions: { moveToFolder: 'news-id', markAsRead: true },
     });
   });
@@ -265,7 +317,8 @@ describe('provider-microsoft/Inbox Rule Management', () => {
 });
 
 describe('provider-microsoft/Peer-review hardening (PR #106)', () => {
-  it('Scenario: Rejects case-variant forwarding actions called directly on the provider', async () => {
+  it('Scenario: Reject case-variant forwarding at the provider', async () => {
+    // Rejects case-variant forwarding actions called directly on the provider.
     const client = createMockClient();
     const provider = new GraphEmailProvider(client);
 
@@ -281,7 +334,8 @@ describe('provider-microsoft/Peer-review hardening (PR #106)', () => {
     expect(client.post).not.toHaveBeenCalled();
   });
 
-  it('Scenario: Fails closed on rule actions outside the safe allowlist', async () => {
+  it('Scenario: Fail closed on unknown actions', async () => {
+    // Fails closed on rule actions outside the safe allowlist.
     const client = createMockClient();
     const provider = new GraphEmailProvider(client);
 
@@ -293,7 +347,8 @@ describe('provider-microsoft/Peer-review hardening (PR #106)', () => {
     expect(client.post).not.toHaveBeenCalled();
   });
 
-  it('Scenario: Caps total Graph requests across a wide recursive folder tree', async () => {
+  it('Scenario: Truncate rather than fail on a very large mailbox', async () => {
+    // Caps total Graph requests across a wide recursive folder tree.
     // Every folder claims a child, so an uncapped traversal recurses forever.
     const get = vi.fn(async () => ({
       value: [{ id: `f-${get.mock.calls.length}`, displayName: `F${get.mock.calls.length}`, childFolderCount: 1 }],
@@ -309,7 +364,8 @@ describe('provider-microsoft/Peer-review hardening (PR #106)', () => {
 });
 
 describe('provider-microsoft/Destructive rule destinations (PR #106 review)', () => {
-  it('Scenario: Blocks a rule that files mail into Deleted Items via any alias', async () => {
+  it('Scenario: Reject aliases and case variants after resolution', async () => {
+    // Blocks a rule that files mail into Deleted Items via any alias.
     const client = createMockClient();
     const provider = new GraphEmailProvider(client);
 
@@ -325,7 +381,8 @@ describe('provider-microsoft/Destructive rule destinations (PR #106 review)', ()
     expect(client.post).not.toHaveBeenCalled();
   });
 
-  it('Scenario: Does not cache a truncated folder snapshot', async () => {
+  it('Scenario: Never cache a partial tree', async () => {
+    // Does not cache a truncated folder snapshot.
     let calls = 0;
     const get = vi.fn(async () => {
       calls += 1;
@@ -462,7 +519,8 @@ describe('provider-microsoft/Round-2 Codex probes (PR #106)', () => {
     }
   });
 
-  it('Scenario: A truncated tree refuses a name match rather than misrouting a move', async () => {
+  it('Scenario: Refuse to infer absence from a truncated tree', async () => {
+    // A truncated tree refuses a name match rather than misrouting a move.
     // Every folder claims a child so the traversal truncates; the target name
     // is visible but cannot be proven unique, so resolution must refuse.
     const get = vi.fn(async (url: string) => {

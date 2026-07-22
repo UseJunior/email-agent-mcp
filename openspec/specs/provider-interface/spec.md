@@ -6,7 +6,7 @@ feature: Provider Abstraction
 ## Purpose
 
 Defines capability-based provider interfaces (EmailReader, EmailSender, EmailSubscriber), provider registration via dynamic import, error normalization, authentication lifecycle, and rate limit handling. Providers implement the interfaces they support.
-
+## Requirements
 ### Requirement: Capability Interfaces
 
 The system SHALL define capability-based interfaces: `EmailReader` (list, get, search, getThread), `EmailSender` (send, reply, createDraft, sendDraft), and `EmailSubscriber` (subscribe, unsubscribe). Providers implement what they support. On the write path, `EmailSender` implementations SHALL inspect `ComposeMessage.bodyHtml` (and for reply methods, `ReplyOptions.bodyHtml`) to decide the transport content type: when set, send as HTML; otherwise send as plain text.
@@ -65,3 +65,22 @@ The system SHALL manage the authentication lifecycle: connect (initial auth), re
 #### Scenario: Token refresh
 - **WHEN** an access token expires during an operation
 - **THEN** the system refreshes the token using the stored refresh token and retries the operation
+
+### Requirement: Optional Folder and Rule Capabilities
+
+The provider abstraction SHALL define `EmailFolderManager` and `EmailRuleManager` as optional capabilities on the combined `EmailProvider` type and SHALL advertise `folders` and `rules` in provider capability metadata.
+
+#### Scenario: Provider omits optional capabilities
+- **WHEN** a provider implements email reading and sending but not folder or rule management
+- **THEN** it remains a valid `EmailProvider`
+- **AND** folder and rule actions can detect the missing capability
+
+### Requirement: Microsoft Mailbox Settings Consent
+
+The Microsoft delegated authentication configuration SHALL request `MailboxSettings.ReadWrite` in both the short and full-URL Graph scope lists.
+
+#### Scenario: Existing user reconnects
+- **WHEN** an existing Microsoft user reconnects after this capability is introduced
+- **THEN** the consent request includes `MailboxSettings.ReadWrite`
+- **AND** user-facing documentation states that re-consent is required
+
