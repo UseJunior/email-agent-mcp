@@ -1,0 +1,9 @@
+- [ ] Add `reply_all: z.boolean().optional().default(true)` to `CreateDraftInput` in `packages/email-core/src/actions/draft.ts`, with a `.describe()` mirroring `reply.ts:27` and noting it only applies when `reply_to` is set
+- [ ] Pass `replyAll: input.reply_all` to `createReplyDraft` in the `replyTo` branch (`draft.ts:131`)
+- [ ] Mention the flag in the `create_draft` action description so it surfaces in the MCP tool listing
+- [ ] Add action tests in `packages/email-core/src/actions/draft.test.ts` asserting propagation for `false`, the `true` default when omitted, and that an explicit `cc` is still forwarded when `reply_all: false`. Every call MUST supply `to` and `subject` — `validateRequiredFields` runs at `draft.ts:88`, before the `replyTo` branch, so a `{reply_to, body}`-only call returns `MISSING_FIELD` and never reaches the provider. Subjects must also satisfy the `checkReplyThreading` guardrail at `draft.ts:103`
+- [ ] Do NOT rely on `MockEmailProvider` to prove recipient semantics — its `createReplyDraft` (`testing/mock-provider.ts:262`) ignores `replyAll` and always produces a sender-only reply, so a mock-only test would pass vacuously. Core tests may spy on the call; recipient semantics must be proven at the provider level
+- [ ] Reuse or rename the existing Gmail and Microsoft reply tests under a spec-traceable `describe('email-write/Reply Scope Control')` so both providers prove actual recipient behavior: Graph routes to `createReply` vs `createReplyAll` (`email-graph-provider.ts:852`), Gmail omits derived To/Cc (`email-gmail-provider.ts:243-245` for the draft path, `:203` for send)
+- [ ] Add the matching scenario test for the existing `reply_to_email` send-path behavior — it ships today but was never spec-traced
+- [ ] Run `openspec validate add-create-draft-reply-all --strict`
+- [ ] Run `npm run test:run --workspaces`, `npm run lint --workspaces`, and `npm run check:spec-coverage`
