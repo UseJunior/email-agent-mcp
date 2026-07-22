@@ -1,9 +1,0 @@
-- [x] Add and export `EmailFolderManager` and `EmailRuleManager` provider contracts and capability metadata.
-- [x] Add folder actions and unit tests for listing, creation, deletion, annotations, unsupported providers, and system-folder errors.
-- [x] Add inbox-rule actions and unit tests for faithful listing, safe creation, explicit approval, blocked actions, deletion, annotations, and unsupported providers.
-- [x] Implement recursive paginated Microsoft Graph folder traversal, computed paths, creation, deletion, and 60-second cached resolution.
-- [x] Resolve custom folder names and paths in `moveToFolder` while preserving well-known aliases.
-- [x] Implement Microsoft Graph inbox-rule list/create/delete endpoints.
-- [x] Add `MailboxSettings.ReadWrite` to both delegated scope lists and document re-consent.
-- [x] Export/register all six actions and update the English README tool reference.
-- [x] Run strict OpenSpec validation, focused action tests, move regression tests, build, full test suite, type-check, and lint.
