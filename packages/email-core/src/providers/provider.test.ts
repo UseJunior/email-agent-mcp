@@ -61,6 +61,37 @@ describe('provider-interface/Capability Interfaces', () => {
   });
 });
 
+describe('provider-interface/Optional Folder and Rule Capabilities', () => {
+  it('Scenario: Provider omits optional capabilities', async () => {
+    const provider = new MockEmailProvider();
+    provider.addMessage({ id: 'msg1', subject: 'Test' });
+
+    // A provider implementing only EmailReader + EmailSender (no
+    // EmailFolderManager/EmailRuleManager) remains a valid EmailProvider —
+    // folders/rules are Partial<> on the combined type.
+    const partialProvider = {
+      listMessages: provider.listMessages.bind(provider),
+      getMessage: provider.getMessage.bind(provider),
+      searchMessages: provider.searchMessages.bind(provider),
+      getThread: provider.getThread.bind(provider),
+      sendMessage: provider.sendMessage.bind(provider),
+      replyToMessage: provider.replyToMessage.bind(provider),
+      createDraft: provider.createDraft.bind(provider),
+      sendDraft: provider.sendDraft.bind(provider),
+    } satisfies EmailProvider;
+
+    expect(partialProvider.listFolders).toBeUndefined();
+    expect(partialProvider.createInboxRule).toBeUndefined();
+
+    // Folder/rule actions detect the missing capability rather than
+    // throwing — see email-folders/Unsupported Folder Provider and
+    // email-inbox-rules/Unsupported Rule Provider for the action-level
+    // NOT_SUPPORTED contract this enables.
+    const messages = await provider.listMessages({ limit: 10 });
+    expect(messages).toHaveLength(1);
+  });
+});
+
 describe('provider-interface/Provider Registration', () => {
   it('Scenario: Dynamic discovery', async () => {
     // WHEN the MCP server starts

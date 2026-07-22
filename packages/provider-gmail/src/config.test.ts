@@ -94,12 +94,12 @@ describe('provider-gmail/Config Discovery', () => {
   });
 });
 
-describe('provider-gmail/Metadata source discrimination', () => {
+describe('mailbox-config/Configure Mailbox', () => {
   async function writeRaw(filename: string, body: Record<string, unknown>): Promise<void> {
     await writeFile(join(tempHome, 'tokens', filename), JSON.stringify(body, null, 2) + '\n');
   }
 
-  it('parses pre-broker (no source field) BYOK records as source=byok', async () => {
+  it('Scenario: Pre-broker metadata is parsed as BYOK only when unambiguous', async () => {
     await writeRaw('legacy.json', {
       provider: 'gmail',
       mailboxName: 'legacy',
@@ -114,7 +114,7 @@ describe('provider-gmail/Metadata source discrimination', () => {
     expect(loaded.clientId).toBe('old-client');
   });
 
-  it('parses broker-source records with brokerUrl', async () => {
+  it('Scenario: Gmail mailbox metadata is mode-discriminated', async () => {
     await writeRaw('broker.json', {
       provider: 'gmail',
       source: 'broker',
@@ -131,7 +131,7 @@ describe('provider-gmail/Metadata source discrimination', () => {
     expect((loaded as unknown as { clientSecret?: string }).clientSecret).toBeUndefined();
   });
 
-  it('rejects ambiguous records that mix BYOK and broker fields', async () => {
+  it('Scenario: Ambiguous mixed-shape metadata is rejected', async () => {
     // Could equally describe either mode; refuse to guess and force a re-configure.
     await writeRaw('ambiguous.json', {
       provider: 'gmail',

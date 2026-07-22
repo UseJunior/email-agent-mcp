@@ -26,7 +26,9 @@ describe('email-folders/List Folders', () => {
     expect(listFoldersAction.annotations).toEqual({ readOnlyHint: true, destructiveHint: false });
   });
 
-  it('Scenario: Unsupported provider returns NOT_SUPPORTED', async () => {
+  it('Scenario: Gmail folder request', async () => {
+    // MockEmailProvider without listFolders stands in for a provider (e.g.
+    // Gmail) that does not implement EmailFolderManager.
     const result = await listFoldersAction.run(contextWith(), {});
     expect(result).toMatchObject({ success: false, error: { code: 'NOT_SUPPORTED' } });
   });
@@ -65,7 +67,7 @@ describe('email-folders/Delete Folder', () => {
     expect(deleteFolderAction.annotations.destructiveHint).toBe(true);
   });
 
-  it('Scenario: Deletion is disabled by default without operator opt-in', async () => {
+  it('Scenario: Folder deletion is disabled by default', async () => {
     const deleteFolder = vi.fn().mockResolvedValue(undefined);
     const result = await deleteFolderAction.run(
       contextWith({ deleteFolder }, { deleteEnabled: false }),
@@ -76,7 +78,7 @@ describe('email-folders/Delete Folder', () => {
     expect(deleteFolder).not.toHaveBeenCalled();
   });
 
-  it('Scenario: Deletion requires an explicit caller affirmation', async () => {
+  it('Scenario: Folder deletion requires explicit affirmation', async () => {
     const deleteFolder = vi.fn().mockResolvedValue(undefined);
     const result = await deleteFolderAction.run(
       contextWith({ deleteFolder }),

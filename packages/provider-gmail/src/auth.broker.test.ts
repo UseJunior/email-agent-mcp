@@ -30,7 +30,48 @@ describe('provider-gmail/broker-mode credential discipline', () => {
     expect(client.credentials.expiry_date).toBeTypeOf('number');
   });
 
-  it('refresh() in broker mode hits the broker, never Google', async () => {
+  it('Scenario: Gmail OAuth via BYOK', async () => {
+    // BYOK mode (clientId + clientSecret, no brokerUrl) runs the
+    // configure-time local-loopback flow — generateAuthUrl + exchangeCode —
+    // directly against Google via the real OAuth2Client. The broker is
+    // never contacted (global fetch, the broker's only transport, must
+    // stay unused), and the exchanged tokens are persisted onto the auth
+    // manager for the caller to write into mailbox metadata.
+    const fetchMock = vi.fn(async () => {
+      throw new Error('BYOK mode must not hit fetch (that is the broker transport)');
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    const auth = new GmailAuthManager({
+      clientId: 'byok-client',
+      clientSecret: 'byok-secret',
+      redirectUri: 'http://127.0.0.1:0/oauth2callback',
+    });
+
+    // generateAuthUrl is only available in byok mode — asserts this is
+    // the local-loopback consent flow, not startBrokerSession.
+    const authUrl = auth.generateAuthUrl({ state: 'xyz' });
+    expect(authUrl).toContain('client_id=byok-client');
+
+    const getToken = vi.spyOn(auth.getOAuth2Client(), 'getToken').mockResolvedValue({
+      tokens: {
+        access_token: 'byok-access',
+        refresh_token: 'byok-refresh',
+        expiry_date: Date.now() + 3600000,
+      },
+    } as Awaited<ReturnType<InstanceType<typeof import('google-auth-library').OAuth2Client>['getToken']>>);
+
+    await auth.exchangeCode('auth-code');
+
+    expect(getToken).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'auth-code' }),
+    );
+    expect(auth.getAccessToken()).toBe('byok-access');
+    expect(auth.getRefreshToken()).toBe('byok-refresh');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Broker-mode refresh routes through the broker', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input.toString();
       if (url === 'https://broker.test/api/refresh') {

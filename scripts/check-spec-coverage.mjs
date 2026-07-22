@@ -12,7 +12,10 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = join(fileURLToPath(import.meta.url), '..', '..');
 const SPECS_DIR = join(ROOT, 'openspec', 'specs');
-const PACKAGES_DIR = join(ROOT, 'packages');
+// Both npm workspaces globs (see root package.json "workspaces") can contain
+// implementation + tests for spec-covered behavior — e.g. the OAuth broker
+// lives under apps/oauth-broker, not packages/.
+const TEST_ROOTS = [join(ROOT, 'packages'), join(ROOT, 'apps')];
 
 // ── Spec parsing ────────────────────────────────────────────────────────────
 
@@ -68,7 +71,7 @@ async function parseScenariosFromSpecs() {
 // ── Test scanning ───────────────────────────────────────────────────────────
 
 /**
- * Recursively find all *.test.ts files under packages/.
+ * Recursively find all *.test.ts files under the given directory.
  * @param {string} dir
  * @returns {Promise<string[]>}
  */
@@ -104,7 +107,9 @@ async function parseScenariosFromTests() {
   /** @type {Map<string, Set<string>>} */
   const testMap = new Map();
 
-  const testFiles = await findTestFiles(PACKAGES_DIR);
+  const testFiles = (
+    await Promise.all(TEST_ROOTS.map((root) => findTestFiles(root)))
+  ).flat();
 
   for (const filePath of testFiles) {
     const content = await readFile(filePath, 'utf-8');
@@ -114,7 +119,11 @@ async function parseScenariosFromTests() {
     const specIds = new Set(describeMatches.map((m) => m[1].trim()));
 
     // Extract scenario names: it('Scenario: name', ...)
-    const scenarioMatches = [...content.matchAll(/it\s*\(\s*['"`]Scenario:\s+([^'"`]+)['"`]/g)];
+    // Match against the SAME opening delimiter (backreference) rather than
+    // excluding all quote characters — some canonical scenario names embed
+    // a literal `"` (e.g. Inline "On … wrote:" ...), which a delimiter-
+    // agnostic exclusion would truncate at.
+    const scenarioMatches = [...content.matchAll(/it\s*\(\s*(['"`])Scenario:\s+((?:(?!\1).)+)\1/g)];
 
     for (const specId of specIds) {
       if (!testMap.has(specId)) {
@@ -122,7 +131,7 @@ async function parseScenariosFromTests() {
       }
       const set = testMap.get(specId);
       for (const match of scenarioMatches) {
-        set.add(match[1].trim());
+        set.add(match[2].trim());
       }
     }
   }

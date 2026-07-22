@@ -60,7 +60,9 @@ vi.mock('@azure/identity-cache-persistence', () => ({
 }));
 
 describe('provider-interface/Microsoft Mailbox Settings Consent', () => {
-  it('Scenario: Both delegated scope lists request MailboxSettings.ReadWrite', () => {
+  it('Scenario: Existing user reconnects', () => {
+    // Both delegated scope lists request MailboxSettings.ReadWrite, so a
+    // reconnect after this capability ships prompts for the new consent.
     expect(GRAPH_SCOPES).toContain('MailboxSettings.ReadWrite');
     expect(GRAPH_SCOPES_FULL).toContain('https://graph.microsoft.com/MailboxSettings.ReadWrite');
   });

@@ -84,7 +84,7 @@ describe('email-read/Read Email', () => {
     expect('bcc' in result).toBe(true);
   });
 
-  it('Scenario: strip_quoted_history omitted preserves full thread', async () => {
+  it('Scenario: Default behavior is unchanged', async () => {
     provider.addMessage({
       id: 'msg-thread',
       body: [
@@ -103,7 +103,9 @@ describe('email-read/Read Email', () => {
     expect(result.body).not.toContain(QUOTE_MARKER);
   });
 
-  it('Scenario: strip_quoted_history true removes terminal Gmail-style chain', async () => {
+  it('Scenario: Strip quoted history when flag is true', async () => {
+    // Also verifies: strip_quoted_history true removes a terminal
+    // Gmail-style "On … wrote:" chain.
     provider.addMessage({
       id: 'msg-thread',
       body: [

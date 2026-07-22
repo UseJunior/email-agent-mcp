@@ -43,7 +43,7 @@ function freshSession(secret: string): Session {
   };
 }
 
-describe('broker/store memory backend', () => {
+describe('provider-gmail/OAuth2 Authentication (broker store)', () => {
   it('refuses session_id collisions', async () => {
     const store = getStore();
     const r1 = await store.create('a'.repeat(40), freshSession('secret-1'));
@@ -62,7 +62,8 @@ describe('broker/store memory backend', () => {
     if (!result.ok) expect(result.reason).toBe('pending');
   });
 
-  it('setReady → claim succeeds once and only once (atomic)', async () => {
+  it('Scenario: Atomic one-shot ticket claim', async () => {
+    // setReady → claim succeeds once and only once.
     const store = getStore();
     const id = 'c'.repeat(40);
     const secret = 'secret-success';
@@ -82,7 +83,9 @@ describe('broker/store memory backend', () => {
     if (!b.ok) expect(['consumed', 'not_found']).toContain(b.reason);
   });
 
-  it('claim with wrong secret does NOT consume the session', async () => {
+  it('Scenario: Public session_id is not a bearer credential', async () => {
+    // A wrong-secret claim attempt (the session_id alone is not enough)
+    // must fail without consuming or destroying the session.
     const store = getStore();
     const id = 'd'.repeat(40);
     const secret = 'right';
@@ -99,7 +102,9 @@ describe('broker/store memory backend', () => {
     expect(good.ok).toBe(true);
   });
 
-  it('setFailed surfaces denied vs exchange_failed distinctly', async () => {
+  it('Scenario: Distinguishable terminal states', async () => {
+    // setFailed surfaces denied vs exchange_failed distinctly; sibling
+    // tests in this file cover the pending and expired terminal states.
     const store = getStore();
     const id = 'e'.repeat(40);
     const secret = 'sec';

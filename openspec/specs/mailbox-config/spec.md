@@ -6,7 +6,7 @@ feature: Mailbox Management
 ## Purpose
 
 Defines multi-mailbox configuration: connecting named mailboxes to providers, setting defaults, listing status, and provider discovery via dynamic import. Supports simultaneous Graph + Gmail connections. Each mailbox is canonically identified by its email address, with an optional user-defined alias for convenience.
-
+## Requirements
 ### Requirement: Mailbox Canonical Identity
 
 The canonical ID of a mailbox SHALL be its email address (e.g., `test-user@example.com`). The user MAY provide an optional alias (e.g., "work") for convenience. Tool inputs that accept a mailbox identifier SHALL accept either the email address or the alias, resolving to the same mailbox.
@@ -44,6 +44,21 @@ The system SHALL provide a `configure_mailbox` action that connects a named mail
 - **WHEN** `configure_mailbox` is called with `{name: "work", provider: "microsoft", credentials: {...}, default: true}`
 - **THEN** the system connects to the Microsoft Graph API, fetches the email address, and marks "work" as the default mailbox
 - **AND** the stored metadata includes `emailAddress`
+
+#### Scenario: Gmail mailbox metadata is mode-discriminated
+- **WHEN** a Gmail mailbox is configured
+- **THEN** the stored metadata records a `source` discriminator equal to `'broker'` or `'byok'`
+- **AND** for `'byok'` the metadata stores the user-supplied `clientId` and `clientSecret` plus the `refreshToken`
+- **AND** for `'broker'` the metadata stores the `brokerUrl` plus the `refreshToken` and SHALL NOT store any `clientSecret` on disk
+
+#### Scenario: Pre-broker metadata is parsed as BYOK only when unambiguous
+- **WHEN** the system loads a Gmail mailbox metadata file written before the broker change (no `source` field) that has both `clientId` and `clientSecret` and NO `brokerUrl`
+- **THEN** the system treats it as `source: 'byok'` for the purposes of subsequent loads and reconnects
+
+#### Scenario: Ambiguous mixed-shape metadata is rejected
+- **WHEN** the system loads a Gmail mailbox metadata file that contains BOTH `clientSecret` and `brokerUrl`
+- **THEN** the system refuses to interpret the record (returns null) and leaves the mailbox unconfigured, forcing the user to re-run configure
+- **AND** `source: 'broker'` records that lack `brokerUrl`, and `source: 'byok'` records that lack `clientSecret`, are likewise rejected
 
 ### Requirement: Default Mailbox
 
@@ -116,3 +131,4 @@ The system SHALL detect installed provider packages (`@usejunior/provider-micros
 #### Scenario: Provider not installed
 - **WHEN** `configure_mailbox` is called with `{provider: "gmail"}` but `@usejunior/provider-gmail` is not installed
 - **THEN** the system returns: "Provider 'gmail' not available. Install: npm install @usejunior/provider-gmail"
+

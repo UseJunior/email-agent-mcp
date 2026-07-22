@@ -3,7 +3,7 @@ import { stripQuotedHistory } from './quotes.js';
 
 const MARKER = '[...prior thread truncated]';
 
-describe('content-engine/Quoted-History Stripping', () => {
+describe('email-read/Optional Quoted-History Stripping (detector)', () => {
   it('Scenario: Strip Gmail "On … wrote:" preamble with quoted reply', () => {
     const body = [
       "Thanks, that works for me.",
@@ -69,7 +69,7 @@ describe('content-engine/Quoted-History Stripping', () => {
     expect(twice).toBe(once);
   });
 
-  it('Scenario: Inline markdown blockquote followed by user text is preserved', () => {
+  it('Scenario: Inline blockquote in latest reply is preserved', () => {
     const body = [
       "Hey team,",
       "",
@@ -331,7 +331,7 @@ describe('content-engine/Quoted-History Stripping', () => {
   // followed by user prose would collapse the user's reply to the marker only.
   // ---------------------------------------------------------------------------
 
-  it('Scenario: Inline Gmail "On … wrote:" with user prose after is preserved', () => {
+  it('Scenario: Inline "On … wrote:" with user prose after is preserved', () => {
     const body = [
       'Hi team,',
       '',
