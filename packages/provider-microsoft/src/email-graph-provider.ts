@@ -1,5 +1,6 @@
 // GraphEmailProvider — Microsoft Graph API email provider
 import type {
+  EmailAddress,
   EmailAttachment,
   EmailMessage,
   EmailThread,
@@ -70,6 +71,18 @@ function checkGraphAttachmentLimits(
     };
   }
   return null;
+}
+
+/**
+ * Map an address list to Graph `recipient` resources. Returns `undefined` for a
+ * missing list so callers can spread it into a payload without emitting an
+ * explicit `null` — on a PATCH that would clear the field rather than leave it
+ * untouched.
+ */
+function toGraphRecipients(
+  addrs: EmailAddress[] | undefined,
+): Array<{ emailAddress: { address: string; name?: string } }> | undefined {
+  return addrs?.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
 }
 
 /** Build a Graph `fileAttachment` resource from an OutboundAttachment. */
@@ -737,8 +750,9 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     const graphMsg: Record<string, unknown> = {
       subject: msg.subject.slice(0, SUBJECT_MAX_LENGTH),
       body: buildGraphBody(msg.bodyHtml, msg.body),
-      toRecipients: msg.to.map(r => ({ emailAddress: { address: r.email, name: r.name } })),
-      ccRecipients: msg.cc?.map(r => ({ emailAddress: { address: r.email, name: r.name } })),
+      toRecipients: toGraphRecipients(msg.to),
+      ccRecipients: toGraphRecipients(msg.cc),
+      bccRecipients: toGraphRecipients(msg.bcc),
       singleValueExtendedProperties: [
         { id: TRACKING_PROPERTY, value: trackingId },
       ],
@@ -784,7 +798,9 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
     const graphMsg: Record<string, unknown> = {
       subject: msg.subject,
       body: buildGraphBody(msg.bodyHtml, msg.body),
-      toRecipients: msg.to.map(r => ({ emailAddress: { address: r.email, name: r.name } })),
+      toRecipients: toGraphRecipients(msg.to),
+      ccRecipients: toGraphRecipients(msg.cc),
+      bccRecipients: toGraphRecipients(msg.bcc),
     };
     if (msg.attachments && msg.attachments.length > 0) {
       graphMsg.attachments = msg.attachments.map(toGraphFileAttachment);
@@ -938,8 +954,11 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       }
     }
     if (msg.subject !== undefined) patch.subject = msg.subject.slice(0, SUBJECT_MAX_LENGTH);
-    if (msg.to) patch.toRecipients = msg.to.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
-    if (msg.cc) patch.ccRecipients = msg.cc.map(r => ({ emailAddress: { address: r.email, name: r.name } }));
+    // An omitted list leaves the draft's existing recipients untouched (Graph
+    // PATCH is a merge); a provided list replaces them.
+    if (msg.to) patch.toRecipients = toGraphRecipients(msg.to);
+    if (msg.cc) patch.ccRecipients = toGraphRecipients(msg.cc);
+    if (msg.bcc) patch.bccRecipients = toGraphRecipients(msg.bcc);
 
     // Attachments: an omitted field preserves the draft's existing attachments
     // (Graph attachments are child resources untouched by this PATCH). A

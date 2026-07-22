@@ -1905,6 +1905,95 @@ describe('provider-microsoft/Watcher Timestamp Boundary', () => {
   });
 });
 
+describe('provider-microsoft/Outbound Recipients', () => {
+  type MockFn = ReturnType<typeof vi.fn>;
+
+  const CC = [{ email: 'carol@corp.com', name: 'Carol' }];
+  const BCC = [{ email: 'dave@corp.com' }];
+
+  // Issue #48: createDraft built its payload with toRecipients only, so a draft
+  // created against a Graph mailbox silently lost cc/bcc. sendMessage and
+  // updateDraft mapped cc but had the same bcc gap. Gmail has always honored
+  // both (buildMimeMessage), so this was a provider-parity bug.
+  it('createDraft maps cc and bcc into the Graph payload', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createDraft({
+      to: [{ email: 'alice@corp.com' }],
+      cc: CC,
+      bcc: BCC,
+      subject: 'Draft with cc/bcc',
+      body: 'body',
+    });
+
+    const [url, payload] = (client.post as MockFn).mock.calls[0]!;
+    expect(url).toContain('/messages');
+    const msg = payload as {
+      toRecipients: Array<{ emailAddress: { address: string } }>;
+      ccRecipients?: Array<{ emailAddress: { address: string; name?: string } }>;
+      bccRecipients?: Array<{ emailAddress: { address: string } }>;
+    };
+    expect(msg.toRecipients.map(r => r.emailAddress.address)).toEqual(['alice@corp.com']);
+    expect(msg.ccRecipients).toEqual([{ emailAddress: { address: 'carol@corp.com', name: 'Carol' } }]);
+    expect(msg.bccRecipients).toEqual([{ emailAddress: { address: 'dave@corp.com', name: undefined } }]);
+  });
+
+  it('createDraft omits recipient keys entirely when cc/bcc are absent', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createDraft({
+      to: [{ email: 'alice@corp.com' }],
+      subject: 'No cc',
+      body: 'body',
+    });
+
+    // JSON.stringify drops undefined keys, so an absent list must never reach
+    // Graph as an explicit null — that would clear the field server-side.
+    const payload = (client.post as MockFn).mock.calls[0]![1];
+    expect(JSON.parse(JSON.stringify(payload))).not.toHaveProperty('ccRecipients');
+    expect(JSON.parse(JSON.stringify(payload))).not.toHaveProperty('bccRecipients');
+  });
+
+  it('sendMessage maps bcc alongside cc', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.sendMessage({
+      to: [{ email: 'alice@corp.com' }],
+      cc: CC,
+      bcc: BCC,
+      subject: 'Send with bcc',
+      body: 'body',
+    });
+
+    const payload = (client.post as MockFn).mock.calls[0]![1] as {
+      message: {
+        ccRecipients?: Array<{ emailAddress: { address: string } }>;
+        bccRecipients?: Array<{ emailAddress: { address: string } }>;
+      };
+    };
+    expect(payload.message.ccRecipients?.map(r => r.emailAddress.address)).toEqual(['carol@corp.com']);
+    expect(payload.message.bccRecipients?.map(r => r.emailAddress.address)).toEqual(['dave@corp.com']);
+  });
+
+  it('updateDraft patches bcc when supplied and omits it otherwise', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    await provider.updateDraft('draft-bcc', { bcc: BCC });
+    const withBcc = (client.patch as MockFn).mock.calls[0]![1] as Record<string, unknown>;
+    expect(withBcc.bccRecipients).toEqual([{ emailAddress: { address: 'dave@corp.com', name: undefined } }]);
+
+    // Omitting bcc must leave the draft's existing bcc alone — Graph PATCH is a
+    // merge, so the key has to be absent rather than null/[].
+    await provider.updateDraft('draft-bcc', { subject: 'Just a subject' });
+    const withoutBcc = (client.patch as MockFn).mock.calls[1]![1] as Record<string, unknown>;
+    expect(withoutBcc).not.toHaveProperty('bccRecipients');
+  });
+});
+
 describe('provider-microsoft/Outbound Attachments', () => {
   const PDF = Buffer.from('%PDF-1.4\nbytes', 'utf-8');
   type MockFn = ReturnType<typeof vi.fn>;
