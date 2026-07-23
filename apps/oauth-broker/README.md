@@ -60,7 +60,7 @@ by `Map.delete` between awaits is effectively atomic.
 4. Optional:
 
    ```
-   GMAIL_OAUTH_SCOPES=https://mail.google.com/    # default
+   GMAIL_OAUTH_SCOPES=https://www.googleapis.com/auth/gmail.modify    # default
    BROKER_TICKET_TTL_MS=300000                    # 5 min, default
    BROKER_REQUIRE_KV=true                         # force-fail without Redis even outside prod
    ```
@@ -77,10 +77,15 @@ by `Map.delete` between awaits is effectively atomic.
 ## Verification
 
 `https://<your-broker-domain>` must complete Google's OAuth verification
-flow including **CASA Tier 2** for the restricted `https://mail.google.com/`
-scope. Per Google's restricted-scope policy, running a server in the
-auth path (relay or otherwise) does not reduce the assessment scope —
-plan accordingly.
+flow for the restricted
+`https://www.googleapis.com/auth/gmail.modify` scope. Per Google's
+restricted-scope policy, transmitting restricted-scope data through a server
+requires a security assessment; running a server in the auth path does not
+remove that requirement.
+
+If an existing deployment explicitly sets `GMAIL_OAUTH_SCOPES`, update the
+environment value to `https://www.googleapis.com/auth/gmail.modify` before
+submitting the OAuth app for verification.
 
 ## Operational notes (deferred to follow-up PRs)
 

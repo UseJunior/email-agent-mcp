@@ -29,6 +29,12 @@ afterEach(() => {
 });
 
 describe('provider-gmail/OAuth2 Authentication (broker config)', () => {
+  it('defaults to the narrow Gmail modify scope', () => {
+    expect(getConfig().scopes).toEqual([
+      'https://www.googleapis.com/auth/gmail.modify',
+    ]);
+  });
+
   it('Scenario: Broker requires Redis in production', () => {
     // VERCEL_ENV=production with no KV_REST_API_URL must fail fast rather
     // than silently falling back to in-memory state that is not shared

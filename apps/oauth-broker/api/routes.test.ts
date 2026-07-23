@@ -107,6 +107,9 @@ describe('provider-gmail/OAuth2 Authentication (broker routes)', () => {
       expect(captured.redirect).toBeDefined();
       expect(captured.redirect).toContain('accounts.google.com');
       expect(captured.redirect).toContain(`state=${sessionId}`);
+      expect(new URL(captured.redirect!).searchParams.get('scope')).toBe(
+        'https://www.googleapis.com/auth/gmail.modify',
+      );
     }
 
     // 3. GET /api/callback exchanges code for tokens. Stub Google's response.
@@ -117,7 +120,7 @@ describe('provider-gmail/OAuth2 Authentication (broker routes)', () => {
           access_token: 'broker-access',
           refresh_token: 'broker-refresh',
           expires_in: 3600,
-          scope: 'https://mail.google.com/',
+          scope: 'https://www.googleapis.com/auth/gmail.modify',
           token_type: 'Bearer',
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
