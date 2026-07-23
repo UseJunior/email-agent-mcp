@@ -1,0 +1,49 @@
+WEBVTT
+
+1
+00:00:00.350 --> 00:00:06.650
+This video demonstrates the production Email Agent MCP OAuth client and the Gmail features enabled by the requested permission.
+
+2
+00:00:07.350 --> 00:00:20.650
+Email Agent MCP is an open-source, locally run email client and productivity integration. Its public homepage links directly to the privacy policy and Google-data disclosures.
+
+3
+00:00:21.350 --> 00:00:34.650
+The production project contains the hosted Web OAuth client. Data Access requests gmail.modify and identifies the product as an email client and email productivity application.
+
+4
+00:00:35.350 --> 00:00:45.650
+The hosted broker exchanges authorization codes and refreshes tokens. Gmail messages travel directly between the user’s local process and Google; the broker never receives email content.
+
+5
+00:00:46.350 --> 00:00:57.650
+This is the same public CLI users install. Configuration starts the hosted broker authorization flow at oauth.usejunior.com.
+
+6
+00:00:58.350 --> 00:01:43.650
+The user sees the complete Google consent flow in English, including the exact application identity and permission to read, compose, and send Gmail messages. The user explicitly continues before any Gmail access occurs.
+
+7
+00:01:44.350 --> 00:01:52.650
+Authorization returns to the local CLI, which reports the dedicated synthetic review mailbox as connected.
+
+8
+00:01:53.350 --> 00:02:17.650
+List and search return Gmail message metadata. Read retrieves the selected synthetic message, and get thread returns its conversation. Gmail API traffic is direct from this local process.
+
+9
+00:02:18.350 --> 00:02:51.650
+Email Agent MCP composes and sends a synthetic message through the Gmail API, restricted by the local recipient allowlist. It then sends a threaded reply and confirms the conversation in Gmail.
+
+10
+00:02:52.350 --> 00:03:03.650
+Only authorization codes and OAuth tokens traverse the broker for exchange and refresh. Message bodies stay between the local application and Gmail.
+
+11
+00:03:04.350 --> 00:03:16.650
+The user can remove local credentials and revoke the application’s access from their Google Account at any time.
+
+12
+00:03:17.350 --> 00:03:24.650
+UseJunior does not sell Gmail data, use it for advertising, or use it to train generalized AI models. Thank you for reviewing Email Agent MCP.

@@ -1,0 +1,46 @@
+:root {
+  color-scheme: dark;
+  --ink-950: #050b16;
+  --ink-900: #07101f;
+  --ink-850: #0a1628;
+  --ink-800: #0d1c31;
+  --ink-700: #18304c;
+  --ink-500: #51708f;
+  --paper: #f8fbff;
+  --muted: #9fb2c9;
+  --cyan: #72dcff;
+  --mint: #75f2c5;
+  --amber: #ffca6a;
+  --coral: #ff866f;
+  --blue: #79a7ff;
+  --line: rgb(163 195 226 / 18%);
+  --glass: rgb(12 27 47 / 86%);
+  --shadow-lg: 0 50px 120px rgb(0 0 0 / 48%);
+  --radius-lg: 34px;
+  --radius-md: 22px;
+  --font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  color: var(--paper);
+  background:
+    radial-gradient(circle at 75% 15%, rgb(46 112 169 / 18%), transparent 34%),
+    radial-gradient(circle at 16% 88%, rgb(30 137 119 / 15%), transparent 32%),
+    var(--ink-900);
+  font-family: var(--font-sans);
+  text-rendering: geometricprecision;
+  -webkit-font-smoothing: antialiased;
+}

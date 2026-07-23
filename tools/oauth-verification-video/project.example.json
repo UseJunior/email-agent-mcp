@@ -1,0 +1,54 @@
+{
+  "submission": {
+    "appName": "email-agent-mcp",
+    "googleCloudProject": "email-agent-mcp-gmail",
+    "requestedScope": "https://www.googleapis.com/auth/gmail.modify",
+    "dataAccessFeatures": [
+      "Email client",
+      "Email productivity"
+    ],
+    "productionOAuthClients": [
+      {
+        "name": "Email Agent MCP Broker",
+        "type": "Web application",
+        "clientId": null,
+        "coveredByCapture": "oauth-consent"
+      }
+    ]
+  },
+  "captures": {
+    "identity": {
+      "file": null
+    },
+    "auth-platform": {
+      "file": null
+    },
+    "configure": {
+      "file": null
+    },
+    "oauth-consent": {
+      "file": null
+    },
+    "connected": {
+      "file": null
+    },
+    "read": {
+      "file": null
+    },
+    "send-reply": {
+      "file": null
+    },
+    "revoke": {
+      "file": null
+    }
+  },
+  "attestations": {
+    "oauthClientInventoryAudited": false,
+    "dedicatedTestMailbox": false,
+    "authenticUneditedInteractions": false,
+    "englishConsentScreen": false,
+    "previousGrantRevokedBeforeCapture": false,
+    "noSecretsTokensOrPersonalMailVisible": false,
+    "appScopeAndBrandingMatchSubmission": false
+  }
+}

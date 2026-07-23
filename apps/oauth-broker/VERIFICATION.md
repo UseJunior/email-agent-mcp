@@ -22,10 +22,13 @@ Last audited: 2026-07-23.
 | Privacy policy | `https://usejunior.com/privacy_policy` |
 | Terms | `https://usejunior.com/terms` |
 
-At the audit date, all public broker routes returned Vercel
-`DEPLOYMENT_NOT_FOUND`, and the authenticated `use-junior` Vercel team showed
-no projects. Restore the deployment and complete a successful broker OAuth
-smoke before moving the OAuth app to production or recording the demo.
+At the audit date, Vercel project
+`use-junior/email-agent-mcp-oauth-broker` exists and has the audited non-secret
+broker origin, scope, KV requirement, and ticket TTL variables. It does not yet
+have its OAuth credentials, Redis, production deployment, or custom domain
+attached, so public broker routes still return `DEPLOYMENT_NOT_FOUND`. Complete
+those gates and a successful broker OAuth smoke before moving the OAuth app to
+production or recording the demo.
 
 The repository defaults to `gmail.modify`. A deployed broker with an explicit
 `GMAIL_OAUTH_SCOPES` value must set it to the same scope.
@@ -41,14 +44,22 @@ The repository defaults to `gmail.modify`. A deployed broker with an explicit
 - [ ] Confirm `POST /api/sessions` reaches the application rather than a
       Vercel deployment error.
 - [ ] Complete an end-to-end hosted-broker Gmail authorization and refresh
-      smoke with a test account.
-- [ ] Confirm the OAuth client is a Web application client with the exact
-      callback URI `https://oauth.usejunior.com/api/callback`.
+      smoke with a test account, then verify the released CLI can list, search,
+      read, and retrieve a thread and can send a message and reply.
+- [ ] Inventory Google Auth Platform > Clients. Leave exactly one production
+      OAuth client in this project: a Web application client for the hosted
+      broker with callback URI
+      `https://oauth.usejunior.com/api/callback`. Move or remove desktop,
+      development, and test clients before submission.
+- [ ] In Google Auth Platform > Data Access, select `Email client` and
+      `Email productivity`; leave backup/takeout and reporting/monitoring
+      unselected.
 - [ ] Verify `usejunior.com` in Google Search Console using the same Google
       account that owns the Cloud project.
-- [ ] Add the email-agent-mcp Google-data disclosures below to the public
-      privacy policy after legal review.
-- [ ] Make the product homepage link visibly to that same privacy-policy URL.
+- [x] Confirm the public privacy policy includes the email-agent-mcp
+      Google-data disclosures and Limited Use statement.
+- [x] Confirm the product homepage visibly links to that same privacy-policy
+      URL.
 - [ ] Review rate limiting, abuse monitoring, secret rotation, token scrubbing,
       incident response, and user-data deletion before the security assessment.
 
@@ -76,15 +87,16 @@ adding test-only clients or scopes to this production project.
 
 > email-agent-mcp is an open-source, locally run MCP server that lets a user
 > connect their own Gmail account to an AI agent they control. The product
-> lists, searches, and reads messages; creates, updates, and sends drafts and
-> replies; changes read/star/label state; and moves messages to folders,
-> including soft deletion by moving a message to Gmail Trash.
+> lists, searches, and reads messages, threads, and attachments; creates,
+> updates, and sends drafts; sends new messages; and sends replies within
+> existing threads.
 >
-> `gmail.modify` is the narrowest scope that supports this implemented feature
-> set. `gmail.readonly` cannot create drafts, send messages, or change message
-> and label state. `gmail.compose` and `gmail.send` cannot read and organize the
-> mailbox. The application does not immediately or permanently delete Gmail
-> messages and therefore does not request `https://mail.google.com/`.
+> `gmail.modify` is the narrowest single scope that supports this implemented
+> combination of reading existing Gmail content and composing and sending
+> messages. `gmail.readonly` cannot send messages, while `gmail.compose` and
+> `gmail.send` cannot read existing message content. The application does not
+> immediately or permanently delete Gmail messages and therefore does not
+> request `https://mail.google.com/`.
 >
 > Gmail API calls and message content travel directly between the user's local
 > email-agent-mcp process and Google. UseJunior's hosted OAuth broker performs
@@ -92,7 +104,7 @@ adding test-only clients or scopes to this production project.
 > APIs or receive email content.
 
 Edit the text if the product behavior or requested scope changes. Google may
-ask for separate explanations of read, compose/send, and modification features.
+ask for separate explanations of read and compose/send behavior.
 
 ## Demo video script
 
@@ -100,18 +112,26 @@ Record against a dedicated test mailbox with the consent screen language set
 to English:
 
 1. Show the public product homepage and its privacy-policy link.
-2. Start `email-agent-mcp configure --provider gmail`.
-3. Show the browser redirect to the same app name and branding configured in
+2. Show Google Auth Platform > Clients with the single production Web client
+   and its client ID, then show Data Access with `gmail.modify`, `Email client`,
+   and `Email productivity`.
+3. Start `email-agent-mcp configure --provider gmail --mailbox <test-account>`.
+4. Show the browser redirect to the same app name and branding configured in
    Google Auth Platform.
-4. Record the complete consent screen with the requested permission visible.
-5. Finish consent and show the CLI reporting the connected Gmail address.
-6. Demonstrate the user-facing features that require the scope:
-   list/search and read a test message; create/update a draft; modify a label or
-   read state; move a test message to Trash; and send a message to the same test
-   account.
-7. Explain that message content bypasses the hosted broker and that the local
+5. Record the complete consent screen in English with the requested permission
+   visible.
+6. Finish consent and show the CLI reporting the connected Gmail address.
+7. Against synthetic test messages, demonstrate `list_emails`,
+   `search_emails`, `read_email`, `get_thread`, `send_email`, and
+   `reply_to_email`, confirming the sent message and reply in Gmail.
+8. Explain that message content bypasses the hosted broker and that the local
    token can be removed by deleting the mailbox token file and revoking the
    grant in the user's Google Account.
+
+Do not demonstrate or claim label, read-state, folder, or Trash behavior: the
+Gmail provider does not currently expose those mutations. Draft and attachment
+footage may be added after those paths pass a live end-to-end smoke; the minimum
+script above proves the read and compose/send permission categories directly.
 
 Upload the recording to an unlisted URL accessible to Google's reviewers.
 Avoid displaying client secrets, refresh tokens, unrelated inbox contents, or
@@ -124,9 +144,9 @@ covers at least these facts. Treat this as implementation input for legal
 review, not as final legal language:
 
 - **Access and purpose:** with the user's OAuth consent, the local application
-  accesses Gmail messages, threads, drafts, attachments, and labels solely to
-  provide the user-requested read, search, organize, draft, reply, and send
-  features.
+  accesses Gmail messages, threads, drafts, attachments, and system labels
+  solely to provide the user-requested list, search, read, attachment, draft,
+  reply, and send features.
 - **Local storage:** the refresh token and mailbox configuration are stored on
   the user's machine under `~/.email-agent-mcp/tokens/`.
 - **Hosted broker:** the broker receives the authorization code and OAuth
@@ -141,9 +161,9 @@ review, not as final legal language:
   not sent to an AI model selected by UseJunior.
 - **No secondary use:** UseJunior does not sell Gmail data, use it for
   advertising, or use it to train generalized AI models.
-- **Service providers:** identify the infrastructure providers that process the
-  short-lived OAuth session and tokens, currently Vercel and the attached Redis
-  provider.
+- **Service providers:** identify Vercel and whichever Redis provider is
+  selected and attached before production as processors of the short-lived
+  OAuth session and tokens.
 - **Deletion and revocation:** explain how users delete local credentials,
   revoke Google access, and request deletion of any support or operational data.
 - **Limited Use:** state that use and transfer of Google user data complies with
