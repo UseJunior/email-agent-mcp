@@ -25,6 +25,7 @@ const PACKAGE_JSONS = [
   'packages/provider-microsoft/package.json',
   'packages/provider-gmail/package.json',
   'packages/email-agent-mcp/package.json',
+  'packages/email-agent-mcp-scoped/package.json',
 ];
 
 const SERVER_JSON = 'packages/email-agent-mcp/server.json';
@@ -36,6 +37,7 @@ const WORKSPACE_DEPS = [
   '@usejunior/email-mcp',
   '@usejunior/provider-microsoft',
   '@usejunior/provider-gmail',
+  'email-agent-mcp',
 ];
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -95,7 +97,9 @@ function checkVersionSync() {
       if (!deps) continue;
       for (const name of WORKSPACE_DEPS) {
         if (deps[name]) {
-          const expected = `^${[...uniqueVersions][0]}`;
+          const expected = name === 'email-agent-mcp'
+            ? [...uniqueVersions][0]
+            : `^${[...uniqueVersions][0]}`;
           if (deps[name] !== expected && uniqueVersions.size === 1) {
             console.error(`  ${rel}: ${name} is "${deps[name]}", expected "${expected}"`);
             ok = false;
@@ -129,7 +133,9 @@ function bumpVersion(newVersion) {
       if (!deps) continue;
       for (const name of WORKSPACE_DEPS) {
         if (deps[name]) {
-          deps[name] = `^${newVersion}`;
+          deps[name] = name === 'email-agent-mcp'
+            ? newVersion
+            : `^${newVersion}`;
         }
       }
     }

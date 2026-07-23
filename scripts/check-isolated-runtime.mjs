@@ -15,6 +15,7 @@ const PACKAGES = [
   'provider-gmail',
   'email-mcp',
   'email-agent-mcp',
+  'email-agent-mcp-scoped',
 ];
 
 async function main() {
@@ -44,15 +45,29 @@ async function main() {
       timeout: 120000,
     });
 
-    // Spawn the MCP server and send JSON-RPC requests
-    console.error('[smoke] Starting MCP server...');
-    const result = await testMcpServer(tmpDir);
-
-    if (result.success) {
-      console.error(`[smoke] PASS: MCP server responded with ${result.toolCount} tools`);
-    } else {
-      console.error(`[smoke] FAIL: ${result.error}`);
-      process.exit(1);
+    // Exercise both distribution package entry points directly. Invoking the
+    // package-local bins avoids npm's single .bin symlink collision when both
+    // compatibility names are intentionally installed together.
+    const distributions = [
+      {
+        label: 'email-agent-mcp',
+        serverBin: join(tmpDir, 'node_modules', 'email-agent-mcp', 'bin', 'email-agent-mcp.js'),
+      },
+      {
+        label: '@usejunior/email-agent-mcp',
+        serverBin: join(tmpDir, 'node_modules', '@usejunior', 'email-agent-mcp', 'bin', 'email-agent-mcp.js'),
+      },
+    ];
+    for (const distribution of distributions) {
+      console.error(`[smoke] Starting ${distribution.label} MCP server...`);
+      const result = await testMcpServer(tmpDir, distribution.serverBin);
+      if (!result.success) {
+        console.error(`[smoke] FAIL (${distribution.label}): ${result.error}`);
+        process.exit(1);
+      }
+      console.error(
+        `[smoke] PASS (${distribution.label}): MCP server responded with ${result.toolCount} tools`,
+      );
     }
 
     // Clean up tarballs
@@ -71,9 +86,8 @@ async function main() {
   }
 }
 
-function testMcpServer(installDir) {
+function testMcpServer(installDir, serverBin) {
   return new Promise((resolve) => {
-    const serverBin = join(installDir, 'node_modules', '.bin', 'email-agent-mcp');
     const proc = spawn(serverBin, ['serve'], {
       cwd: installDir,
       stdio: ['pipe', 'pipe', 'pipe'],

@@ -243,6 +243,7 @@ Agent Email ships with restrictive defaults that you loosen as needed:
 | `@usejunior/provider-microsoft` | Microsoft Graph API email provider |
 | `@usejunior/provider-gmail` | Gmail API email provider |
 | `email-agent-mcp` | Distribution wrapper (`npx email-agent-mcp`) |
+| `@usejunior/email-agent-mcp` | Compatibility wrapper, published in lockstep; use `email-agent-mcp` for new installs |
 
 ## Quality and Trust Signals
 

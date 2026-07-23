@@ -1,0 +1,48 @@
+{
+  "name": "@usejunior/email-agent-mcp",
+  "version": "0.1.9",
+  "description": "Compatibility package for email-agent-mcp — use the unscoped package for new installations",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "bin": {
+    "email-agent-mcp": "./bin/email-agent-mcp.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    }
+  },
+  "dependencies": {
+    "email-agent-mcp": "0.1.9"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin",
+    "index.js",
+    "index.d.ts"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/UseJunior/email-agent-mcp.git",
+    "directory": "packages/email-agent-mcp-scoped"
+  },
+  "homepage": "https://github.com/UseJunior/email-agent-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/UseJunior/email-agent-mcp/issues"
+  },
+  "keywords": [
+    "email",
+    "mcp",
+    "ai-agent",
+    "microsoft-graph",
+    "gmail"
+  ],
+  "license": "Apache-2.0"
+}

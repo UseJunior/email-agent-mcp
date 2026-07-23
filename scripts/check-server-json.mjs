@@ -18,6 +18,9 @@ const serverJson = JSON.parse(
 const packageJson = JSON.parse(
   readFileSync(resolve(root, 'packages/email-agent-mcp/package.json'), 'utf-8'),
 );
+const scopedPackageJson = JSON.parse(
+  readFileSync(resolve(root, 'packages/email-agent-mcp-scoped/package.json'), 'utf-8'),
+);
 
 let ok = true;
 
@@ -50,9 +53,23 @@ if (pkgEntry && pkgEntry.identifier !== packageJson.name) {
   ok = false;
 }
 
+if (scopedPackageJson.version !== packageJson.version) {
+  console.error(
+    `FAIL: scoped package version "${scopedPackageJson.version}" !== canonical package version "${packageJson.version}"`,
+  );
+  ok = false;
+}
+
+if (scopedPackageJson.dependencies?.[packageJson.name] !== packageJson.version) {
+  console.error(
+    `FAIL: scoped package must depend on ${packageJson.name} at exact version "${packageJson.version}"`,
+  );
+  ok = false;
+}
+
 if (ok) {
   console.log(
-    `PASS: server.json matches package.json (${packageJson.version})`,
+    `PASS: server.json and scoped compatibility package match canonical package.json (${packageJson.version})`,
   );
 } else {
   process.exit(1);
