@@ -1,6 +1,7 @@
 // list_emails action — list recent emails with filtering
 import { z } from 'zod';
 import type { EmailAction } from './registry.js';
+import { EmailThreadFieldsSchema, getEmailThreadFields } from './search.js';
 
 const ListEmailsInput = z.object({
   mailbox: z.string().optional(),
@@ -19,7 +20,7 @@ const ListEmailsOutput = z.object({
     receivedAt: z.string(),
     isRead: z.boolean(),
     hasAttachments: z.boolean(),
-  })),
+  }).extend(EmailThreadFieldsSchema.shape)),
 });
 
 export const listEmailsAction: EmailAction<
@@ -49,6 +50,7 @@ export const listEmailsAction: EmailAction<
         receivedAt: m.receivedAt,
         isRead: m.isRead,
         hasAttachments: m.hasAttachments,
+        ...getEmailThreadFields(m),
       })),
     };
   },

@@ -9,19 +9,25 @@ import type { EmailMessage } from '../types.js';
  * populates `conversationId`; Gmail populates `threadId`. Both are optional
  * because providers may legitimately produce neither (e.g. drafts).
  */
-export const SearchEmailThreadFieldsSchema = z.object({
+export const EmailThreadFieldsSchema = z.object({
   conversationId: z.string().optional(),
   threadId: z.string().optional(),
 });
 
-export function getSearchEmailThreadFields(
+export function getEmailThreadFields(
   message: Pick<EmailMessage, 'conversationId' | 'threadId'>,
-): z.infer<typeof SearchEmailThreadFieldsSchema> {
+): z.infer<typeof EmailThreadFieldsSchema> {
   return {
     ...(message.conversationId !== undefined ? { conversationId: message.conversationId } : {}),
     ...(message.threadId !== undefined ? { threadId: message.threadId } : {}),
   };
 }
+
+/** @deprecated Use EmailThreadFieldsSchema. */
+export const SearchEmailThreadFieldsSchema = EmailThreadFieldsSchema;
+
+/** @deprecated Use getEmailThreadFields. */
+export const getSearchEmailThreadFields = getEmailThreadFields;
 
 const SearchEmailsInput = z.object({
   query: z.string(),
@@ -41,7 +47,7 @@ const SearchEmailsOutput = z.object({
     hasAttachments: z.boolean(),
     mailbox: z.string().optional(),
     snippet: z.string().optional(),
-  }).extend(SearchEmailThreadFieldsSchema.shape)),
+  }).extend(EmailThreadFieldsSchema.shape)),
 });
 
 export const searchEmailsAction: EmailAction<
@@ -77,7 +83,7 @@ export const searchEmailsAction: EmailAction<
           hasAttachments: m.hasAttachments,
           mailbox: m.mailbox,
           snippet: m.snippet,
-          ...getSearchEmailThreadFields(m),
+          ...getEmailThreadFields(m),
         })),
       };
     }
@@ -93,7 +99,7 @@ export const searchEmailsAction: EmailAction<
         hasAttachments: m.hasAttachments,
         mailbox: ctx.mailboxName,
         snippet: m.snippet,
-        ...getSearchEmailThreadFields(m),
+        ...getEmailThreadFields(m),
       })),
     };
   },

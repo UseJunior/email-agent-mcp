@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MockEmailProvider } from '../testing/mock-provider.js';
+import { listEmailsAction } from './list.js';
 import { searchEmailsAction } from './search.js';
 import type { ActionContext, MailboxEntry } from './registry.js';
 
@@ -105,5 +106,52 @@ describe('email-read/Search Emails', () => {
     expect(result.emails).toHaveLength(1);
     expect(result.emails[0]?.conversationId).toBe('graph-conversation-abc');
     expect(result.emails[0]?.threadId).toBeUndefined();
+  });
+});
+
+describe('email-threading/Thread Handles on Message Listings', () => {
+  it('Scenario: Search and list rows expose the same handle shape', async () => {
+    const provider = new MockEmailProvider();
+    provider.addMessage({
+      id: 'work-1',
+      subject: 'Contract review needed',
+      from: { email: 'alice@corp.com' },
+      receivedAt: '2024-03-15T10:00:00Z',
+      isRead: false,
+      hasAttachments: false,
+      conversationId: 'graph-conversation-abc',
+    });
+
+    const searchResult = await searchEmailsAction.run({ provider }, { query: 'contract review' });
+    const listResult = await listEmailsAction.run({ provider }, { folder: 'inbox' });
+
+    expect(searchResult.emails[0]?.conversationId).toBe('graph-conversation-abc');
+    expect(listResult.emails[0]?.conversationId).toBe(searchResult.emails[0]?.conversationId);
+    expect(searchResult.emails[0]).not.toHaveProperty('threadId');
+    expect(listResult.emails[0]).not.toHaveProperty('threadId');
+  });
+
+  it('Scenario: Handle omitted when the provider does not supply one', async () => {
+    const provider = new MockEmailProvider();
+    provider.addMessage({
+      id: 'plain-1',
+      subject: 'Contract review needed',
+      from: { email: 'alice@corp.com' },
+      receivedAt: '2024-03-15T10:00:00Z',
+      isRead: false,
+      hasAttachments: false,
+    });
+    const searchSpy = vi.spyOn(provider, 'searchMessages');
+    const listSpy = vi.spyOn(provider, 'listMessages');
+
+    const searchResult = await searchEmailsAction.run({ provider }, { query: 'contract review' });
+    const listResult = await listEmailsAction.run({ provider }, { folder: 'inbox' });
+
+    expect(searchResult.emails[0]).not.toHaveProperty('conversationId');
+    expect(searchResult.emails[0]).not.toHaveProperty('threadId');
+    expect(listResult.emails[0]).not.toHaveProperty('conversationId');
+    expect(listResult.emails[0]).not.toHaveProperty('threadId');
+    expect(searchSpy).toHaveBeenCalledTimes(1);
+    expect(listSpy).toHaveBeenCalledTimes(1);
   });
 });

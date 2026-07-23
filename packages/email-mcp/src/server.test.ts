@@ -1047,6 +1047,7 @@ describe('mcp-transport/Lazy Provider State', () => {
         receivedAt: '2026-04-09T11:00:00.000Z',
         isRead: true,
         hasAttachments: true,
+        threadId: 'gmail-thread-xyz',
       },
     ]);
 
@@ -1100,8 +1101,52 @@ describe('mcp-transport/Lazy Provider State', () => {
         receivedAt: '2026-04-09T11:00:00.000Z',
         isRead: true,
         hasAttachments: true,
+        threadId: 'gmail-thread-xyz',
       },
     ]);
+  });
+
+  it('Scenario: custom list_emails preserves the default mailbox conversation handle', async () => {
+    const workList = vi.fn().mockResolvedValue([
+      {
+        id: 'work-1',
+        subject: 'Work result',
+        from: { email: 'boss@example.com' },
+        receivedAt: '2026-04-09T10:00:00.000Z',
+        isRead: false,
+        hasAttachments: false,
+        conversationId: 'graph-conversation-abc',
+      },
+    ]);
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { listMessages: workList } as never;
+    state.connectedMailbox = 'work@example.com';
+    state.connectedProvider = 'microsoft';
+    state.mailboxes = [{
+      name: 'work',
+      emailAddress: 'work@example.com',
+      displayName: 'work@example.com',
+      providerType: 'microsoft',
+      provider: { listMessages: workList } as never,
+      auth: null,
+      isDefault: true,
+      status: 'connected',
+    }];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const listEmails = actions.find(a => a.name === 'list_emails')!;
+    const result = await listEmails.run({}, { limit: 10 }) as {
+      emails: Array<{ id: string; conversationId?: string; threadId?: string }>;
+    };
+
+    expect(workList).toHaveBeenCalledTimes(1);
+    expect(result.emails[0]).toMatchObject({
+      id: 'work-1',
+      conversationId: 'graph-conversation-abc',
+    });
+    expect(result.emails[0]).not.toHaveProperty('threadId');
   });
 
   // Plain `it` (no `Scenario:` prefix) so this does NOT create a phantom

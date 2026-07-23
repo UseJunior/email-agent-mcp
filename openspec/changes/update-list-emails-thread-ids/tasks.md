@@ -1,11 +1,11 @@
-- [ ] Rename `SearchEmailThreadFieldsSchema` → `EmailThreadFieldsSchema` and `getSearchEmailThreadFields` → `getEmailThreadFields` in `packages/email-core/src/actions/search.ts`, keeping the old names as deprecated aliases. Put the `@deprecated` JSDoc on the actual exported alias *declarations*, not merely on an entry in the export list, so generated `.d.ts` output and editor tooling surface the warning
-- [ ] Extend `ListEmailsOutput` in `packages/email-core/src/actions/list.ts` with `.extend(EmailThreadFieldsSchema.shape)` on the row object
-- [ ] Spread `getEmailThreadFields(m)` in the single mapping in `packages/email-core/src/actions/list.ts` and the custom resolved-mailbox mapping in `packages/email-mcp/src/server.ts` (~`:777`). There is exactly one mapping on each side — `list_emails` has **no** multi-mailbox fan-out branch (its MCP input is `mailbox?: string`, never `null`); fan-out exists only for `search_emails`
-- [ ] Extend the inline `list_emails` output schema in `packages/email-mcp/src/server.ts` to match
-- [ ] Add core tests in `packages/email-core/src/actions/list.test.ts` under `describe('email-read/List Emails')` covering a Graph row, a Gmail row, and a provider that populates neither
-- [ ] Add MCP tests proving the handle survives calls using the default mailbox and an explicitly requested mailbox; do not claim or test list fan-out
-- [ ] Add a scenario test for the existing `search_emails` behavior under `describe('email-threading/Thread Handles on Message Listings')` — it ships today but was never spec-traced
-- [ ] Assert semantically, not just by name: the coverage checker associates every scenario in a file with every spec id appearing in any `describe()` in that file and does not bind an `it()` to its enclosing describe, so a correctly-named but misplaced test still passes the gate
-- [ ] Confirm no provider call count changes (the mapping reads fields already present on `EmailMessage`)
-- [ ] Run `openspec validate update-list-emails-thread-ids --strict`
-- [ ] Run `npm run test:run --workspaces`, `npm run lint --workspaces`, and `npm run check:spec-coverage`
+- [x] Rename `SearchEmailThreadFieldsSchema` → `EmailThreadFieldsSchema` and `getSearchEmailThreadFields` → `getEmailThreadFields` in `packages/email-core/src/actions/search.ts`, keeping the old names as deprecated aliases. Put the `@deprecated` JSDoc on the actual exported alias *declarations*, not merely on an entry in the export list, so generated `.d.ts` output and editor tooling surface the warning
+- [x] Extend `ListEmailsOutput` in `packages/email-core/src/actions/list.ts` with `.extend(EmailThreadFieldsSchema.shape)` on the row object
+- [x] Spread `getEmailThreadFields(m)` in the single mapping in `packages/email-core/src/actions/list.ts` and the custom resolved-mailbox mapping in `packages/email-mcp/src/server.ts` (~`:777`). There is exactly one mapping on each side — `list_emails` has **no** multi-mailbox fan-out branch (its MCP input is `mailbox?: string`, never `null`); fan-out exists only for `search_emails`
+- [x] Extend the inline `list_emails` output schema in `packages/email-mcp/src/server.ts` to match
+- [x] Add core tests in `packages/email-core/src/actions/list.test.ts` under `describe('email-read/List Emails')` covering a Graph row, a Gmail row, and a provider that populates neither
+- [x] Add MCP tests proving the handle survives calls using the default mailbox and an explicitly requested mailbox; do not claim or test list fan-out
+- [x] Add a scenario test for the existing `search_emails` behavior under `describe('email-threading/Thread Handles on Message Listings')` — it ships today but was never spec-traced
+- [x] Assert semantically, not just by name: the coverage checker associates every scenario in a file with every spec id appearing in any `describe()` in that file and does not bind an `it()` to its enclosing describe, so a correctly-named but misplaced test still passes the gate
+- [x] Confirm no provider call count changes (the mapping reads fields already present on `EmailMessage`)
+- [x] Run `openspec validate update-list-emails-thread-ids --strict`
+- [x] Run `npm run test:run --workspaces`, `npm run lint --workspaces`, and `npm run check:spec-coverage`

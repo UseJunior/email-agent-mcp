@@ -2,8 +2,8 @@
 import { createRequire } from 'node:module';
 import type { DeletePolicy, EmailAction, EmailMessage, EmailProvider } from '@usejunior/email-core';
 import {
-  SearchEmailThreadFieldsSchema,
-  getSearchEmailThreadFields,
+  EmailThreadFieldsSchema,
+  getEmailThreadFields,
 } from '@usejunior/email-core';
 import { z } from 'zod';
 
@@ -760,7 +760,16 @@ export async function buildLazyActions(
       name: 'list_emails',
       description: 'List recent emails with filtering by unread status, folder, sender, and limit. Use offset for pagination.',
       input: z.object({ mailbox: z.string().optional(), unread: z.boolean().optional(), limit: z.number().optional(), offset: z.number().optional(), folder: z.string().optional() }),
-      output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string(), from: z.string(), receivedAt: z.string(), isRead: z.boolean(), hasAttachments: z.boolean() })) }),
+      output: z.object({
+        emails: z.array(z.object({
+          id: z.string(),
+          subject: z.string(),
+          from: z.string(),
+          receivedAt: z.string(),
+          isRead: z.boolean(),
+          hasAttachments: z.boolean(),
+        }).extend(EmailThreadFieldsSchema.shape)),
+      }),
       annotations: { readOnlyHint: true, destructiveHint: false },
       run: async (_ctx, input) => {
         await waitForInit(state);
@@ -774,13 +783,14 @@ export async function buildLazyActions(
           folder: inp.folder ?? 'inbox',
         });
         return {
-          emails: (messages as Array<{ id: string; subject: string; from: { email: string; name?: string }; receivedAt: string; isRead: boolean; hasAttachments: boolean }>).map(m => ({
+          emails: (messages as EmailMessage[]).map(m => ({
             id: m.id,
             subject: m.subject,
             from: m.from.name ? `${m.from.name} <${m.from.email}>` : m.from.email,
             receivedAt: m.receivedAt,
             isRead: m.isRead,
             hasAttachments: m.hasAttachments,
+            ...getEmailThreadFields(m),
           })),
         };
       },
@@ -853,7 +863,7 @@ export async function buildLazyActions(
           isRead: z.boolean(),
           hasAttachments: z.boolean(),
           mailbox: z.string().optional(),
-        }).extend(SearchEmailThreadFieldsSchema.shape)),
+        }).extend(EmailThreadFieldsSchema.shape)),
       }),
       annotations: { readOnlyHint: true, destructiveHint: false },
       run: async (_ctx, input) => {
@@ -886,7 +896,7 @@ export async function buildLazyActions(
             isRead: m.isRead,
             hasAttachments: m.hasAttachments,
             mailbox: m.mailbox,
-            ...getSearchEmailThreadFields(m),
+            ...getEmailThreadFields(m),
           })),
         };
       },
