@@ -20,6 +20,8 @@ allure-report/
 # OS artifacts
 .DS_Store
 Thumbs.db
+# Office lock files (Word/Excel/PowerPoint create these while a file is open)
+~$*
 
 # IDE and editor
 .idea/
