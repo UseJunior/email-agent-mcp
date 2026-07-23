@@ -18,58 +18,93 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { getStore } from '../../lib/store.js';
 import { readJsonBody, ID_RE } from '../../lib/http.js';
+import { logEvent, requestLogContext, sessionCorrelationId } from '../../lib/log.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
-  if (req.method !== 'POST') {
-    res.status(405).json({ error: 'method_not_allowed' });
-    return;
-  }
-  res.setHeader('Cache-Control', 'no-store');
-
-  const body = readJsonBody(req);
-  if (!body) {
-    res.status(400).json({ error: 'invalid_request', message: 'JSON body required' });
-    return;
-  }
-  const sessionId = typeof body['session_id'] === 'string' ? body['session_id'] : '';
-  const pickupSecret = typeof body['pickup_secret'] === 'string' ? body['pickup_secret'] : '';
-
-  if (!ID_RE.test(sessionId)) {
-    res.status(400).json({ error: 'invalid_session_id' });
-    return;
-  }
-  if (!ID_RE.test(pickupSecret)) {
-    res.status(400).json({ error: 'invalid_pickup_secret' });
-    return;
-  }
-
-  const result = await getStore().claim(sessionId, pickupSecret);
-  if (result.ok) {
-    res.status(200).json({
-      access_token: result.tokens.access_token,
-      refresh_token: result.tokens.refresh_token,
-      expires_in: result.tokens.expires_in,
-      scope: result.tokens.scope,
-      token_type: result.tokens.token_type,
+  const startedAt = Date.now();
+  const request = requestLogContext(req);
+  let sessionSource: unknown = null;
+  let didLog = false;
+  const logOnce = (status: number, outcome: string): void => {
+    if (didLog) return;
+    didLog = true;
+    logEvent({
+      route: '/api/tickets/claim',
+      method: request.method,
+      status,
+      outcome,
+      host: request.host,
+      ua: request.ua,
+      sid: sessionCorrelationId(sessionSource),
+      dur_ms: Date.now() - startedAt,
     });
-    return;
-  }
+  };
 
-  switch (result.reason) {
-    case 'pending':
-      res.status(202).json({ status: 'pending' });
+  try {
+    if (req.method !== 'POST') {
+      logOnce(405, 'method_not_allowed');
+      res.status(405).json({ error: 'method_not_allowed' });
       return;
-    case 'invalid_secret':
-      res.status(403).json({ error: 'invalid_pickup_secret' });
+    }
+    res.setHeader('Cache-Control', 'no-store');
+
+    const body = readJsonBody(req);
+    if (!body) {
+      logOnce(400, 'invalid_request');
+      res.status(400).json({ error: 'invalid_request', message: 'JSON body required' });
       return;
-    case 'not_found':
-      res.status(404).json({ status: 'not_found' });
+    }
+    sessionSource = body['session_id'];
+    const sessionId = typeof sessionSource === 'string' ? sessionSource : '';
+    const pickupSecret = typeof body['pickup_secret'] === 'string' ? body['pickup_secret'] : '';
+
+    if (!ID_RE.test(sessionId)) {
+      logOnce(400, 'invalid_session_id');
+      res.status(400).json({ error: 'invalid_session_id' });
       return;
-    case 'expired':
-    case 'consumed':
-    case 'denied':
-    case 'exchange_failed':
-      res.status(410).json({ status: result.reason, ...(result.errorMessage ? { error_description: result.errorMessage } : {}) });
+    }
+    if (!ID_RE.test(pickupSecret)) {
+      logOnce(400, 'invalid_pickup_secret');
+      res.status(400).json({ error: 'invalid_pickup_secret' });
       return;
+    }
+
+    const result = await getStore().claim(sessionId, pickupSecret);
+    if (result.ok) {
+      logOnce(200, 'claimed');
+      res.status(200).json({
+        access_token: result.tokens.access_token,
+        refresh_token: result.tokens.refresh_token,
+        expires_in: result.tokens.expires_in,
+        scope: result.tokens.scope,
+        token_type: result.tokens.token_type,
+      });
+      return;
+    }
+
+    switch (result.reason) {
+      case 'pending':
+        logOnce(202, 'pending');
+        res.status(202).json({ status: 'pending' });
+        return;
+      case 'invalid_secret':
+        logOnce(403, 'invalid_pickup_secret');
+        res.status(403).json({ error: 'invalid_pickup_secret' });
+        return;
+      case 'not_found':
+        logOnce(404, 'not_found');
+        res.status(404).json({ status: 'not_found' });
+        return;
+      case 'expired':
+      case 'consumed':
+      case 'denied':
+      case 'exchange_failed':
+        logOnce(410, result.reason);
+        res.status(410).json({ status: result.reason, ...(result.errorMessage ? { error_description: result.errorMessage } : {}) });
+        return;
+    }
+  } catch (err) {
+    logOnce(500, 'internal_error');
+    throw err;
   }
 }
