@@ -99,7 +99,7 @@ describe('wizard/Reconnect Picker', () => {
     };
     const gmail: ConfiguredMailboxSummary = {
       provider: 'gmail',
-      mailboxName: 'user@gmail.com',
+      mailboxName: 'personal',
       emailAddress: 'user@gmail.com',
     };
 
@@ -113,7 +113,7 @@ describe('wizard/Reconnect Picker', () => {
     expect(cliMockState.runConfigureCalls).toHaveLength(1);
     expect(cliMockState.runConfigureCalls[0]).toMatchObject({
       provider: 'gmail',
-      mailbox: 'user@gmail.com',
+      mailbox: 'personal',
     });
   });
 
@@ -176,6 +176,94 @@ describe('wizard/Reconnect Picker', () => {
       provider: 'microsoft',
       mailbox: 'default',
     });
+  });
+});
+
+describe('wizard/Configure Mailbox Picker', () => {
+  beforeEach(() => {
+    promptMockState.selectResults = [];
+    promptMockState.confirmResults = [];
+    promptMockState.textResults = [];
+    promptMockState.passwordResults = [];
+    promptMockState.confirmResult = false;
+    promptMockState.textResult = '';
+    promptMockState.passwordResult = '';
+    cliMockState.runConfigureCalls = [];
+    cliMockState.runConfigureResult = 0;
+    vi.clearAllMocks();
+  });
+
+  it('Scenario: Existing mailbox selection preserves routing identity', async () => {
+    const work: ConfiguredMailboxSummary = {
+      provider: 'microsoft',
+      mailboxName: 'work',
+      emailAddress: 'user@contoso.com',
+      lastInteractiveAuthAt: '2026-01-12T10:00:00.000Z',
+    };
+    const personal: ConfiguredMailboxSummary = {
+      provider: 'gmail',
+      mailboxName: 'personal',
+      emailAddress: 'user@gmail.com',
+      lastInteractiveAuthAt: '2025-11-03T10:00:00.000Z',
+    };
+    promptMockState.selectResults = [personal];
+
+    const { runWizardConfigurePicker } = await import('./wizard.js');
+    const exit = await runWizardConfigurePicker(
+      { command: 'configure' },
+      [work, personal],
+    );
+
+    expect(exit).toBe(0);
+    expect(cliMockState.runConfigureCalls).toEqual([
+      expect.objectContaining({
+        command: 'configure',
+        provider: 'gmail',
+        mailbox: 'personal',
+      }),
+    ]);
+
+    const clackPrompts = await import('@clack/prompts');
+    const picker = vi.mocked(clackPrompts.select).mock.calls[0]?.[0];
+    const labels = picker?.options.map(option => option.label);
+    expect(labels).toEqual(expect.arrayContaining([
+      expect.stringContaining('user@contoso.com (microsoft, alias: work, last auth:'),
+      expect.stringContaining('user@gmail.com (gmail, alias: personal, last auth:'),
+      'Add a new mailbox',
+    ]));
+  });
+
+  it('Scenario: Add-new selection uses the setup wizard', async () => {
+    const mailboxes: ConfiguredMailboxSummary[] = [
+      { provider: 'microsoft', mailboxName: 'work' },
+      { provider: 'gmail', mailboxName: 'personal' },
+    ];
+    promptMockState.selectResults = ['add-new-mailbox', 'microsoft'];
+    promptMockState.confirmResults = [false];
+
+    const { runWizardConfigurePicker } = await import('./wizard.js');
+    const exit = await runWizardConfigurePicker({ command: 'setup' }, mailboxes);
+
+    expect(exit).toBe(0);
+    expect(cliMockState.runConfigureCalls).toHaveLength(0);
+    const clackPrompts = await import('@clack/prompts');
+    expect(vi.mocked(clackPrompts.select)).toHaveBeenCalledTimes(2);
+  });
+
+  it('Scenario: Configure picker cancellation', async () => {
+    promptMockState.selectResults = [CANCEL_TOKEN];
+
+    const { runWizardConfigurePicker } = await import('./wizard.js');
+    const exit = await runWizardConfigurePicker(
+      { command: 'configure' },
+      [
+        { provider: 'microsoft', mailboxName: 'work' },
+        { provider: 'gmail', mailboxName: 'personal' },
+      ],
+    );
+
+    expect(exit).toBe(0);
+    expect(cliMockState.runConfigureCalls).toHaveLength(0);
   });
 });
 

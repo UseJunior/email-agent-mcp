@@ -1,0 +1,8 @@
+- [x] Route ambiguous interactive `configure` and `setup` commands to a mailbox picker
+- [x] Display email address, provider, exact alias, and last-authenticated date
+- [x] Reauthenticate an existing selection with its saved provider and alias
+- [x] Route the add-new selection through the existing setup wizard
+- [x] Preserve explicit flags, non-TTY behavior, cancellation, and NemoClaw setup
+- [x] Add focused wizard and CLI routing tests
+- [x] Run `openspec validate add-configure-mailbox-picker --strict`
+- [x] Run build, lint, tests, and OpenSpec traceability validation

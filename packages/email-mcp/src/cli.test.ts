@@ -11,6 +11,7 @@ import {
   loadConfig,
   saveConfig,
   isDirectCliRun,
+  shouldShowConfigureMailboxPicker,
 } from './cli.js';
 import { mkdtemp, rm, readFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -1080,6 +1081,43 @@ describe('cli/TTY-Aware Default Behavior', () => {
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('Unknown command'),
     );
+  });
+});
+
+describe('cli/Configure Mailbox Picker Routing', () => {
+  it('Scenario: Ambiguous configure presents saved mailboxes', () => {
+    const configure = parseCliArgs(['configure']);
+    const setup = parseCliArgs(['setup']);
+
+    expect(shouldShowConfigureMailboxPicker(configure, 2, true)).toBe(true);
+    expect(shouldShowConfigureMailboxPicker(setup, 2, true)).toBe(true);
+    expect(shouldShowConfigureMailboxPicker(configure, 1, true)).toBe(false);
+  });
+
+  it('Scenario: Explicit configure intent bypasses the picker', () => {
+    expect(shouldShowConfigureMailboxPicker(
+      parseCliArgs(['configure', '--provider', 'gmail']),
+      2,
+      true,
+    )).toBe(false);
+    expect(shouldShowConfigureMailboxPicker(
+      parseCliArgs(['configure', '--mailbox', 'personal']),
+      2,
+      true,
+    )).toBe(false);
+  });
+
+  it('Scenario: Automated and specialized configure flows bypass the picker', () => {
+    expect(shouldShowConfigureMailboxPicker(
+      parseCliArgs(['configure']),
+      2,
+      false,
+    )).toBe(false);
+    expect(shouldShowConfigureMailboxPicker(
+      parseCliArgs(['configure', '--nemoclaw']),
+      2,
+      true,
+    )).toBe(false);
   });
 });
 

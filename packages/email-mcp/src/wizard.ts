@@ -5,6 +5,16 @@ import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import type { CliOptions, ConfiguredMailboxSummary } from './cli.js';
 
+const ADD_NEW_MAILBOX = 'add-new-mailbox';
+
+function formatMailboxOption(mailbox: ConfiguredMailboxSummary): string {
+  const email = mailbox.emailAddress ?? mailbox.mailboxName;
+  const lastAuth = mailbox.lastInteractiveAuthAt
+    ? new Date(mailbox.lastInteractiveAuthAt).toLocaleDateString()
+    : 'unknown';
+  return `${email} (${mailbox.provider}, alias: ${mailbox.mailboxName}, last auth: ${lastAuth})`;
+}
+
 /**
  * First-run wizard — guides user through email setup.
  */
@@ -220,6 +230,47 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
 }
 
 /**
+ * Configure entrypoint for returning users with multiple saved mailboxes.
+ */
+export async function runWizardConfigurePicker(
+  opts: CliOptions,
+  mailboxes: ConfiguredMailboxSummary[],
+): Promise<number> {
+  const { runConfigure } = await import('./cli.js');
+
+  p.intro('🦞 email-agent-mcp — Reauthenticate a mailbox');
+
+  const picked = await p.select<ConfiguredMailboxSummary | typeof ADD_NEW_MAILBOX>({
+    message: 'Which mailbox do you want to (re)authenticate?',
+    options: [
+      ...mailboxes.map(mailbox => ({
+        value: mailbox,
+        label: formatMailboxOption(mailbox),
+      })),
+      {
+        value: ADD_NEW_MAILBOX,
+        label: 'Add a new mailbox',
+      },
+    ],
+  });
+
+  if (p.isCancel(picked)) {
+    p.outro('Configuration cancelled.');
+    return 0;
+  }
+
+  if (picked === ADD_NEW_MAILBOX) {
+    return await runWizardSetup(opts);
+  }
+
+  return await runConfigure({
+    ...opts,
+    provider: picked.provider,
+    mailbox: picked.mailboxName,
+  });
+}
+
+/**
  * Returning user menu — show status and offer actions.
  */
 export async function runWizardMenu(opts: CliOptions, mailboxes: ConfiguredMailboxSummary[]): Promise<number> {
@@ -309,13 +360,9 @@ export async function runWizardMenu(opts: CliOptions, mailboxes: ConfiguredMailb
         const picked = await p.select<ConfiguredMailboxSummary>({
           message: 'Which mailbox do you want to reconnect?',
           options: mailboxes.map(mb => {
-            const email = mb.emailAddress ?? mb.mailboxName;
-            const lastAuth = mb.lastInteractiveAuthAt
-              ? new Date(mb.lastInteractiveAuthAt).toLocaleDateString()
-              : 'unknown';
             return {
               value: mb,
-              label: `${email} (${mb.provider}, last auth: ${lastAuth})`,
+              label: formatMailboxOption(mb),
             };
           }),
         });
@@ -329,7 +376,7 @@ export async function runWizardMenu(opts: CliOptions, mailboxes: ConfiguredMailb
       return await runConfigure({
         ...opts,
         provider: target.provider,
-        mailbox: target.emailAddress ?? target.mailboxName,
+        mailbox: target.mailboxName,
       });
     }
 
