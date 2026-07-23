@@ -31,17 +31,97 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
     return 0;
   }
 
+  const configOpts: CliOptions = { ...opts, command: 'configure', provider };
+
   if (provider === 'gmail') {
+    const suppliedClientId =
+      opts.clientId ?? process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'];
+    const suppliedClientSecret =
+      opts.clientSecret ?? process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'];
+
+    if (suppliedClientId || suppliedClientSecret) {
+      p.note(
+        'Using Gmail OAuth credentials supplied by CLI options or the\n' +
+        'AGENT_EMAIL_GMAIL_CLIENT_ID / AGENT_EMAIL_GMAIL_CLIENT_SECRET\n' +
+        'environment variables.',
+        'Gmail authentication',
+      );
+    } else {
+      const authMode = await p.select({
+        message: 'Choose Gmail authentication',
+        options: [
+          {
+            value: 'byok',
+            label: 'Use my own Google OAuth client (recommended)',
+            hint: 'Requires a Desktop app client ID and secret',
+          },
+          {
+            value: 'broker',
+            label: 'Use the default OAuth client',
+            hint: 'No Google Cloud project needed',
+          },
+        ],
+      });
+
+      if (p.isCancel(authMode)) {
+        p.outro('Setup cancelled.');
+        return 0;
+      }
+
+      if (authMode === 'byok') {
+        p.note(
+          'Create a Google OAuth client with application type Desktop app.\n' +
+          'A Web application client fails because this CLI uses an ephemeral\n' +
+          'loopback redirect port.\n' +
+          '\n' +
+          'Setup guide: https://github.com/UseJunior/email-agent-mcp#gmail-setup',
+          'Bring your own Google OAuth client',
+        );
+
+        const clientIdInput = await p.text({
+          message: 'Google OAuth client ID',
+          placeholder: '123456789.apps.googleusercontent.com',
+        });
+        if (p.isCancel(clientIdInput)) {
+          p.outro('Setup cancelled.');
+          return 0;
+        }
+
+        const clientSecretInput = await p.password({
+          message: 'Google OAuth client secret',
+          mask: '•',
+        });
+        if (p.isCancel(clientSecretInput)) {
+          p.outro('Setup cancelled.');
+          return 0;
+        }
+
+        const clientId = clientIdInput.trim();
+        const clientSecret = clientSecretInput.trim();
+        if (!clientId || !clientSecret) {
+          p.log.error('Gmail BYOK requires both the client ID and client secret.');
+          p.outro('Setup failed. See: https://github.com/UseJunior/email-agent-mcp#gmail-setup');
+          return 2;
+        }
+
+        configOpts.clientId = clientId;
+        configOpts.clientSecret = clientSecret;
+      } else {
+        p.note(
+          "The default OAuth client is currently in Google's Testing status.\n" +
+          'It is capped at 100 test users, shows an unverified-app consent\n' +
+          'screen, and its refresh tokens expire after 7 days.\n' +
+          '\n' +
+          'Choose BYOK instead for a stable personal or organization-owned grant.',
+          'Default OAuth client limits',
+        );
+      }
+    }
+
     p.note(
-      'Gmail setup opens Google in your browser and consent goes to a hosted\n' +
-      'OAuth broker. The broker holds the OAuth client_secret server-side, so\n' +
-      'no Google credentials are bundled into this CLI or written to disk. After\n' +
-      'consent, your refresh token is stored locally; Gmail API calls go directly\n' +
-      'from your machine to Google.\n' +
-      '\n' +
-      'To use your own OAuth client instead, pass --client-id and --client-secret\n' +
-      '(or set AGENT_EMAIL_GMAIL_CLIENT_ID and AGENT_EMAIL_GMAIL_CLIENT_SECRET).\n' +
-      `Credentials stored at ${getAgentEmailHome()}/tokens/`,
+      'Gmail setup opens Google in your browser. After consent, your refresh\n' +
+      'token is stored locally and Gmail API calls go directly from your\n' +
+      `machine to Google.\nCredentials stored at ${getAgentEmailHome()}/tokens/`,
       'How Gmail auth works',
     );
   } else {
@@ -61,7 +141,6 @@ export async function runWizardSetup(opts: CliOptions): Promise<number> {
   }
 
   // Run the actual configure — Microsoft prints a device code; Gmail prints a browser URL.
-  const configOpts: CliOptions = { ...opts, command: 'configure', provider };
   const exitCode = await runConfigure(configOpts);
   if (exitCode !== 0) {
     p.outro('Setup failed. Try again with: email-agent-mcp setup');

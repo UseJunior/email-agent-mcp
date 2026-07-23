@@ -10,8 +10,12 @@ const CANCEL_TOKEN = Symbol.for('email-agent-mcp/test-cancel');
 
 const promptMockState = vi.hoisted(() => ({
   selectResults: [] as unknown[],
+  confirmResults: [] as boolean[],
+  textResults: [] as string[],
+  passwordResults: [] as string[],
   confirmResult: false as boolean,
   textResult: '' as string,
+  passwordResult: '' as string,
 }));
 
 vi.mock('@clack/prompts', async (importOriginal) => {
@@ -36,8 +40,18 @@ vi.mock('@clack/prompts', async (importOriginal) => {
       }
       return promptMockState.selectResults.shift();
     }),
-    confirm: vi.fn(async () => promptMockState.confirmResult),
-    text: vi.fn(async () => promptMockState.textResult),
+    confirm: vi.fn(async () =>
+      promptMockState.confirmResults.length > 0
+        ? promptMockState.confirmResults.shift()!
+        : promptMockState.confirmResult),
+    text: vi.fn(async () =>
+      promptMockState.textResults.length > 0
+        ? promptMockState.textResults.shift()!
+        : promptMockState.textResult),
+    password: vi.fn(async () =>
+      promptMockState.passwordResults.length > 0
+        ? promptMockState.passwordResults.shift()!
+        : promptMockState.passwordResult),
     isCancel: vi.fn((v: unknown) => v === CANCEL),
   };
 });
@@ -66,10 +80,15 @@ vi.mock('./cli.js', async (importOriginal) => {
 describe('wizard/Reconnect Picker', () => {
   beforeEach(() => {
     promptMockState.selectResults = [];
+    promptMockState.confirmResults = [];
+    promptMockState.textResults = [];
+    promptMockState.passwordResults = [];
     promptMockState.confirmResult = false;
     promptMockState.textResult = '';
+    promptMockState.passwordResult = '';
     cliMockState.runConfigureCalls = [];
     cliMockState.runConfigureResult = 0;
+    vi.clearAllMocks();
   });
 
   it('Scenario: Multiple mailboxes — picker dispatches runConfigure with selected provider/mailbox', async () => {
@@ -98,7 +117,7 @@ describe('wizard/Reconnect Picker', () => {
     });
   });
 
-  it('Scenario: Single mailbox — picker skipped, runConfigure called directly', async () => {
+  it('Scenario: Gmail wizard reconnect preserves saved credentials', async () => {
     const gmail: ConfiguredMailboxSummary = {
       provider: 'gmail',
       mailboxName: 'user@gmail.com',
@@ -111,6 +130,8 @@ describe('wizard/Reconnect Picker', () => {
     const exit = await runWizardMenu({}, [gmail]);
 
     expect(exit).toBe(0);
+    const clackPrompts = await import('@clack/prompts');
+    expect(vi.mocked(clackPrompts.select)).toHaveBeenCalledTimes(1);
     expect(cliMockState.runConfigureCalls).toHaveLength(1);
     expect(cliMockState.runConfigureCalls[0]).toMatchObject({
       provider: 'gmail',
@@ -155,5 +176,128 @@ describe('wizard/Reconnect Picker', () => {
       provider: 'microsoft',
       mailbox: 'default',
     });
+  });
+});
+
+describe('wizard/Gmail Authentication Choice', () => {
+  beforeEach(() => {
+    promptMockState.selectResults = [];
+    promptMockState.confirmResults = [];
+    promptMockState.textResults = [];
+    promptMockState.passwordResults = [];
+    promptMockState.confirmResult = false;
+    promptMockState.textResult = '';
+    promptMockState.passwordResult = '';
+    cliMockState.runConfigureCalls = [];
+    cliMockState.runConfigureResult = 0;
+    vi.clearAllMocks();
+  });
+
+  it('Scenario: Gmail wizard offers both authentication modes', async () => {
+    promptMockState.selectResults = ['gmail', 'broker'];
+    promptMockState.confirmResults = [true, false];
+    promptMockState.textResults = [''];
+
+    const { runWizardSetup } = await import('./wizard.js');
+    const exit = await runWizardSetup({});
+
+    expect(exit).toBe(0);
+    expect(cliMockState.runConfigureCalls).toHaveLength(1);
+    expect(cliMockState.runConfigureCalls[0]).toMatchObject({
+      command: 'configure',
+      provider: 'gmail',
+    });
+    expect(cliMockState.runConfigureCalls[0]).not.toHaveProperty('clientId');
+    expect(cliMockState.runConfigureCalls[0]).not.toHaveProperty('clientSecret');
+
+    const clackPrompts = await import('@clack/prompts');
+    const authPrompt = vi.mocked(clackPrompts.select).mock.calls[1]?.[0];
+    expect(authPrompt?.options.map(option => option.value)).toEqual(['byok', 'broker']);
+
+    const notes = JSON.stringify(vi.mocked(clackPrompts.note).mock.calls);
+    expect(notes).toContain('Testing status');
+    expect(notes).toContain('100 test users');
+    expect(notes).toContain('unverified-app');
+    expect(notes).toContain('7 days');
+  });
+
+  it('Scenario: Gmail wizard collects BYOK credentials confidentially', async () => {
+    const clientSecret = 'wizard-client-secret';
+    promptMockState.selectResults = ['gmail', 'byok'];
+    promptMockState.confirmResults = [true, false];
+    promptMockState.textResults = ['wizard-client-id', ''];
+    promptMockState.passwordResults = [clientSecret];
+
+    const { runWizardSetup } = await import('./wizard.js');
+    const exit = await runWizardSetup({});
+
+    expect(exit).toBe(0);
+    expect(cliMockState.runConfigureCalls).toHaveLength(1);
+    expect(cliMockState.runConfigureCalls[0]).toMatchObject({
+      command: 'configure',
+      provider: 'gmail',
+      clientId: 'wizard-client-id',
+      clientSecret,
+    });
+
+    const clackPrompts = await import('@clack/prompts');
+    expect(vi.mocked(clackPrompts.password)).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Google OAuth client secret' }),
+    );
+    const notes = JSON.stringify(vi.mocked(clackPrompts.note).mock.calls);
+    expect(notes).toContain('Desktop app');
+    expect(notes).toContain('#gmail-setup');
+
+    const renderedOutput = JSON.stringify([
+      ...vi.mocked(clackPrompts.intro).mock.calls,
+      ...vi.mocked(clackPrompts.outro).mock.calls,
+      ...vi.mocked(clackPrompts.note).mock.calls,
+      ...vi.mocked(clackPrompts.log.error).mock.calls,
+      ...vi.mocked(clackPrompts.log.success).mock.calls,
+    ]);
+    expect(renderedOutput).not.toContain(clientSecret);
+  });
+
+  it('Scenario: Gmail wizard rejects incomplete BYOK credentials', async () => {
+    promptMockState.selectResults = ['gmail', 'byok'];
+    promptMockState.textResults = ['wizard-client-id'];
+    promptMockState.passwordResults = [''];
+
+    const { runWizardSetup } = await import('./wizard.js');
+    const exit = await runWizardSetup({});
+
+    expect(exit).toBe(2);
+    expect(cliMockState.runConfigureCalls).toHaveLength(0);
+
+    const clackPrompts = await import('@clack/prompts');
+    expect(vi.mocked(clackPrompts.log.error)).toHaveBeenCalledWith(
+      'Gmail BYOK requires both the client ID and client secret.',
+    );
+  });
+
+  it('Scenario: Gmail wizard preserves explicit credentials', async () => {
+    const clientSecret = 'explicit-client-secret';
+    promptMockState.selectResults = ['gmail'];
+    promptMockState.confirmResults = [true, false];
+    promptMockState.textResults = [''];
+
+    const { runWizardSetup } = await import('./wizard.js');
+    const exit = await runWizardSetup({
+      clientId: 'explicit-client-id',
+      clientSecret,
+    });
+
+    expect(exit).toBe(0);
+    expect(cliMockState.runConfigureCalls[0]).toMatchObject({
+      command: 'configure',
+      provider: 'gmail',
+      clientId: 'explicit-client-id',
+      clientSecret,
+    });
+
+    const clackPrompts = await import('@clack/prompts');
+    expect(vi.mocked(clackPrompts.select)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(clackPrompts.password)).not.toHaveBeenCalled();
+    expect(JSON.stringify(vi.mocked(clackPrompts.note).mock.calls)).not.toContain(clientSecret);
   });
 });

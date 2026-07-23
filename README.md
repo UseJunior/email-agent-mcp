@@ -218,9 +218,110 @@ passing an array (even empty) replaces them.
 | Provider | Status | Package |
 |----------|--------|---------|
 | Microsoft 365 (Graph API) | Fully supported | `@usejunior/provider-microsoft` |
-| Gmail | Supported via interactive CLI OAuth or manual refresh-token setup | `@usejunior/provider-gmail` |
+| Gmail | Supported via interactive CLI OAuth (default client or your own) or manual refresh-token setup | `@usejunior/provider-gmail` |
 
-Use `email-agent-mcp configure --provider gmail` to run the local browser OAuth flow, or add a manual mailbox token file under `~/.email-agent-mcp/tokens/`. See [packages/provider-gmail/README.md](./packages/provider-gmail/README.md).
+Use `email-agent-mcp configure --provider gmail` to run the local browser OAuth flow, or add a manual mailbox token file under `~/.email-agent-mcp/tokens/`. See [Gmail Setup](#gmail-setup) below and [packages/provider-gmail/README.md](./packages/provider-gmail/README.md).
+
+## Gmail Setup
+
+Gmail has two supported OAuth paths. Both end with the same result: a refresh
+token on your machine, and Gmail API calls going directly from your machine to
+Google.
+
+| Path | Command | Google Cloud project needed? |
+|------|---------|------------------------------|
+| Default OAuth client | `email-agent-mcp configure --provider gmail` | No |
+| Bring your own key (BYOK) | same command plus `--client-id` / `--client-secret` | Yes, yours |
+
+**Recommended for now: BYOK.** Our default OAuth client is still in Google's
+"Testing" publishing status while verification is in progress, which caps it at
+100 registered test users and shows the "Google hasn't verified this app"
+interstitial during consent. Verification for Gmail's restricted scope requires
+a CASA security assessment and takes several weeks; progress is tracked in
+[issue #112](https://github.com/UseJunior/email-agent-mcp/issues/112). BYOK
+sidesteps the shared 100-user cap and puts the app's publishing status under
+your control; your own app still has Google's Testing constraints until you
+publish it.
+
+Other reasons to pick BYOK: dedicated API quota, your own privacy policy and
+verification status, and no dependency on the hosted broker at
+`https://oauth.usejunior.com`.
+
+### Scope requested
+
+Agent Email requests exactly one Gmail scope:
+
+```text
+https://mail.google.com/
+```
+
+This is a restricted scope covering read, send, modify, and delete. It is the
+single scope you add to your own OAuth consent screen.
+
+### BYOK: create your own Google OAuth client
+
+1. **Create a project** in the [Google Cloud Console](https://console.cloud.google.com/projectcreate),
+   or select an existing one.
+2. **Enable the Gmail API** under *APIs & Services → Library → Gmail API → Enable*.
+3. **Configure the OAuth consent screen** under *APIs & Services → OAuth consent screen*:
+   - User type **External** for a personal `@gmail.com` account, or **Internal**
+     if you are on Google Workspace and only your own org needs access.
+   - Add the scope `https://mail.google.com/`.
+   - While the app is in *Testing*, add your own Gmail address under **Test users**,
+     or consent will be refused.
+4. **Create the OAuth client** under *APIs & Services → Credentials → Create
+   credentials → OAuth client ID*. Choose application type **Desktop app**.
+   Desktop is required: `configure` starts a throwaway listener on an ephemeral
+   loopback port (`http://127.0.0.1:<port>/oauth2callback`), and only Desktop
+   clients let Google accept an arbitrary loopback port without pre-registering
+   the exact redirect URI. A Web application client will fail with
+   `redirect_uri_mismatch`.
+5. **Copy the client ID and client secret.**
+
+### BYOK: hand the credentials to email-agent-mcp
+
+Pass both halves as flags:
+
+```bash
+npx email-agent-mcp configure \
+  --provider gmail \
+  --mailbox personal \
+  --client-id YOUR_GOOGLE_CLIENT_ID \
+  --client-secret YOUR_GOOGLE_CLIENT_SECRET
+```
+
+Or set the two namespaced environment variables and omit the flags:
+
+```bash
+export AGENT_EMAIL_GMAIL_CLIENT_ID=YOUR_GOOGLE_CLIENT_ID
+export AGENT_EMAIL_GMAIL_CLIENT_SECRET=YOUR_GOOGLE_CLIENT_SECRET
+
+npx email-agent-mcp configure --provider gmail --mailbox personal
+```
+
+Both halves are required. Supplying only one exits with an error rather than
+silently falling back to the default client. Supplying neither selects the
+default OAuth client.
+
+Your browser opens Google's consent screen, the CLI catches the callback on
+loopback, exchanges the code with PKCE, and writes the mailbox to
+`~/.email-agent-mcp/tokens/<safe-key>.json` with `"source": "byok"` alongside
+your `clientId`, `clientSecret`, and the resulting `refreshToken`. Token
+refreshes then go straight to Google's token endpoint; no broker is involved.
+
+Re-running `configure` for a mailbox that is already saved reuses the saved
+credentials, so you only pass the flags once. Passing `--client-id` and
+`--client-secret` for a mailbox previously configured against the default
+client migrates it to BYOK.
+
+### BYOK: keep the grant from expiring after 7 days
+
+Google expires refresh tokens after 7 days while *your* OAuth app is in
+*Testing* publishing status, which shows up as a re-authentication prompt about
+once a week. `email-agent-mcp status` warns when a mailbox is approaching that
+window. Publishing your app (*OAuth consent screen → Publish app*) removes the
+7-day expiry. Since you own the app and are its only user, the 100-user test
+cap does not apply to you either way.
 
 ## Security Defaults
 
@@ -270,7 +371,7 @@ email-agent-mcp/
 
 ## Releasing
 
-Tag-driven release via GitHub Actions with npm OIDC trusted publishing. All 5 packages publish in dependency order with `--provenance`, then `server.json` is published to the official MCP Registry with `mcp-publisher`.
+Tag-driven release via GitHub Actions with npm OIDC trusted publishing. All 6 packages publish in dependency order with `--provenance`, then `server.json` is published to the official MCP Registry with `mcp-publisher`.
 
 ## FAQ
 
