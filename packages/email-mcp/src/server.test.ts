@@ -1339,7 +1339,7 @@ describe('mcp-transport/List Mailboxes Tool', () => {
   function makeMailbox(o: MailboxOverrides): LazyMailboxState {
     const address = `${o.name}@example.com`;
     return {
-      name: o.name,
+      name: o.name, // logical config name, e.g. "work"
       emailAddress: address,
       displayName: address,
       providerType: 'microsoft',
@@ -1364,7 +1364,14 @@ describe('mcp-transport/List Mailboxes Tool', () => {
     expect(actions.find(a => a.name === 'list_mailboxes')).toBeDefined();
     const { result } = await executeTool(actions, {}, 'list_mailboxes', {});
     return result as {
-      mailboxes: Array<{ name: string; provider: string; isDefault: boolean; status: string; error?: string }>;
+      mailboxes: Array<{
+        name: string;
+        emailAddress: string | null;
+        provider: string;
+        isDefault: boolean;
+        status: string;
+        error?: string;
+      }>;
     };
   }
 
@@ -1375,9 +1382,11 @@ describe('mcp-transport/List Mailboxes Tool', () => {
     ]);
 
     expect(result.mailboxes).toHaveLength(2);
-    expect(result.mailboxes.map(m => m.name)).toEqual(['work@example.com', 'personal@example.com']);
+    // Logical name and emailAddress are DISTINCT fields (canonical contract).
+    expect(result.mailboxes.map(m => m.name)).toEqual(['work', 'personal']);
+    expect(result.mailboxes.map(m => m.emailAddress)).toEqual(['work@example.com', 'personal@example.com']);
     expect(result.mailboxes.filter(m => m.isDefault)).toHaveLength(1);
-    expect(result.mailboxes.find(m => m.name === 'work@example.com')?.isDefault).toBe(true);
+    expect(result.mailboxes.find(m => m.name === 'work')?.isDefault).toBe(true);
     // A connected mailbox carries no error key.
     expect(result.mailboxes.every(m => m.error === undefined)).toBe(true);
   });
@@ -1389,8 +1398,9 @@ describe('mcp-transport/List Mailboxes Tool', () => {
     ]);
 
     expect(result.mailboxes).toHaveLength(2);
-    const broken = result.mailboxes.find(m => m.name === 'broken@example.com');
+    const broken = result.mailboxes.find(m => m.name === 'broken');
     expect(broken?.status).toBe('error');
+    expect(broken?.emailAddress).toBe('broken@example.com');
     expect(broken?.error).toContain('AADSTS700016');
   });
 
@@ -1408,9 +1418,64 @@ describe('mcp-transport/List Mailboxes Tool', () => {
     expect(result.mailboxes.map(m => m.error)).toEqual(['token expired', 'consent required']);
   });
 
+  it('Scenario: a mailbox with no email address reports emailAddress: null rather than fabricating one', async () => {
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.mailboxes = [{
+      name: 'legacy',
+      emailAddress: undefined, // legacy metadata predating emailAddress capture
+      displayName: 'legacy',
+      providerType: 'microsoft',
+      provider: {} as never,
+      auth: null,
+      isDefault: true,
+      status: 'connected',
+    }];
+    const actions = await buildLazyActions(state, noAllowlist);
+    const { result } = await executeTool(actions, {}, 'list_mailboxes', {}) as {
+      result: { mailboxes: Array<{ name: string; emailAddress: string | null }> };
+    };
+    expect(result.mailboxes[0]!.name).toBe('legacy');
+    expect(result.mailboxes[0]!.emailAddress).toBeNull();
+  });
+
   it('Scenario: returns an empty list when no mailbox is configured', async () => {
     const result = await runListMailboxes('not_configured', []);
     expect(result.mailboxes).toEqual([]);
+  });
+});
+
+// The SHIPPED list_mailboxes path (buildLazyActions → executeTool) is the
+// canonical implementation of the mailbox-config/List Mailboxes requirement —
+// the core listMailboxesAction reads an in-memory store this server never fills
+// and is dead code (tracked for follow-up removal/reconciliation). This block is
+// the spec-traceable proof that the shipped output matches the canonical shape:
+// distinct `name` + `emailAddress`, provider, isDefault, status.
+describe('mailbox-config/List Mailboxes', () => {
+  it('Scenario: List all mailboxes', async () => {
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.mailboxes = [{
+      name: 'work',
+      emailAddress: 'test-user@example.com',
+      displayName: 'test-user@example.com',
+      providerType: 'microsoft',
+      provider: {} as never,
+      auth: null,
+      isDefault: true,
+      status: 'connected',
+    }];
+    const actions = await buildLazyActions(state, () => undefined);
+    const { result } = await executeTool(actions, {}, 'list_mailboxes', {}) as {
+      result: { mailboxes: Array<Record<string, unknown>> };
+    };
+    expect(result.mailboxes).toEqual([{
+      name: 'work',
+      emailAddress: 'test-user@example.com',
+      provider: 'microsoft',
+      isDefault: true,
+      status: 'connected',
+    }]);
   });
 });
 
