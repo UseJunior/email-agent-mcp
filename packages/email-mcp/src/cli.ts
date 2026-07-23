@@ -65,6 +65,20 @@ export interface ConfiguredMailboxSummary {
   lastInteractiveAuthAt?: string;
 }
 
+export function shouldShowConfigureMailboxPicker(
+  opts: CliOptions,
+  mailboxCount: number,
+  isTTY = Boolean(process.stdout.isTTY),
+): boolean {
+  return (
+    isTTY &&
+    mailboxCount > 1 &&
+    !opts.provider &&
+    !opts.mailbox &&
+    !opts.nemoclaw
+  );
+}
+
 /**
  * Get the config file path: ~/.email-agent-mcp/config.json
  */
@@ -475,8 +489,16 @@ export async function runCli(args: string[]): Promise<number> {
     case 'watch':
       return await runWatch(opts);
     case 'setup':
-    case 'configure':
+    case 'configure': {
+      if (process.stdout.isTTY && !opts.provider && !opts.mailbox && !opts.nemoclaw) {
+        const mailboxes = await listConfiguredMailboxSummaries();
+        if (shouldShowConfigureMailboxPicker(opts, mailboxes.length)) {
+          const { runWizardConfigurePicker } = await import('./wizard.js');
+          return await runWizardConfigurePicker(opts, mailboxes);
+        }
+      }
       return await runConfigure(opts);
+    }
     case 'status':
       return await runStatus();
     case 'token':
