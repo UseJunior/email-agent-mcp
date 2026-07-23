@@ -968,6 +968,51 @@ export async function buildLazyActions(
         }
       },
     },
+    {
+      name: 'list_mailboxes',
+      description:
+        'List every configured mailbox: its logical `name` (pass this as the `mailbox` argument to other tools), its `emailAddress`, provider, connection status, and which one is the default. Reports mailboxes that failed to authenticate too, so it stays useful for diagnosing a broken setup.',
+      input: z.object({}),
+      // Shape matches the canonical mailbox-config/List Mailboxes requirement:
+      // logical `name` and a SEPARATE `emailAddress` (nullable — legacy mailbox
+      // metadata may lack an address; never fabricate one from the name).
+      output: z.object({
+        mailboxes: z.array(
+          z.object({
+            name: z.string(),
+            emailAddress: z.string().nullable(),
+            provider: z.string(),
+            isDefault: z.boolean(),
+            status: z.enum(['connected', 'error']),
+            error: z.string().optional(),
+          }),
+        ),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      // Enumerates state.mailboxes directly — NOT via the generic action wrapper
+      // and NOT via the core listMailboxesAction, whose in-memory mailboxStore is
+      // never populated by this server (it loads mailboxes from disk metadata into
+      // state.mailboxes). Uses waitForInit rather than ensureProvider: ensureProvider
+      // throws when zero mailboxes are connected, which is exactly the misconfigured
+      // case an agent would call this tool to diagnose. waitForInit resolves once
+      // init settles (populating both connected and error mailboxes) without
+      // throwing on an all-failed state — it is provider-optional, not a latency
+      // guarantee (a never-settling auth promise would still block, as it does for
+      // every other tool that awaits init).
+      run: async () => {
+        await waitForInit(state);
+        return {
+          mailboxes: getKnownMailboxes(state).map(mailbox => ({
+            name: mailbox.name,
+            emailAddress: mailbox.emailAddress ?? null,
+            provider: mailbox.providerType,
+            isDefault: mailbox.isDefault,
+            status: mailbox.status,
+            ...(mailbox.status === 'error' && mailbox.error ? { error: mailbox.error } : {}),
+          })),
+        };
+      },
+    },
     wrapAction(sendEmailAction),
     wrapAction(replyToEmailAction),
     wrapAction(createDraftAction),

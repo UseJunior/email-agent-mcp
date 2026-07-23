@@ -142,13 +142,14 @@ If your mailbox status name is not an email address, pass `--reply-sender <email
 
 ## Tool Reference
 
-Agent Email exposes 23 MCP tools:
+Agent Email exposes 24 MCP tools:
 
 | Tool | Description | Type |
 |------|-------------|------|
 | `list_emails` | List recent emails with filtering | read |
 | `read_email` | Read full email content as markdown | read |
 | `search_emails` | Full-text search across mailboxes | read |
+| `list_mailboxes` | Enumerate configured mailboxes, their status, and the default | read |
 | `get_mailbox_status` | Connection status and warnings | read |
 | `get_thread` | Full conversation context | read |
 | `list_attachments` | List attachment metadata for an email | read |
