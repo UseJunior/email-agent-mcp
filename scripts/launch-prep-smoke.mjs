@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
@@ -146,7 +147,7 @@ function requireSuccess(name, result) {
   return result;
 }
 
-function requireLiveMailbox(status) {
+export function requireLiveMailbox(status) {
   if (!status || typeof status !== 'object') {
     throw new Error('get_mailbox_status returned an invalid payload');
   }
@@ -162,7 +163,51 @@ function requireLiveMailbox(status) {
   }
 
   if (String(status.status).toLowerCase() !== 'connected') {
-    throw new Error(`Mailbox is not connected: ${status.status ?? 'unknown status'}`);
+    const warnings = Array.isArray(status.warnings)
+      ? status.warnings.filter(warning => typeof warning === 'string').join('; ')
+      : '';
+    throw new Error(
+      `Mailbox is not connected: ${status.status ?? 'unknown status'}${warnings ? ` (${warnings})` : ''}`,
+    );
+  }
+}
+
+export async function waitForLiveMailbox(
+  getStatus,
+  {
+    timeoutMs = 15_000,
+    pollIntervalMs = 250,
+    now = Date.now,
+    delay = sleep,
+  } = {},
+) {
+  const deadline = now() + timeoutMs;
+  let lastStatus;
+
+  while (true) {
+    lastStatus = await getStatus();
+    const normalizedStatus = String(lastStatus?.status ?? '').toLowerCase();
+    if (normalizedStatus === 'connected') {
+      requireLiveMailbox(lastStatus);
+      return lastStatus;
+    }
+
+    if (normalizedStatus !== 'connecting' && normalizedStatus !== 'pending') {
+      requireLiveMailbox(lastStatus);
+    }
+
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) {
+      const warnings = Array.isArray(lastStatus?.warnings)
+        ? lastStatus.warnings.filter(warning => typeof warning === 'string').join('; ')
+        : '';
+      throw new Error(
+        `Mailbox did not become connected within ${timeoutMs}ms. ` +
+        `Last status: ${lastStatus?.status ?? 'unknown'}${warnings ? ` (${warnings})` : ''}`,
+      );
+    }
+
+    await delay(Math.min(pollIntervalMs, remainingMs));
   }
 }
 
@@ -258,8 +303,9 @@ async function main() {
       mutations: [],
     };
 
-    const status = await callJson(client, 'get_mailbox_status', getMailboxArg(opts.mailbox));
-    requireLiveMailbox(status);
+    const status = await waitForLiveMailbox(
+      () => callJson(client, 'get_mailbox_status', getMailboxArg(opts.mailbox)),
+    );
     summary.status = status;
     summary.replySender = await resolveReplySender(opts, status);
 
@@ -391,7 +437,13 @@ async function main() {
   }
 }
 
-main().catch(err => {
-  console.error(err instanceof Error ? err.message : err);
-  process.exit(1);
-});
+const isDirectRun =
+  typeof process.argv[1] === 'string' &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isDirectRun) {
+  main().catch(err => {
+    console.error(err instanceof Error ? err.message : err);
+    process.exit(1);
+  });
+}
