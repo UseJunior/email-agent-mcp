@@ -21,6 +21,9 @@ import type {
   InboxRule,
   CreateInboxRule,
   DownloadedAttachment,
+  ScheduledSend,
+  ScheduledSendResult,
+  EmailScheduledSender,
 } from '@usejunior/email-core';
 import { AttachmentNotSupportedError, AttachmentNotFoundError, ProviderError } from '@usejunior/email-core';
 
@@ -109,6 +112,7 @@ class GraphAttachmentError extends Error {
 
 // Sent message tracking via custom extended property
 const TRACKING_PROPERTY = 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailTrackingId';
+const DEFERRED_SEND_PROPERTY = 'SystemTime 0x3FEF';
 
 const WELL_KNOWN_FOLDER_ALIASES: Record<string, string> = {
   archive: 'archive',
@@ -334,7 +338,7 @@ export class GraphApiError extends Error {
   }
 }
 
-export class GraphEmailProvider implements EmailReader, EmailSender, EmailCategorizer, EmailAttachmentHandler, EmailFolderManager, EmailRuleManager {
+export class GraphEmailProvider implements EmailReader, EmailSender, EmailScheduledSender, EmailCategorizer, EmailAttachmentHandler, EmailFolderManager, EmailRuleManager {
   private client: GraphApiClient;
   private basePath: string;
   private folderCache?: { expiresAt: number; folders: EmailFolder[] };
@@ -836,6 +840,134 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   async sendDraft(draftId: string): Promise<SendResult> {
     await this.client.post(`${this.basePath}/messages/${encodeGraphPathId(draftId)}/send`, {});
     return { success: true, messageId: draftId };
+  }
+
+  async scheduleMessage(msg: ComposeMessage, scheduledSendAt: string): Promise<ScheduledSendResult> {
+    const sizeError = checkGraphAttachmentLimits(msg.attachments, { checkTotal: true });
+    if (sizeError) return { success: false, error: sizeError };
+
+    const trackingId = msg.trackingId ?? `ae-${Date.now()}`;
+    const graphMsg: Record<string, unknown> = {
+      subject: msg.subject.slice(0, SUBJECT_MAX_LENGTH),
+      body: buildGraphBody(msg.bodyHtml, msg.body),
+      toRecipients: toGraphRecipients(msg.to),
+      ccRecipients: toGraphRecipients(msg.cc),
+      bccRecipients: toGraphRecipients(msg.bcc),
+      singleValueExtendedProperties: [
+        { id: TRACKING_PROPERTY, value: trackingId },
+        { id: DEFERRED_SEND_PROPERTY, value: scheduledSendAt },
+      ],
+    };
+    if (msg.attachments && msg.attachments.length > 0) {
+      graphMsg.attachments = msg.attachments.map(toGraphFileAttachment);
+    }
+
+    const created = await this.client.post(`${this.basePath}/messages`, graphMsg);
+    if (!created.id) {
+      return {
+        success: false,
+        error: {
+          code: 'SCHEDULE_DRAFT_FAILED',
+          message: 'Microsoft Graph created no scheduled-send draft id',
+          provider: 'microsoft',
+          recoverable: false,
+        },
+      };
+    }
+
+    try {
+      await this.client.post(
+        `${this.basePath}/messages/${encodeGraphPathId(created.id)}/send`,
+        {},
+      );
+      return { success: true, messageId: created.id, scheduledSendAt };
+    } catch (err) {
+      return scheduledDraftSendFailure(created.id, scheduledSendAt, err);
+    }
+  }
+
+  async scheduleDraft(draftId: string, scheduledSendAt: string): Promise<ScheduledSendResult> {
+    const encodedId = encodeGraphPathId(draftId);
+    await this.client.patch(`${this.basePath}/messages/${encodedId}`, {
+      singleValueExtendedProperties: [
+        { id: DEFERRED_SEND_PROPERTY, value: scheduledSendAt },
+      ],
+    });
+    try {
+      await this.client.post(`${this.basePath}/messages/${encodedId}/send`, {});
+      return { success: true, messageId: draftId, scheduledSendAt };
+    } catch (err) {
+      return scheduledDraftSendFailure(draftId, scheduledSendAt, err);
+    }
+  }
+
+  async listScheduledSends(): Promise<ScheduledSend[]> {
+    const propertyFilter = `$filter=id eq '${DEFERRED_SEND_PROPERTY}'`;
+    let url: string | undefined = `${this.basePath}/mailFolders/drafts/messages`
+      + `?$select=id,subject,toRecipients,isDraft&$top=100`
+      + `&$expand=singleValueExtendedProperties(${propertyFilter})`;
+    const messages: GraphMessage[] = [];
+    const visitedUrls = new Set<string>();
+    while (url) {
+      if (visitedUrls.has(url) || visitedUrls.size >= 100) {
+        throw new ProviderError(
+          'PAGINATION_LIMIT',
+          'Scheduled-send pagination exceeded its safety limit',
+          'microsoft',
+          false,
+        );
+      }
+      visitedUrls.add(url);
+      const response = await this.client.get(url) as GraphMessagePageResponse;
+      messages.push(...(response.value ?? []));
+      url = response['@odata.nextLink'];
+    }
+
+    const scheduled: ScheduledSend[] = [];
+    for (const message of messages) {
+      const property = findDeferredSendProperty(message);
+      if (message.isDraft !== true || !property) continue;
+      const timestamp = Date.parse(property.value);
+      if (!Number.isFinite(timestamp)) continue;
+      scheduled.push({
+        messageId: message.id,
+        subject: message.subject ?? '',
+        to: (message.toRecipients ?? []).map(recipient => ({
+          email: recipient.emailAddress.address,
+          name: recipient.emailAddress.name,
+        })),
+        scheduledSendAt: new Date(timestamp).toISOString(),
+      });
+    }
+    return scheduled;
+  }
+
+  async cancelScheduledSend(messageId: string): Promise<void> {
+    const encodedId = encodeGraphPathId(messageId);
+    const propertyFilter = `$filter=id eq '${DEFERRED_SEND_PROPERTY}'`;
+    let candidate: GraphMessage;
+    try {
+      candidate = await this.client.get(
+        `${this.basePath}/messages/${encodedId}`
+        + `?$select=id,isDraft&$expand=singleValueExtendedProperties(${propertyFilter})`,
+      ) as unknown as GraphMessage;
+    } catch (err) {
+      if (err instanceof GraphApiError && err.status === 404) {
+        throw scheduledSendNotFoundError();
+      }
+      throw err;
+    }
+    if (candidate.isDraft !== true || !findDeferredSendProperty(candidate)) {
+      throw scheduledSendNotFoundError();
+    }
+    try {
+      await this.client.delete(`${this.basePath}/messages/${encodedId}`);
+    } catch (err) {
+      if (err instanceof GraphApiError && err.status === 404) {
+        throw scheduledSendNotFoundError();
+      }
+      throw err;
+    }
   }
 
   async createReplyDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {
@@ -1363,6 +1495,55 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
   }
 }
 
+function findDeferredSendProperty(
+  message: Pick<GraphMessage, 'singleValueExtendedProperties'>,
+): { id: string; value: string } | undefined {
+  return message.singleValueExtendedProperties?.find(
+    property => property.id.toLowerCase() === DEFERRED_SEND_PROPERTY.toLowerCase(),
+  );
+}
+
+function scheduledDraftSendFailure(
+  draftId: string,
+  scheduledSendAt: string,
+  err: unknown,
+): ScheduledSendResult {
+  const detail = err instanceof Error ? err.message : String(err);
+  if (err instanceof GraphApiError && err.status >= 400 && err.status < 500) {
+    return {
+      success: false,
+      messageId: draftId,
+      scheduledSendAt,
+      error: {
+        code: 'SCHEDULE_SEND_FAILED',
+        message: `Microsoft Graph rejected scheduled-send submission; the tagged draft remains available at messageId ${draftId}. ${detail}`,
+        provider: 'microsoft',
+        recoverable: false,
+      },
+    };
+  }
+  return {
+    success: false,
+    messageId: draftId,
+    scheduledSendAt,
+    error: {
+      code: 'SCHEDULE_SEND_STATUS_UNKNOWN',
+      message: `Microsoft Graph may have accepted scheduled-send submission. Do not schedule a duplicate; inspect or cancel messageId ${draftId}. ${detail}`,
+      provider: 'microsoft',
+      recoverable: false,
+    },
+  };
+}
+
+function scheduledSendNotFoundError(): ProviderError {
+  return new ProviderError(
+    'NOT_SCHEDULED',
+    'Message is not a pending scheduled send',
+    'microsoft',
+    false,
+  );
+}
+
 interface GraphMessage {
   id: string;
   subject: string;
@@ -1381,6 +1562,8 @@ interface GraphMessage {
   internetMessageId?: string;
   internetMessageHeaders?: Array<{ name: string; value: string }>;
   attachments?: GraphAttachment[];
+  isDraft?: boolean;
+  singleValueExtendedProperties?: Array<{ id: string; value: string }>;
 }
 
 interface GraphMessagePageResponse {

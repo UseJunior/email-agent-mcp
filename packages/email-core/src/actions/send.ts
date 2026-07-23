@@ -7,6 +7,11 @@ import { withRetry } from '../providers/provider.js';
 import { truncateBody, BODY_SIZE_LIMIT } from '../content/body-loader.js';
 import { renderEmailBody } from '../content/body-renderer.js';
 import {
+  ScheduledSendAtSchema,
+  scheduledSendNotSupportedError,
+  validateScheduledSendAt,
+} from './scheduling.js';
+import {
   checkMailboxRequired,
   resolveComposeFields,
   validateRequiredFields,
@@ -34,11 +39,13 @@ const SendEmailInput = z.object({
     .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true. Ignored when format is "text".'),
   attachments: z.array(AttachmentInputSchema).optional()
     .describe('Files to attach. Each entry takes a sandboxed `path` or inline `base64`.'),
+  scheduled_send_at: ScheduledSendAtSchema.optional(),
 });
 
 const SendEmailOutput = z.object({
   success: z.boolean(),
   messageId: z.string().optional(),
+  scheduledSendAt: z.string().optional(),
   draftId: z.string().optional(),
   preview: DraftPreviewSchema.optional(),
   previewError: PreviewErrorSchema.optional(),
@@ -65,6 +72,23 @@ export const sendEmailAction: EmailAction<
     const mailboxError = checkMailboxRequired(input.mailbox, ctx.allMailboxes);
     if (mailboxError) {
       return { success: false, error: mailboxError };
+    }
+
+    let scheduledSendAt: string | undefined;
+    if (input.scheduled_send_at !== undefined) {
+      const validated = validateScheduledSendAt(input.scheduled_send_at);
+      if ('error' in validated) return { success: false, error: validated.error };
+      if (input.draft) {
+        return {
+          success: false,
+          error: {
+            code: 'INVALID_SCHEDULED_SEND_MODE',
+            message: 'draft mode and scheduled_send_at cannot be used together',
+            recoverable: false,
+          },
+        };
+      }
+      scheduledSendAt = validated.value;
     }
 
     // Resolve body content and frontmatter
@@ -146,8 +170,13 @@ export const sendEmailAction: EmailAction<
       };
     }
 
-    // Send path — check allowlist (use parsed bare emails so name-address form passes correctly)
-    const allowlistError = checkSendAllowlist(parsed.to.map(a => a.email), ctx.sendAllowlist);
+    // Send path — every effective recipient must pass. Use parsed bare emails
+    // so name-address form passes correctly and CC cannot bypass the gate.
+    const outboundRecipients = [
+      ...parsed.to.map(address => address.email),
+      ...(parsed.cc?.map(address => address.email) ?? []),
+    ];
+    const allowlistError = checkSendAllowlist(outboundRecipients, ctx.sendAllowlist);
     if (allowlistError) {
       return {
         success: false,
@@ -161,17 +190,46 @@ export const sendEmailAction: EmailAction<
       return rateLimitError;
     }
 
-    // Send with retry on transient errors
+    const composeMessage = {
+      to: parsed.to,
+      cc: parsed.cc,
+      subject: subject!,
+      body,
+      bodyHtml: outBodyHtml,
+      attachments,
+    };
+
+    if (scheduledSendAt !== undefined) {
+      if (!ctx.provider.scheduleMessage) return scheduledSendNotSupportedError();
+      try {
+        // Do not retry the two-write draft→send operation as a unit: a lost
+        // response after draft creation could otherwise queue a duplicate.
+        const result = await ctx.provider.scheduleMessage(composeMessage, scheduledSendAt);
+        if (
+          ctx.rateLimiter
+          && (result.success || result.error?.code === 'SCHEDULE_SEND_STATUS_UNKNOWN')
+        ) {
+          ctx.rateLimiter.recordUsage('send_email');
+        }
+        return {
+          success: result.success,
+          messageId: result.messageId,
+          scheduledSendAt: result.scheduledSendAt,
+          error: result.error ? {
+            code: result.error.code,
+            message: result.error.message,
+            recoverable: result.error.recoverable,
+          } : undefined,
+        };
+      } catch (err) {
+        return handleProviderError(err, 'SCHEDULE_SEND_FAILED');
+      }
+    }
+
+    // Immediate send with retry on transient errors
     try {
       const result = await withRetry(
-        () => ctx.provider.sendMessage({
-          to: parsed.to,
-          cc: parsed.cc,
-          subject: subject!,
-          body,
-          bodyHtml: outBodyHtml,
-          attachments,
-        }),
+        () => ctx.provider.sendMessage(composeMessage),
         { maxRetries: 3, baseDelay: 1000 },
       );
 

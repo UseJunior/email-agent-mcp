@@ -1,6 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
 import { GmailEmailProvider, type GmailApiClient } from './email-gmail-provider.js';
-import { AttachmentNotFoundError } from '@usejunior/email-core';
+import {
+  AttachmentNotFoundError,
+  cancelScheduledSendAction,
+  listScheduledSendsAction,
+  sendDraftAction,
+  sendEmailAction,
+  type EmailScheduledSender,
+} from '@usejunior/email-core';
 
 function createMockGmailClient(overrides: Partial<GmailApiClient> = {}): GmailApiClient {
   return {
@@ -303,6 +310,79 @@ describe('provider-gmail/Draft Operations', () => {
     expect(result.success).toBe(true);
     expect(result.messageId).toBe('sent-draft-msg');
     expect(client.sendDraft).toHaveBeenCalledWith('draft-abc');
+  });
+});
+
+describe('email-write/Unsupported Scheduled Send Providers', () => {
+  describe('provider-gmail/Scheduled Send Is Explicitly Unsupported', () => {
+    it('Scenario: Gmail rejects scheduled delivery clearly', async () => {
+      const client = createMockGmailClient();
+      const provider = new GmailEmailProvider(client);
+
+      const result = await sendEmailAction.run({
+        provider,
+        sendAllowlist: { entries: ['*@example.com'] },
+      }, {
+        to: 'alice@example.com',
+        subject: 'Later',
+        body: 'Do not send immediately',
+        scheduled_send_at: new Date(Date.now() + 60_000).toISOString(),
+      });
+
+      expect(result).toMatchObject({
+        success: false,
+        error: { code: 'NOT_SUPPORTED', recoverable: false },
+      });
+      expect(client.sendMessage).not.toHaveBeenCalled();
+      expect(client.createDraft).not.toHaveBeenCalled();
+    });
+
+    it('Scenario: Gmail scheduling makes no Gmail API request', async () => {
+      const client = createMockGmailClient();
+      const provider = new GmailEmailProvider(client);
+      const scheduling = provider as unknown as Partial<EmailScheduledSender>;
+
+      const listed = await listScheduledSendsAction.run({ provider }, {});
+      const cancelled = await cancelScheduledSendAction.run({ provider }, {
+        message_id: 'not-a-scheduled-message',
+      });
+
+      expect(scheduling.scheduleMessage).toBeUndefined();
+      expect(scheduling.scheduleDraft).toBeUndefined();
+      expect(listed).toMatchObject({
+        scheduledSends: [],
+        error: { code: 'NOT_SUPPORTED' },
+      });
+      expect(cancelled).toMatchObject({
+        success: false,
+        error: { code: 'NOT_SUPPORTED' },
+      });
+      expect(client.sendMessage).not.toHaveBeenCalled();
+      expect(client.createDraft).not.toHaveBeenCalled();
+      expect(client.modifyMessage).not.toHaveBeenCalled();
+    });
+
+    it('Scenario: Gmail scheduled draft send is rejected before any Gmail API request', async () => {
+      const client = createMockGmailClient({
+        getMessage: vi.fn().mockRejectedValue(new Error('must not be called')),
+      });
+      const provider = new GmailEmailProvider(client);
+
+      const result = await sendDraftAction.run({
+        provider,
+        sendAllowlist: { entries: ['*@example.com'] },
+      }, {
+        draft_id: 'gmail-draft',
+        scheduled_send_at: new Date(Date.now() + 60_000).toISOString(),
+      });
+
+      expect(result).toMatchObject({
+        success: false,
+        error: { code: 'NOT_SUPPORTED', recoverable: false },
+      });
+      expect(client.getMessage).not.toHaveBeenCalled();
+      expect(client.sendDraft).not.toHaveBeenCalled();
+    });
   });
 });
 

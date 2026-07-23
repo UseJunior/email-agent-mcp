@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
-import { deleteEmailAction } from '@usejunior/email-core';
+import { deleteEmailAction, sendEmailAction } from '@usejunior/email-core';
 import {
   actionsToMcpTools,
   handleToolCall,
@@ -70,6 +70,30 @@ describe('mcp-transport/executeTool primitive', () => {
     expect(properties['to']).toBeDefined();
     expect(properties['subject']).toBeDefined();
     expect(properties['body']).toBeDefined();
+  });
+
+  it('Scenario: invalid scheduled time returns the action error through MCP dispatch', async () => {
+    const sendMessage = vi.fn();
+    const createDraft = vi.fn();
+    const provider = { sendMessage, createDraft } as never;
+    const result = await handleToolCall(
+      [sendEmailAction],
+      { provider, sendAllowlist: { entries: ['*@example.com'] } },
+      'send_email',
+      {
+        to: 'alice@example.com',
+        subject: 'Invalid time',
+        body: 'No write',
+        scheduled_send_at: '2026-07-23T12:00:00',
+      },
+    );
+
+    expect(JSON.parse((result.content[0] as { text: string }).text)).toMatchObject({
+      success: false,
+      error: { code: 'INVALID_SCHEDULED_SEND_AT' },
+    });
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(createDraft).not.toHaveBeenCalled();
   });
 });
 
@@ -294,8 +318,8 @@ describe('mcp-transport/Lazy Provider State', () => {
     // No init has been triggered — state is still 'pending'.
     const actions = await buildLazyActions(state, noAllowlist);
 
-    // 5 custom tools + 19 email-core actions = 24 tools, no auth performed.
-    expect(actions.length).toBe(24);
+    // 5 custom tools + 21 email-core actions = 26 tools, no auth performed.
+    expect(actions.length).toBe(26);
     expect(state.status).toBe('pending');
     expect(state.initPromise).toBeNull();
     expect(state.provider).toBeNull();
@@ -306,6 +330,8 @@ describe('mcp-transport/Lazy Provider State', () => {
     expect(tools.map(t => t.name)).toContain('list_attachments');
     expect(tools.map(t => t.name)).toContain('download_attachment');
     expect(tools.map(t => t.name)).toContain('send_email');
+    expect(tools.map(t => t.name)).toContain('list_scheduled_sends');
+    expect(tools.map(t => t.name)).toContain('cancel_scheduled_send');
     expect(tools.map(t => t.name)).toEqual(expect.arrayContaining([
       'list_folders',
       'create_folder',
@@ -1203,6 +1229,74 @@ describe('mcp-transport/Lazy Provider State', () => {
         threadId: 'gmail-thread-xyz',
       },
     ]);
+  });
+
+  it('scheduled-send actions route to the requested mailbox provider', async () => {
+    const workListScheduled = vi.fn().mockResolvedValue([]);
+    const personalListScheduled = vi.fn().mockResolvedValue([{
+      messageId: 'personal-scheduled',
+      subject: 'Later',
+      to: [{ email: 'friend@example.com' }],
+      scheduledSendAt: '2026-07-24T12:00:00.000Z',
+    }]);
+    const workCancel = vi.fn().mockResolvedValue(undefined);
+    const personalCancel = vi.fn().mockResolvedValue(undefined);
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = {
+      listScheduledSends: workListScheduled,
+      cancelScheduledSend: workCancel,
+    } as never;
+    state.connectedMailbox = 'work@example.com';
+    state.connectedProvider = 'microsoft';
+    state.mailboxes = [
+      {
+        name: 'work',
+        emailAddress: 'work@example.com',
+        displayName: 'work@example.com',
+        providerType: 'microsoft',
+        provider: {
+          listScheduledSends: workListScheduled,
+          cancelScheduledSend: workCancel,
+        } as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+      {
+        name: 'personal',
+        emailAddress: 'personal@example.com',
+        displayName: 'personal@example.com',
+        providerType: 'microsoft',
+        provider: {
+          listScheduledSends: personalListScheduled,
+          cancelScheduledSend: personalCancel,
+        } as never,
+        auth: null,
+        isDefault: false,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const listScheduled = actions.find(a => a.name === 'list_scheduled_sends')!;
+    const cancelScheduled = actions.find(a => a.name === 'cancel_scheduled_send')!;
+
+    const listed = await listScheduled.run({}, { mailbox: 'personal' }) as {
+      scheduledSends: Array<{ messageId: string }>;
+    };
+    const cancelled = await cancelScheduled.run({}, {
+      mailbox: 'personal',
+      message_id: 'personal-scheduled',
+    }) as { success: boolean };
+
+    expect(listed.scheduledSends[0]?.messageId).toBe('personal-scheduled');
+    expect(cancelled.success).toBe(true);
+    expect(personalListScheduled).toHaveBeenCalledOnce();
+    expect(personalCancel).toHaveBeenCalledWith('personal-scheduled');
+    expect(workListScheduled).not.toHaveBeenCalled();
+    expect(workCancel).not.toHaveBeenCalled();
   });
 
   it('Scenario: custom list_emails preserves the default mailbox conversation handle', async () => {

@@ -142,7 +142,7 @@ If your mailbox status name is not an email address, pass `--reply-sender <email
 
 ## Tool Reference
 
-Agent Email exposes 24 MCP tools:
+Agent Email exposes 26 MCP tools:
 
 | Tool | Description | Type |
 |------|-------------|------|
@@ -159,6 +159,8 @@ Agent Email exposes 24 MCP tools:
 | `create_draft` | Create email draft | write |
 | `update_draft` | Update draft content | write |
 | `send_draft` | Send a saved draft | write |
+| `list_scheduled_sends` | List pending provider-held scheduled sends (Microsoft 365) | read |
+| `cancel_scheduled_send` | Cancel a pending scheduled send (Microsoft 365) | destructive |
 | `label_email` | Apply labels/categories | write |
 | `flag_email` | Flag/unflag emails | write |
 | `mark_read` | Mark as read/unread | write |
@@ -172,6 +174,20 @@ Agent Email exposes 24 MCP tools:
 | `delete_inbox_rule` | Delete a server-side inbox rule (requires operator env + caller flag) (Microsoft 365) | destructive |
 
 Folder and inbox-rule management requires Microsoft Graph `MailboxSettings.ReadWrite` consent. Existing Microsoft mailbox connections must re-consent after upgrading. Gmail uses labels rather than hierarchical folders/server-side Exchange rules, so these six tools return `NOT_SUPPORTED` for Gmail mailboxes.
+
+### Scheduled send
+
+`send_email` and `send_draft` accept `scheduled_send_at`, an ISO 8601 future
+timestamp with an explicit timezone. Microsoft 365 holds the message
+server-side, so delivery survives this process exiting. Use the returned
+`messageId` with `cancel_scheduled_send` while it is pending, or inspect pending
+items with `list_scheduled_sends`.
+
+Microsoft Graph changes the message ID when the held draft moves to Sent Items,
+so the returned ID is a pre-delivery management handle, not a permanent sent
+message ID. Gmail's public API does not expose scheduled send; all scheduled
+send surfaces return `NOT_SUPPORTED` for Gmail while immediate sends remain
+unchanged.
 
 ### Outbound attachments
 

@@ -7,6 +7,11 @@ import { withRetry } from '../providers/provider.js';
 import { truncateBody, BODY_SIZE_LIMIT } from '../content/body-loader.js';
 import { renderEmailBody } from '../content/body-renderer.js';
 import {
+  ScheduledSendAtSchema,
+  scheduledSendNotSupportedError,
+  validateScheduledSendAt,
+} from './scheduling.js';
+import {
   checkMailboxRequired,
   resolveComposeFields,
   validateRequiredFields,
@@ -188,11 +193,13 @@ export const createDraftAction: EmailAction<
 const SendDraftInput = z.object({
   draft_id: z.string(),
   mailbox: z.string().optional(),
+  scheduled_send_at: ScheduledSendAtSchema.optional(),
 });
 
 const SendDraftOutput = z.object({
   success: z.boolean(),
   messageId: z.string().optional(),
+  scheduledSendAt: z.string().optional(),
   error: z.object({
     code: z.string(),
     message: z.string(),
@@ -216,6 +223,16 @@ export const sendDraftAction: EmailAction<
     const mailboxError = checkMailboxRequired(input.mailbox, ctx.allMailboxes);
     if (mailboxError) {
       return { success: false, error: mailboxError };
+    }
+
+    let scheduledSendAt: string | undefined;
+    if (input.scheduled_send_at !== undefined) {
+      const validated = validateScheduledSendAt(input.scheduled_send_at);
+      if ('error' in validated) return { success: false, error: validated.error };
+      scheduledSendAt = validated.value;
+      // Providers without a server-held scheduling capability must fail before
+      // even reading the draft. This keeps unsupported providers zero-call.
+      if (!ctx.provider.scheduleDraft) return scheduledSendNotSupportedError();
     }
 
     // Fetch draft to check recipients against allowlist (fail closed)
@@ -263,6 +280,27 @@ export const sendDraftAction: EmailAction<
     }
 
     try {
+      if (scheduledSendAt !== undefined) {
+        // Capability presence was checked before draft lookup above.
+        const result = await ctx.provider.scheduleDraft!(input.draft_id, scheduledSendAt);
+        if (
+          ctx.rateLimiter
+          && (result.success || result.error?.code === 'SCHEDULE_SEND_STATUS_UNKNOWN')
+        ) {
+          ctx.rateLimiter.recordUsage('send_draft');
+        }
+        return {
+          success: result.success,
+          messageId: result.messageId,
+          scheduledSendAt: result.scheduledSendAt,
+          error: result.error ? {
+            code: result.error.code,
+            message: result.error.message,
+            recoverable: result.error.recoverable,
+          } : undefined,
+        };
+      }
+
       const result = await withRetry(
         () => ctx.provider.sendDraft(input.draft_id),
         { maxRetries: 3, baseDelay: 1000 },

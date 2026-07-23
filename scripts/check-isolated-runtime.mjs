@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Isolated runtime smoke test — packs all workspace packages as local tarballs,
-// installs in a temp directory, and verifies the MCP server starts and reports 15 tools.
+// installs in a temp directory, and verifies the MCP server starts and reports 26 tools.
 
 import { execSync } from 'node:child_process';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
@@ -8,13 +8,13 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 
-const EXPECTED_TOOL_COUNT = 15;
+const EXPECTED_TOOL_COUNT = 26;
 const PACKAGES = [
   'email-core',
   'provider-microsoft',
   'provider-gmail',
   'email-mcp',
-  'agent-email',
+  'email-agent-mcp',
 ];
 
 async function main() {
@@ -38,7 +38,11 @@ async function main() {
     // Initialize an isolated project and install from tarballs
     console.error('[smoke] Installing tarballs in isolated temp directory...');
     execSync('npm init -y', { cwd: tmpDir, stdio: 'pipe' });
-    execSync(`npm install ${tarballs.join(' ')}`, { cwd: tmpDir, stdio: 'pipe', timeout: 60000 });
+    execSync(`npm install --no-audit --no-fund ${tarballs.join(' ')}`, {
+      cwd: tmpDir,
+      stdio: 'pipe',
+      timeout: 120000,
+    });
 
     // Spawn the MCP server and send JSON-RPC requests
     console.error('[smoke] Starting MCP server...');
@@ -69,11 +73,11 @@ async function main() {
 
 function testMcpServer(installDir) {
   return new Promise((resolve) => {
-    const serverBin = join(installDir, 'node_modules', '.bin', 'agent-email');
+    const serverBin = join(installDir, 'node_modules', '.bin', 'email-agent-mcp');
     const proc = spawn(serverBin, ['serve'], {
       cwd: installDir,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, AGENT_EMAIL_HOME: join(installDir, '.agent-email') },
+      env: { ...process.env, EMAIL_AGENT_MCP_HOME: join(installDir, '.email-agent-mcp') },
     });
 
     let stdout = '';

@@ -9,6 +9,8 @@ import type {
   ReplyOptions,
   Subscription,
   EmailAttachment,
+  ScheduledSend,
+  ScheduledSendResult,
 } from '../types.js';
 import {
   ProviderError,
@@ -18,13 +20,15 @@ import {
   type EmailSubscriber,
   type EmailCategorizer,
   type EmailAttachmentHandler,
+  type EmailScheduledSender,
   type DownloadedAttachment,
 } from '../providers/provider.js';
 
-export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscriber, EmailCategorizer, EmailAttachmentHandler {
+export class MockEmailProvider implements EmailReader, EmailSender, EmailScheduledSender, EmailSubscriber, EmailCategorizer, EmailAttachmentHandler {
   private messages: EmailMessage[] = [];
   private drafts: Map<string, ComposeMessage> = new Map();
   private sentMessages: ComposeMessage[] = [];
+  private scheduledSends: ScheduledSend[] = [];
   private subscriptions: Map<string, (msg: EmailMessage) => void> = new Map();
   private attachmentData: Map<string, Buffer> = new Map();
   private nextId = 1;
@@ -257,6 +261,52 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSubscri
     this.drafts.delete(draftId);
     this.sentMessages.push(draft);
     return { success: true, messageId: `sent-${this.nextId++}` };
+  }
+
+  async scheduleMessage(msg: ComposeMessage, scheduledSendAt: string): Promise<ScheduledSendResult> {
+    this.maybeThrow();
+    const draftId = `scheduled-${this.nextId++}`;
+    this.drafts.set(draftId, msg);
+    this.scheduledSends.push({
+      messageId: draftId,
+      subject: msg.subject,
+      to: msg.to,
+      scheduledSendAt,
+    });
+    return { success: true, messageId: draftId, scheduledSendAt };
+  }
+
+  async scheduleDraft(draftId: string, scheduledSendAt: string): Promise<ScheduledSendResult> {
+    this.maybeThrow();
+    const draft = this.drafts.get(draftId);
+    if (!draft) {
+      throw new ProviderError('DRAFT_NOT_FOUND', `Draft not found: ${draftId}`, 'mock', false);
+    }
+    this.scheduledSends.push({
+      messageId: draftId,
+      subject: draft.subject,
+      to: draft.to,
+      scheduledSendAt,
+    });
+    return { success: true, messageId: draftId, scheduledSendAt };
+  }
+
+  async listScheduledSends(): Promise<ScheduledSend[]> {
+    this.maybeThrow();
+    return this.scheduledSends.map(item => ({
+      ...item,
+      to: item.to.map(address => ({ ...address })),
+    }));
+  }
+
+  async cancelScheduledSend(messageId: string): Promise<void> {
+    this.maybeThrow();
+    const index = this.scheduledSends.findIndex(item => item.messageId === messageId);
+    if (index === -1) {
+      throw new ProviderError('NOT_SCHEDULED', `Message is not a pending scheduled send: ${messageId}`, 'mock', false);
+    }
+    this.scheduledSends.splice(index, 1);
+    this.drafts.delete(messageId);
   }
 
   async createReplyDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {
