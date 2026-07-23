@@ -121,7 +121,7 @@ The `send_email`, `create_draft`, `update_draft`, and `reply_to_email` actions S
 
 ### Requirement: Draft Workflow
 
-The system SHALL support a draft-then-send pattern: create a draft, allow review/modification, then send. For Microsoft Graph, this uses `createReplyAll` to preserve embedded images and CID references.
+The system SHALL support a draft-then-send pattern: create a draft, allow review/modification, then send. For Microsoft Graph reply drafts, this uses `createReply` or `createReplyAll` according to `reply_all`, preserving embedded images and CID references on either path.
 
 #### Scenario: Create and send draft
 - **WHEN** `send_email` is called with draft mode
@@ -129,7 +129,7 @@ The system SHALL support a draft-then-send pattern: create a draft, allow review
 
 #### Scenario: Draft-creating tools return a persisted preview
 - **WHEN** `create_draft`, `update_draft`, `reply_to_email` (with `draft: true`), or `send_email` (with `draft: true`) successfully creates or updates a draft
-- **THEN** the response includes a `preview` block (`{ to, cc, subject, body, bodyHtml, bodyTruncated, bodyHtmlTruncated }`) sourced by reading the persisted draft back from the provider, so persistence-layer drops are visible to the caller without a separate `read_email` round trip
+- **THEN** the response includes a `preview` block (`{ to, cc, bcc, subject, body, bodyHtml, bodyTruncated, bodyHtmlTruncated, quotedHistoryOmitted }`) sourced by reading the persisted draft back from the provider, so persistence-layer drops are visible to the caller without a separate `read_email` round trip
 - **AND** if the read-back fails after one short retry, the response includes `previewError: { code, message }` instead of `preview`; the underlying create/update success flag is unchanged
 
 ### Requirement: Delivery Failure Handling
@@ -151,3 +151,93 @@ The system SHALL truncate oversized email bodies with a user-friendly notice ins
 #### Scenario: Body exceeds size limit
 - **WHEN** the email body exceeds 3.5MB
 - **THEN** the system truncates and appends: "This response was truncated because it exceeded email size limits."
+
+### Requirement: Recoverable Mailbox-Required Error
+
+When a write action (`send_email`, `reply_to_email`, `create_draft`, `update_draft`, or `send_draft`) cannot proceed because more than one mailbox is available for action dispatch and no `mailbox` selector was supplied, the returned `MAILBOX_REQUIRED` error SHALL identify the mailbox names that may be used to correct that input.
+
+The payload SHALL include:
+
+- `availableMailboxes`: the `MailboxEntry.name` values represented in the action context, each of which is accepted by the `mailbox` selector. This reflects the mailboxes available for dispatch, which is not necessarily every mailbox on disk — the MCP wrapper supplies only connected mailboxes.
+- `defaultMailbox`: the `name` of the entry marked default, omitted when no entry is marked default.
+- `recoverable: true`: supplying one of the listed names resolves the `MAILBOX_REQUIRED` condition and allows normal processing to continue. It does not guarantee that the operation will pass unrelated validation, allowlist, or provider checks.
+
+The `code` SHALL remain `MAILBOX_REQUIRED` and the message SHALL remain `mailbox parameter required when multiple mailboxes are configured`, so callers matching on either continue to work. All new fields are additive.
+
+#### Scenario: Mailbox-required error enumerates available mailbox names
+- **WHEN** `send_email` is called without `mailbox` and the action context contains available mailboxes named "work" and "personal"
+- **THEN** `availableMailboxes` contains "work" and "personal" exactly once each
+- **AND** no ordering guarantee is imposed
+- **AND** the code and message remain unchanged
+
+#### Scenario: Mailbox-required error is reported as recoverable
+- **WHEN** `create_draft` returns `MAILBOX_REQUIRED`
+- **THEN** the payload sets `recoverable: true`
+- **AND** this means the mailbox-selection error can be corrected, not that all subsequent processing must succeed
+
+#### Scenario: Mailbox-required error names the marked default
+- **WHEN** `reply_to_email` returns `MAILBOX_REQUIRED` and "work" is marked default
+- **THEN** the payload includes `defaultMailbox: "work"`
+- **AND** when no entry is marked default, `defaultMailbox` is omitted
+
+### Requirement: Reply Scope Control
+
+Every reply-producing surface SHALL let the caller choose between a reply-all and a sender-only reply through the same `reply_all` boolean parameter, defaulting to `true`.
+
+This applies to `reply_to_email` (both its send and `draft: true` paths) and to `create_draft` when `reply_to` is set. When `reply_all` is `false`, the system SHALL NOT populate recipients automatically derived from the original thread's To/Cc participants; the reply SHALL address the original sender plus any Cc recipients the caller supplied explicitly. There is no provider-level override for the reply To list — `ReplyOptions` carries `cc`, `bcc`, `attachments`, `bodyHtml`, and `replyAll`, but no `to` — so a caller-supplied `to` does NOT add reply recipients. Recipients supplied via `cc` SHALL still be honored — `reply_all: false` narrows the *derived* audience, not the caller's stated one.
+
+On `create_draft`, `reply_all` is meaningful only alongside `reply_to`; for a non-reply draft it SHALL have no effect on the composed recipients. This requirement does not alter `create_draft`'s existing required-field validation: `to` and `subject` remain required on every path, including reply drafts.
+
+#### Scenario: Draft reply narrowed to the original sender
+- **WHEN** `create_draft` is called with `{reply_to: "msg123", to: "sender@example.com", subject: "Re: Topic", body: "…", reply_all: false}` for a thread containing additional To/Cc participants
+- **THEN** the provider's reply-draft call receives `replyAll: false`
+- **AND** the created draft addresses the original sender plus any caller-supplied Cc recipients, but omits automatically derived thread participants
+
+#### Scenario: Draft reply defaults to reply-all
+- **WHEN** `create_draft` is called with `{reply_to: "msg123", to: "sender@example.com", subject: "Re: Topic", body: "…"}` and no `reply_all`
+- **THEN** the provider's reply-draft call receives `replyAll: true`, preserving existing behavior
+
+#### Scenario: Explicit cc survives a narrowed draft reply
+- **WHEN** `create_draft` is called with `{reply_to: "msg123", to: "sender@example.com", subject: "Re: Topic", body: "…", reply_all: false, cc: ["alice@example.com"]}`
+- **THEN** the provider's reply-draft call receives `replyAll: false` and still carries `alice@example.com` on Cc
+
+#### Scenario: Send-path reply honors the same toggle
+- **WHEN** `reply_to_email` is called with `{message_id: "msg123", body: "…", reply_all: false}`
+- **THEN** the reply is addressed only to the original sender, with the thread's other participants omitted
+
+### Requirement: Authored-Only Reply Draft Preview
+
+For recognized Microsoft reply drafts, the `preview.bodyHtml` returned by `create_draft`, `update_draft`, and `reply_to_email` (with `draft: true`) SHALL contain only the authored portion of the body by default, omitting the thread history the provider assembles automatically. The preview SHALL set `quotedHistoryOmitted: true` only when it actually omits that history, so the caller can distinguish an authored-only preview from a message that simply had no quoted history.
+
+These surfaces SHALL accept an optional `include_quoted` boolean, defaulting to `false`. When `true`, the full persisted preview SHALL be returned exactly as before, subject to the existing per-field size cap and truncation flags. `send_email` (with `draft: true`) is outside this requirement and SHALL retain its existing preview behavior.
+
+The authored region SHALL be represented provider-neutrally: a provider MAY populate an optional authored-body field on the message it returns, using a verified provider signal for the unique portion of a message or its own unambiguous reply-boundary detection, and SHALL leave that field unset when neither source is safe. Preview construction SHALL consume only that field and SHALL NOT contain provider-specific parsing. It SHALL treat the preview as authored-only only when the calling action requested it, the field is present, and its value differs from the persisted body.
+
+When no authored region can be identified with confidence, the system SHALL **fail open**: return the full persisted preview and leave `quotedHistoryOmitted` unset. Authored HTML that happens to contain a horizontal rule or similar markup SHALL NOT be treated as a reply boundary.
+
+This requirement governs the preview only. The body stored in the draft and the body ultimately sent SHALL be unchanged, and preview content SHALL continue to come from the persisted draft read back from the provider, never from the request payload. Fresh (non-reply) drafts and Gmail-created drafts SHALL retain their current preview behavior and SHALL NOT be subjected to extraction.
+
+#### Scenario: Microsoft reply draft preview omits quoted history by default
+- **WHEN** `create_draft` is called with `{reply_to: "msg123", to: "sender@example.com", subject: "Re: Topic", body: "Quick note."}` against a Microsoft mailbox and the resulting draft contains the provider's assembled thread history
+- **THEN** `preview.bodyHtml` contains only the persisted authored content
+- **AND** `preview.quotedHistoryOmitted` is `true`
+
+#### Scenario: include_quoted returns the full persisted preview
+- **WHEN** the same call is made with `include_quoted: true`
+- **THEN** `preview.bodyHtml` contains the full persisted body including the quoted thread, subject to the existing size cap and `bodyHtmlTruncated` flag
+- **AND** `quotedHistoryOmitted` is not set
+
+#### Scenario: Preview omission does not mutate the persisted draft
+- **WHEN** a Microsoft reply draft produces an authored-only preview
+- **THEN** the provider message used for the persisted read-back still contains the complete quoted thread in `bodyHtml`
+- **AND** building the preview performs no provider write that removes or replaces that history
+
+#### Scenario: Ambiguous body anatomy fails open to the full preview
+- **WHEN** a Microsoft reply draft is read back with no authored-body field populated, because neither a provider signal nor an unambiguous reply boundary was available
+- **THEN** `preview.bodyHtml` contains the full persisted body
+- **AND** `quotedHistoryOmitted` is not set, so the caller is never told content was omitted when the system could not identify it
+
+#### Scenario: Gmail and fresh drafts are unaffected
+- **WHEN** a draft is created on Gmail, or a non-reply draft is created on any provider
+- **THEN** the preview is returned unchanged from current behavior with no extraction attempted and `quotedHistoryOmitted` unset
+
