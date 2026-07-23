@@ -36,6 +36,24 @@ const ALLOWED_ATTACHMENT_CASTS = new Set([
   'microsoft.graph.fileAttachment/contentId',
   'microsoft.graph.fileAttachment/contentBytes',
 ]);
+const MESSAGE_SELECT = [
+  'id',
+  'subject',
+  'from',
+  'toRecipients',
+  'ccRecipients',
+  'bccRecipients',
+  'receivedDateTime',
+  'isRead',
+  'hasAttachments',
+  'body',
+  'categories',
+  'conversationId',
+  'flag',
+  'internetMessageId',
+  'internetMessageHeaders',
+  'uniqueBody',
+].join(',');
 
 function assertAttachmentSelectValid(select: string): void {
   for (const raw of select.split(',')) {
@@ -165,7 +183,7 @@ describe('provider-microsoft/Message Mapping', () => {
       },
     ]);
     expect(client.get).toHaveBeenCalledWith(
-      '/me/messages/msg-attachments?$expand=attachments($select=id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId)',
+      `/me/messages/msg-attachments?$select=${MESSAGE_SELECT}&$expand=attachments($select=id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId)`,
     );
   });
 
@@ -224,9 +242,12 @@ describe('provider-microsoft/Message Mapping', () => {
     ]);
     expect(client.get).toHaveBeenNthCalledWith(
       1,
-      '/me/messages/msg-attachments?$expand=attachments($select=id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId)',
+      `/me/messages/msg-attachments?$select=${MESSAGE_SELECT}&$expand=attachments($select=id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId)`,
     );
-    expect(client.get).toHaveBeenNthCalledWith(2, '/me/messages/msg-attachments');
+    expect(client.get).toHaveBeenNthCalledWith(
+      2,
+      `/me/messages/msg-attachments?$select=${MESSAGE_SELECT}`,
+    );
     expect(client.get).toHaveBeenNthCalledWith(
       3,
       '/me/messages/msg-attachments/attachments?$select=id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId',
@@ -277,6 +298,64 @@ describe('provider-microsoft/Message Mapping', () => {
 
     expect(msg.cc).toEqual([]);
     expect(msg.bcc).toEqual([]);
+  });
+
+  it('Scenario: getMessage maps uniqueBody for an unambiguous Graph reply draft', async () => {
+    const authored = '<html><body><div style="color:black;"><p>Authored reply</p><hr><p>Tail</p></div></body></html>';
+    const bodyOpen = QUOTED_REPLY_BODY.match(/<body[^>]*>/i)!;
+    const insertAt = bodyOpen.index! + bodyOpen[0].length;
+    const fullBody = QUOTED_REPLY_BODY.slice(0, insertAt)
+      + '<div style="color:#000000;"><p>Authored reply</p><hr><p>Tail</p></div>'
+      + QUOTED_REPLY_BODY.slice(insertAt);
+    const client = createSchemaValidatingClient([{
+      ...quotedReplyResponse(),
+      body: { contentType: 'html', content: fullBody },
+      uniqueBody: { contentType: 'html', content: authored },
+    }]);
+    const provider = new GraphEmailProvider(client);
+
+    const msg = await provider.getMessage('draft-123');
+
+    expect(msg.bodyHtml).toBe(fullBody);
+    expect(msg.authoredBodyHtml).toBe(authored);
+    expect(msg.authoredBodyHtml).toContain('color:black');
+    expect(msg.authoredBodyHtml).not.toContain('divRplyFwdMsg');
+  });
+
+  it('Scenario: getMessage structurally extracts only the authored region when uniqueBody is absent', async () => {
+    const authored = '<div><p>Authored start</p><hr><p>Authored after horizontal rule</p></div>';
+    const bodyOpen = QUOTED_REPLY_BODY.match(/<body[^>]*>/i)!;
+    const insertAt = bodyOpen.index! + bodyOpen[0].length;
+    const fullBody = QUOTED_REPLY_BODY.slice(0, insertAt)
+      + authored
+      + QUOTED_REPLY_BODY.slice(insertAt);
+    const client = createSchemaValidatingClient([{
+      ...quotedReplyResponse(),
+      body: { contentType: 'html', content: fullBody },
+    }]);
+    const provider = new GraphEmailProvider(client);
+
+    const msg = await provider.getMessage('draft-123');
+
+    expect(msg.authoredBodyHtml).toBe(authored);
+    expect(msg.authoredBodyHtml).toContain('Authored after horizontal rule');
+    expect(msg.authoredBodyHtml).not.toContain('divRplyFwdMsg');
+    expect(msg.bodyHtml).toContain('Original message content');
+  });
+
+  it('Scenario: getMessage leaves authoredBodyHtml unset for fresh or ambiguous drafts', async () => {
+    const freshBody = '<html><body><div>Fresh draft</div><hr><div>Authored horizontal rule tail</div></body></html>';
+    const client = createSchemaValidatingClient([{
+      id: 'fresh-draft',
+      body: { contentType: 'html', content: freshBody },
+      uniqueBody: { contentType: 'html', content: '<div>Fresh draft</div>' },
+    }]);
+    const provider = new GraphEmailProvider(client);
+
+    const msg = await provider.getMessage('fresh-draft');
+
+    expect(msg.bodyHtml).toBe(freshBody);
+    expect(msg.authoredBodyHtml).toBeUndefined();
   });
 });
 
@@ -878,6 +957,33 @@ describe('provider-microsoft/update_draft Quote Preservation', () => {
     expect(patchBody.content).toContain('Original message content');
   });
 
+  it('Scenario: update_draft does not mistake an authored horizontal rule for the Graph boundary', async () => {
+    const replyDraftBody = replyDraftWith(
+      '<div>Old authored start<hr><p>Old authored tail</p></div>',
+    );
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValueOnce({
+        id: 'draft-update-authored-hr',
+        body: { contentType: 'html', content: replyDraftBody },
+      }),
+      patch: vi.fn().mockResolvedValueOnce({}),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.updateDraft('draft-update-authored-hr', {
+      bodyHtml: '<div>Replacement authored body<hr><p>Replacement tail</p></div>',
+    });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const patchBody = (patchArgs[1] as { body: { content: string } }).body;
+    expect(patchBody.content).toContain('Replacement authored body');
+    expect(patchBody.content).toContain('Replacement tail');
+    expect(patchBody.content).not.toContain('Old authored start');
+    expect(patchBody.content).not.toContain('Old authored tail');
+    expect(patchBody.content).toContain('divRplyFwdMsg');
+    expect(patchBody.content).toContain('Original message content');
+  });
+
   it('Scenario: update_draft on a fresh draft replaces body wholesale', async () => {
     // No <hr> after <body> → no recognizable Graph reply anatomy → fall through to buildGraphBody
     const FRESH_DRAFT_BODY = '<html><body><div>Old fresh content</div></body></html>';
@@ -1165,7 +1271,7 @@ describe('provider-microsoft/Thread Lookup', () => {
     expect(thread.messageCount).toBe(2);
     expect(client.get).toHaveBeenNthCalledWith(
       1,
-      '/me/messages/msg-1?$expand=attachments($select=id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId)',
+      `/me/messages/msg-1?$select=${MESSAGE_SELECT}&$expand=attachments($select=id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId)`,
     );
     const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[1]![0] as string;
     const decodedUrl = decodeURIComponent(url).replaceAll('+', ' ');

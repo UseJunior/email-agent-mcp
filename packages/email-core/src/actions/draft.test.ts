@@ -6,6 +6,7 @@ import { MockEmailProvider } from '../testing/mock-provider.js';
 import { createDraftAction, sendDraftAction, updateDraftAction } from './draft.js';
 import { sendEmailAction } from './send.js';
 import { replyToEmailAction } from './reply.js';
+import { buildDraftPreview, PREVIEW_BODY_LIMIT } from './compose-helpers.js';
 import { ProviderError } from '../providers/provider.js';
 import type { ActionContext } from './registry.js';
 import type { EmailMessage } from '../types.js';
@@ -460,6 +461,204 @@ function persistedDraft(overrides: Partial<EmailMessage>): EmailMessage {
     ...overrides,
   };
 }
+
+describe('email-write/Authored-Only Reply Draft Preview', () => {
+  const fullReplyHtml = '<html><body><div>Persisted authored reply</div><hr><div id="divRplyFwdMsg">Quoted thread</div></body></html>';
+  const authoredReplyHtml = '<div style="color:black;">Persisted authored reply</div>';
+
+  beforeEach(() => {
+    provider.addMessage({
+      id: 'msg123',
+      subject: 'Topic',
+      from: { email: 'sender@allowed.com' },
+      to: [{ email: 'me@company.com' }],
+      receivedAt: '2026-07-23T12:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+  });
+
+  it('Scenario: Microsoft reply draft preview omits quoted history by default', async () => {
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Re: Topic',
+      to: [{ email: 'sender@allowed.com' }],
+      bodyHtml: fullReplyHtml,
+      authoredBodyHtml: authoredReplyHtml,
+    }));
+
+    const result = await createDraftAction.run(ctx, {
+      reply_to: 'msg123',
+      to: 'sender@allowed.com',
+      subject: 'Re: Topic',
+      body: 'Quick note.',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.preview!.bodyHtml).toBe(authoredReplyHtml);
+    expect(result.preview!.bodyHtml).not.toContain('Quoted thread');
+    expect(result.preview!.quotedHistoryOmitted).toBe(true);
+  });
+
+  it('Scenario: include_quoted returns the full persisted preview', async () => {
+    const hugeQuotedBody = authoredReplyHtml
+      + '<div id="divRplyFwdMsg">'
+      + 'q'.repeat(PREVIEW_BODY_LIMIT * 2)
+      + '</div>';
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Re: Topic',
+      to: [{ email: 'sender@allowed.com' }],
+      bodyHtml: hugeQuotedBody,
+      authoredBodyHtml: authoredReplyHtml,
+    }));
+
+    const result = await createDraftAction.run(ctx, {
+      reply_to: 'msg123',
+      to: 'sender@allowed.com',
+      subject: 'Re: Topic',
+      body: 'Quick note.',
+      include_quoted: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.preview!.bodyHtml).toContain('divRplyFwdMsg');
+    expect(Buffer.byteLength(result.preview!.bodyHtml!, 'utf-8')).toBe(PREVIEW_BODY_LIMIT);
+    expect(result.preview!.bodyHtmlTruncated).toBe(true);
+    expect(result.preview!.quotedHistoryOmitted).toBeUndefined();
+  });
+
+  it('Scenario: equal authored and persisted bodies do not claim quoted history was omitted', async () => {
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Re: Topic',
+      to: [{ email: 'sender@allowed.com' }],
+      bodyHtml: authoredReplyHtml,
+      authoredBodyHtml: authoredReplyHtml,
+    }));
+
+    const result = await createDraftAction.run(ctx, {
+      reply_to: 'msg123',
+      to: 'sender@allowed.com',
+      subject: 'Re: Topic',
+      body: 'Quick note.',
+    });
+
+    expect(result.preview!.bodyHtml).toBe(authoredReplyHtml);
+    expect(result.preview!.quotedHistoryOmitted).toBeUndefined();
+  });
+
+  it('Scenario: Ambiguous body anatomy fails open to the full preview', async () => {
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Re: Topic',
+      to: [{ email: 'sender@allowed.com' }],
+      bodyHtml: fullReplyHtml,
+      authoredBodyHtml: undefined,
+    }));
+
+    const result = await createDraftAction.run(ctx, {
+      reply_to: 'msg123',
+      to: 'sender@allowed.com',
+      subject: 'Re: Topic',
+      body: 'Quick note.',
+    });
+
+    expect(result.preview!.bodyHtml).toBe(fullReplyHtml);
+    expect(result.preview!.bodyHtml).toContain('Quoted thread');
+    expect(result.preview!.quotedHistoryOmitted).toBeUndefined();
+  });
+
+  it('Scenario: Preview omission does not mutate the persisted draft', async () => {
+    const getMessage = vi.fn().mockResolvedValue(persistedDraft({
+      bodyHtml: fullReplyHtml,
+      authoredBodyHtml: authoredReplyHtml,
+    }));
+    const providerWrite = vi.fn();
+
+    const result = await buildDraftPreview(
+      { getMessage, updateDraft: providerWrite } as Pick<typeof provider, 'getMessage'>,
+      'draft-1',
+      { authoredOnly: true, retryDelayMs: 0 },
+    );
+
+    expect(result.preview!.bodyHtml).toBe(authoredReplyHtml);
+    expect(result.preview!.quotedHistoryOmitted).toBe(true);
+    await expect(getMessage.mock.results[0]!.value).resolves.toMatchObject({
+      bodyHtml: fullReplyHtml,
+    });
+    expect(providerWrite).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Gmail and fresh drafts are unaffected', async () => {
+    const freshHtml = '<html><body><p>Fresh draft</p><hr><p>Authored horizontal rule tail</p></body></html>';
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Fresh',
+      to: [{ email: 'alice@allowed.com' }],
+      bodyHtml: freshHtml,
+    }));
+    ctx.allMailboxes = [{
+      name: 'gmail',
+      emailAddress: 'me@gmail.com',
+      provider,
+      providerType: 'gmail',
+      isDefault: true,
+      status: 'connected',
+    }];
+    ctx.mailboxName = 'gmail';
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Fresh',
+      body: 'Fresh draft',
+      mailbox: 'gmail',
+    });
+
+    expect(result.preview!.bodyHtml).toBe(freshHtml);
+    expect(result.preview!.bodyHtml).toContain('Authored horizontal rule tail');
+    expect(result.preview!.quotedHistoryOmitted).toBeUndefined();
+  });
+
+  it('update_draft requests authored-only preview without changing the persisted body', async () => {
+    const created = await provider.createDraft({
+      to: [{ email: 'sender@allowed.com' }],
+      subject: 'Re: Topic',
+      body: 'Old reply',
+    });
+    const updateSpy = vi.spyOn(provider, 'updateDraft');
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      id: created.draftId!,
+      subject: 'Re: Topic',
+      to: [{ email: 'sender@allowed.com' }],
+      bodyHtml: fullReplyHtml,
+      authoredBodyHtml: authoredReplyHtml,
+    }));
+
+    const result = await updateDraftAction.run(ctx, {
+      draft_id: created.draftId!,
+      body: 'Updated reply',
+    });
+
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(result.preview!.bodyHtml).toBe(authoredReplyHtml);
+    expect(result.preview!.quotedHistoryOmitted).toBe(true);
+  });
+
+  it('send_email draft mode retains the full persisted preview', async () => {
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Fresh send draft',
+      to: [{ email: 'alice@allowed.com' }],
+      bodyHtml: fullReplyHtml,
+      authoredBodyHtml: authoredReplyHtml,
+    }));
+
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Fresh send draft',
+      body: 'Body',
+      draft: true,
+    });
+
+    expect(result.preview!.bodyHtml).toBe(fullReplyHtml);
+    expect(result.preview!.quotedHistoryOmitted).toBeUndefined();
+  });
+});
 
 describe('email-write/Draft Preview (issue #75)', () => {
   it('Scenario: Draft-creating tools return a persisted preview', async () => {

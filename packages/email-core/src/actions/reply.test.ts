@@ -463,6 +463,50 @@ describe('email-write/Reply Draft Preview (issue #75)', () => {
     ]);
   });
 
+  it('reply_to_email draft defaults to an authored-only persisted preview', async () => {
+    const fullHtml = '<div>Authored reply</div><div id="divRplyFwdMsg">Quoted thread</div>';
+    const authoredHtml = '<div style="color:black;">Authored reply</div>';
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Re: Hello',
+      to: [{ email: 'partner@lawfirm.com' }],
+      bodyHtml: fullHtml,
+      authoredBodyHtml: authoredHtml,
+    }));
+
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: VALID_MSG_ID,
+      body: 'Authored reply',
+      draft: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.preview!.bodyHtml).toBe(authoredHtml);
+    expect(result.preview!.bodyHtml).not.toContain('Quoted thread');
+    expect(result.preview!.quotedHistoryOmitted).toBe(true);
+  });
+
+  it('reply_to_email draft include_quoted returns the full persisted preview', async () => {
+    const fullHtml = '<div>Authored reply</div><div id="divRplyFwdMsg">Quoted thread</div>';
+    vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({
+      subject: 'Re: Hello',
+      to: [{ email: 'partner@lawfirm.com' }],
+      bodyHtml: fullHtml,
+      authoredBodyHtml: '<div style="color:#000000;">Authored reply</div>',
+    }));
+
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: VALID_MSG_ID,
+      body: 'Authored reply',
+      draft: true,
+      include_quoted: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.preview!.bodyHtml).toBe(fullHtml);
+    expect(result.preview!.bodyHtml).toContain('Quoted thread');
+    expect(result.preview!.quotedHistoryOmitted).toBeUndefined();
+  });
+
   it('reply_to_email draft persistent read-back failure: previewError surfaces, success unchanged', async () => {
     vi.spyOn(provider, 'getMessage').mockRejectedValue(new Error('read-back persistent'));
 
