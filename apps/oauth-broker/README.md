@@ -87,6 +87,10 @@ If an existing deployment explicitly sets `GMAIL_OAUTH_SCOPES`, update the
 environment value to `https://www.googleapis.com/auth/gmail.modify` before
 submitting the OAuth app for verification.
 
+For the audited project values, pre-submission gates, scope justification,
+privacy-policy facts, and demo script, follow the
+[Google OAuth verification runbook](./VERIFICATION.md).
+
 ## Operational notes (deferred to follow-up PRs)
 
 - Rate limiting on `/api/start` and `/api/refresh` is not yet in place;
