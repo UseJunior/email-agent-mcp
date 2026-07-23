@@ -17,6 +17,12 @@ interface ActionError {
   code: string;
   message: string;
   recoverable: boolean;
+  // Set only on MAILBOX_REQUIRED: the mailbox names accepted by the `mailbox`
+  // selector, so a caller can recover in a single retry without a discovery
+  // round trip. Reflects the mailboxes available for dispatch (connected at the
+  // MCP wrapper), not necessarily every mailbox on disk.
+  availableMailboxes?: string[];
+  defaultMailbox?: string;
 }
 
 // --- checkMailboxRequired ---
@@ -26,10 +32,13 @@ export function checkMailboxRequired(
   allMailboxes: MailboxEntry[] | undefined,
 ): ActionError | null {
   if (!mailbox && allMailboxes && allMailboxes.length > 1) {
+    const defaultMailbox = allMailboxes.find(m => m.isDefault)?.name;
     return {
       code: 'MAILBOX_REQUIRED',
       message: 'mailbox parameter required when multiple mailboxes are configured',
-      recoverable: false,
+      recoverable: true,
+      availableMailboxes: allMailboxes.map(m => m.name),
+      ...(defaultMailbox !== undefined ? { defaultMailbox } : {}),
     };
   }
   return null;

@@ -31,6 +31,8 @@ const DraftOutput = z.object({
     code: z.string(),
     message: z.string(),
     recoverable: z.boolean(),
+    availableMailboxes: z.array(z.string()).optional(),
+    defaultMailbox: z.string().optional(),
   }).optional(),
 });
 
@@ -186,6 +188,8 @@ const SendDraftOutput = z.object({
     code: z.string(),
     message: z.string(),
     recoverable: z.boolean(),
+    availableMailboxes: z.array(z.string()).optional(),
+    defaultMailbox: z.string().optional(),
   }).optional(),
 });
 
