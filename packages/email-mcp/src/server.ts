@@ -968,6 +968,43 @@ export async function buildLazyActions(
         }
       },
     },
+    {
+      name: 'list_mailboxes',
+      description:
+        'List every configured mailbox with its connection status and which one is the default. Use this to discover available mailbox names to pass as the `mailbox` argument to other tools. Reports mailboxes that failed to authenticate too, so it stays useful for diagnosing a broken setup.',
+      input: z.object({}),
+      output: z.object({
+        mailboxes: z.array(
+          z.object({
+            name: z.string(),
+            provider: z.string(),
+            isDefault: z.boolean(),
+            status: z.enum(['connected', 'error']),
+            error: z.string().optional(),
+          }),
+        ),
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      // Enumerates state.mailboxes directly — NOT via the generic action wrapper
+      // and NOT via the core listMailboxesAction, whose in-memory mailboxStore is
+      // never populated by this server (it loads mailboxes from disk metadata into
+      // state.mailboxes). Uses waitForInit rather than ensureProvider: ensureProvider
+      // throws when zero mailboxes are connected, which is exactly the misconfigured
+      // case an agent would call this tool to diagnose. waitForInit settles init
+      // (populating both connected and error mailboxes) and never throws.
+      run: async () => {
+        await waitForInit(state);
+        return {
+          mailboxes: getKnownMailboxes(state).map(mailbox => ({
+            name: mailbox.emailAddress ?? mailbox.displayName,
+            provider: mailbox.providerType,
+            isDefault: mailbox.isDefault,
+            status: mailbox.status,
+            ...(mailbox.status === 'error' && mailbox.error ? { error: mailbox.error } : {}),
+          })),
+        };
+      },
+    },
     wrapAction(sendEmailAction),
     wrapAction(replyToEmailAction),
     wrapAction(createDraftAction),
