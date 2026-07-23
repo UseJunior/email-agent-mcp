@@ -15,7 +15,7 @@
     "build": "npm run build -w @usejunior/email-core && npm run build -w @usejunior/provider-microsoft && npm run build -w @usejunior/provider-gmail && npm run build -w @usejunior/email-mcp",
     "test": "npm run test --workspaces --if-present",
     "test:run": "npm run test:run --workspaces --if-present && npm run test:scripts",
-    "test:scripts": "node --test scripts/launch-prep-smoke.test.mjs",
+    "test:scripts": "node --test scripts/launch-prep-smoke.node-test.mjs",
     "lint": "npm run lint --workspaces --if-present",
     "clean": "npm run clean --workspaces --if-present",
     "check:spec-coverage": "node scripts/check-spec-coverage.mjs",
