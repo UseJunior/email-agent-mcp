@@ -55,6 +55,38 @@ describe('email-read/List Emails', () => {
     const result = await listEmailsAction.run(ctx, { folder: 'inbox' });
     expect(result.emails).toHaveLength(25);
   });
+
+  it('Scenario: Listed rows carry the provider conversation handle', async () => {
+    provider.addMessage({
+      id: 'graph-1',
+      subject: 'Graph conversation',
+      folder: 'inbox',
+      conversationId: 'graph-conversation-abc',
+    });
+    provider.addMessage({
+      id: 'gmail-1',
+      subject: 'Gmail thread',
+      folder: 'inbox',
+      threadId: 'gmail-thread-xyz',
+    });
+    provider.addMessage({
+      id: 'plain-1',
+      subject: 'No provider handle',
+      folder: 'inbox',
+    });
+
+    const result = await listEmailsAction.run(ctx, { folder: 'inbox' });
+    const graph = result.emails.find(email => email.id === 'graph-1');
+    const gmail = result.emails.find(email => email.id === 'gmail-1');
+    const plain = result.emails.find(email => email.id === 'plain-1');
+
+    expect(graph).toMatchObject({ conversationId: 'graph-conversation-abc' });
+    expect(graph).not.toHaveProperty('threadId');
+    expect(gmail).toMatchObject({ threadId: 'gmail-thread-xyz' });
+    expect(gmail).not.toHaveProperty('conversationId');
+    expect(plain).not.toHaveProperty('conversationId');
+    expect(plain).not.toHaveProperty('threadId');
+  });
 });
 
 describe('email-read/Folder Routing', () => {
