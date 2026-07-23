@@ -325,6 +325,8 @@ export const DraftPreviewSchema = z.object({
     .describe('True if preview.body was truncated to fit the MCP response budget. The persisted draft body is unchanged.'),
   bodyHtmlTruncated: z.boolean().optional()
     .describe('True if preview.bodyHtml was truncated to fit the MCP response budget. The persisted draft body is unchanged.'),
+  quotedHistoryOmitted: z.boolean().optional()
+    .describe('True only when preview.bodyHtml omits provider-assembled quoted history. The persisted draft body is unchanged.'),
 });
 
 export const PreviewErrorSchema = z.object({
@@ -390,7 +392,7 @@ function toPreviewError(err: unknown): PreviewError {
 export async function buildDraftPreview(
   provider: Pick<EmailReader, 'getMessage'>,
   draftId: string,
-  opts?: { retryDelayMs?: number },
+  opts?: { retryDelayMs?: number; authoredOnly?: boolean },
 ): Promise<BuildDraftPreviewResult> {
   const retryDelay = opts?.retryDelayMs ?? PREVIEW_RETRY_DELAY_MS;
 
@@ -423,10 +425,17 @@ export async function buildDraftPreview(
     preview.body = text;
     if (truncated) preview.bodyTruncated = true;
   }
-  if (persisted.bodyHtml !== undefined) {
-    const { text, truncated } = truncateForPreview(persisted.bodyHtml, PREVIEW_BODY_LIMIT);
+  const useAuthoredBody = opts?.authoredOnly === true
+    && persisted.authoredBodyHtml !== undefined
+    && persisted.authoredBodyHtml !== persisted.bodyHtml;
+  const previewBodyHtml = useAuthoredBody
+    ? persisted.authoredBodyHtml
+    : persisted.bodyHtml;
+  if (previewBodyHtml !== undefined) {
+    const { text, truncated } = truncateForPreview(previewBodyHtml, PREVIEW_BODY_LIMIT);
     preview.bodyHtml = text;
     if (truncated) preview.bodyHtmlTruncated = true;
+    if (useAuthoredBody) preview.quotedHistoryOmitted = true;
   }
   return { preview };
 }

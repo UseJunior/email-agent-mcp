@@ -205,6 +205,27 @@ const DELTA_SELECT = '$select=subject,from,toRecipients,ccRecipients,receivedDat
 //   base attachment: https://learn.microsoft.com/en-us/graph/api/resources/attachment?view=graph-rest-1.0
 //   fileAttachment:  https://learn.microsoft.com/en-us/graph/api/resources/fileattachment?view=graph-rest-1.0
 const ATTACHMENT_SELECT = 'id,name,contentType,size,isInline,microsoft.graph.fileAttachment/contentId';
+// `uniqueBody` is returned only when explicitly selected. Because adding
+// `$select=uniqueBody` would narrow Graph's response, list every message field
+// consumed by mapGraphMessage and widen the existing getMessage projection.
+const MESSAGE_SELECT = [
+  'id',
+  'subject',
+  'from',
+  'toRecipients',
+  'ccRecipients',
+  'bccRecipients',
+  'receivedDateTime',
+  'isRead',
+  'hasAttachments',
+  'body',
+  'categories',
+  'conversationId',
+  'flag',
+  'internetMessageId',
+  'internetMessageHeaders',
+  'uniqueBody',
+].join(',');
 
 // Graph message and attachment IDs are base64url-flavored and routinely contain
 // `=`, `+`, `/`, `_`, `-`. Path segments must encode `+`, `/`, and `=` or Graph
@@ -344,7 +365,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
 
   async getMessage(id: string): Promise<EmailMessage> {
     const encodedId = encodeGraphPathId(id);
-    const expandedUrl = `${this.basePath}/messages/${encodedId}?$expand=attachments($select=${ATTACHMENT_SELECT})`;
+    const expandedUrl = `${this.basePath}/messages/${encodedId}?$select=${MESSAGE_SELECT}&$expand=attachments($select=${ATTACHMENT_SELECT})`;
 
     try {
       const response = await this.client.get(expandedUrl) as unknown as GraphMessage;
@@ -355,7 +376,9 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailCatego
       if (!(err instanceof GraphApiError) || err.status !== 400) throw err;
     }
 
-    const message = await this.client.get(`${this.basePath}/messages/${encodedId}`) as unknown as GraphMessage;
+    const message = await this.client.get(
+      `${this.basePath}/messages/${encodedId}?$select=${MESSAGE_SELECT}`,
+    ) as unknown as GraphMessage;
     const attachments = await this.client.get(
       `${this.basePath}/messages/${encodedId}/attachments?$select=${ATTACHMENT_SELECT}`,
     );
@@ -1351,6 +1374,7 @@ interface GraphMessage {
   isRead?: boolean;
   hasAttachments?: boolean;
   body?: { contentType: string; content: string };
+  uniqueBody?: { contentType: string; content: string };
   categories?: string[];
   conversationId?: string;
   flag?: { flagStatus?: string };
@@ -1418,6 +1442,20 @@ function mapGraphMessage(msg: GraphMessage): EmailMessage {
     contentId: attachment.contentId,
   }));
 
+  const bodyHtml = msg.body?.contentType?.toLowerCase() === 'html'
+    ? msg.body.content
+    : undefined;
+  let authoredBodyHtml: string | undefined;
+  if (bodyHtml !== undefined) {
+    const replyRegion = findGraphQuotedReplyRegion(bodyHtml);
+    if (replyRegion) {
+      authoredBodyHtml = msg.uniqueBody?.contentType?.toLowerCase() === 'html'
+        && typeof msg.uniqueBody.content === 'string'
+        ? msg.uniqueBody.content
+        : bodyHtml.slice(replyRegion.bodyOpenEnd, replyRegion.dividerStart);
+    }
+  }
+
   return {
     id: msg.id,
     subject: msg.subject ?? '',
@@ -1445,7 +1483,8 @@ function mapGraphMessage(msg: GraphMessage): EmailMessage {
     isFlagged: msg.flag?.flagStatus === 'flagged',
     hasAttachments: msg.hasAttachments ?? false,
     body: msg.body?.contentType?.toLowerCase() === 'text' ? msg.body.content : undefined,
-    bodyHtml: msg.body?.contentType?.toLowerCase() === 'html' ? msg.body.content : undefined,
+    bodyHtml,
+    authoredBodyHtml,
     attachments,
     labels: msg.categories,
     conversationId: msg.conversationId,
@@ -1632,10 +1671,11 @@ function wrapPlainTextAsHtml(text: string): string {
 /**
  * Locate the splice region in a Graph reply draft body.
  *
- * Returns null when the content is not a recognizable Graph reply (no `<body>` tag,
- * or `<body>` without a following `<hr>` divider). Returns the anchors otherwise:
+ * Returns null unless the content has Graph's unambiguous reply anatomy: a
+ * `<body>`, the `divRplyFwdMsg` boundary, and the `<hr>` divider immediately
+ * before that boundary. Returns the anchors otherwise:
  * - `bodyOpenEnd`: index of the first character after the `<body ...>` opening tag
- * - `dividerStart`: index of the first `<hr ...>` that follows
+ * - `dividerStart`: index of Graph's `<hr ...>` divider
  *
  * Both create-path (`mergeQuotedReplyHtml`, inserts at `bodyOpenEnd`) and update-path
  * (`updateDraft`, replaces `bodyOpenEnd..dividerStart`) share this anatomy parser so
@@ -1647,7 +1687,17 @@ function findGraphQuotedReplyRegion(
   const bodyMatch = content.match(/<body[^>]*>/i);
   if (!bodyMatch || bodyMatch.index === undefined) return null;
   const bodyOpenEnd = bodyMatch.index + bodyMatch[0].length;
-  const dividerMatch = content.slice(bodyOpenEnd).match(/<hr\b[^>]*>/i);
+
+  const boundaryMatch = content.slice(bodyOpenEnd).match(
+    /<div\b[^>]*\bid\s*=\s*(["'])divRplyFwdMsg\1[^>]*>/i,
+  );
+  if (!boundaryMatch || boundaryMatch.index === undefined) return null;
+  const boundaryStart = bodyOpenEnd + boundaryMatch.index;
+
+  // Match the divider adjacent to Graph's boundary, not the first <hr> in the
+  // authored region. Markdown `---` legitimately renders to an authored <hr>.
+  const beforeBoundary = content.slice(bodyOpenEnd, boundaryStart);
+  const dividerMatch = beforeBoundary.match(/<hr\b[^>]*>\s*$/i);
   if (!dividerMatch || dividerMatch.index === undefined) return null;
   return { bodyOpenEnd, dividerStart: bodyOpenEnd + dividerMatch.index };
 }

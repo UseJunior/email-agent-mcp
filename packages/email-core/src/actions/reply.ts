@@ -24,6 +24,8 @@ const ReplyToEmailInput = z.object({
   mailbox: z.string().optional(),
   cc: z.array(z.string()).optional(),
   draft: z.boolean().optional(),
+  include_quoted: z.boolean().optional().default(false)
+    .describe('Include provider-assembled quoted history in preview.bodyHtml for draft replies. This affects only the preview, never the stored or sent body.'),
   reply_all: z.boolean().optional().default(true)
     .describe('When false, reply only to the original sender. Default true preserves reply-all behavior (cc the original thread).'),
   format: z.enum(['markdown', 'html', 'text']).optional()
@@ -176,7 +178,9 @@ export const replyToEmailAction: EmailAction<
           attachments,
         });
         const previewResult = draftResult.success && draftResult.draftId
-          ? await buildDraftPreview(ctx.provider, draftResult.draftId)
+          ? await buildDraftPreview(ctx.provider, draftResult.draftId, {
+            authoredOnly: !input.include_quoted,
+          })
           : {};
         return {
           success: draftResult.success,

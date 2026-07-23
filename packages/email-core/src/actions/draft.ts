@@ -45,6 +45,8 @@ const CreateDraftInput = z.object({
   body: z.string().optional(),
   body_file: z.string().optional(),
   reply_to: z.string().optional(),
+  include_quoted: z.boolean().optional().default(false)
+    .describe('Include provider-assembled quoted history in preview.bodyHtml. This affects only the preview, never the stored or sent body.'),
   mailbox: z.string().optional(),
   format: z.enum(['markdown', 'html', 'text']).optional()
     .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
@@ -136,7 +138,9 @@ export const createDraftAction: EmailAction<
           attachments: attachments.length > 0 ? attachments : undefined,
         });
         const previewResult = result.success && result.draftId
-          ? await buildDraftPreview(ctx.provider, result.draftId)
+          ? await buildDraftPreview(ctx.provider, result.draftId, {
+            authoredOnly: !input.include_quoted,
+          })
           : {};
         return {
           success: result.success,
@@ -160,7 +164,9 @@ export const createDraftAction: EmailAction<
         attachments: attachments.length > 0 ? attachments : undefined,
       });
       const previewResult = result.success && result.draftId
-        ? await buildDraftPreview(ctx.provider, result.draftId)
+        ? await buildDraftPreview(ctx.provider, result.draftId, {
+          authoredOnly: !input.include_quoted,
+        })
         : {};
       return {
         success: result.success,
@@ -283,6 +289,8 @@ const UpdateDraftInput = z.object({
   subject: z.string().optional(),
   body: z.string().optional(),
   body_file: z.string().optional(),
+  include_quoted: z.boolean().optional().default(false)
+    .describe('Include provider-assembled quoted history in preview.bodyHtml. This affects only the preview, never the stored or sent body.'),
   mailbox: z.string().optional(),
   format: z.enum(['markdown', 'html', 'text']).optional()
     .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
@@ -382,7 +390,9 @@ export const updateDraftAction: EmailAction<
       // Acceptable for v1 — see buildDraftPreview docs for the optimization
       // path (provider returning the persisted draft directly).
       const previewResult = result.success && result.draftId
-        ? await buildDraftPreview(ctx.provider, result.draftId)
+        ? await buildDraftPreview(ctx.provider, result.draftId, {
+          authoredOnly: !input.include_quoted,
+        })
         : {};
       return {
         success: result.success,

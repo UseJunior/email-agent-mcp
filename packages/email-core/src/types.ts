@@ -26,6 +26,12 @@ export interface EmailMessage {
   hasAttachments: boolean;
   body?: string;
   bodyHtml?: string;
+  /**
+   * Provider-identified authored region of an HTML reply body, excluding the
+   * provider-assembled quoted thread. Providers leave this unset unless they
+   * can identify the reply boundary unambiguously.
+   */
+  authoredBodyHtml?: string;
   snippet?: string;
   folder?: string;
   labels?: string[];
