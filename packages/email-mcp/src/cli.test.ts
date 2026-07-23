@@ -722,7 +722,7 @@ describe('cli/Gmail Configure', () => {
       redirectUri: 'http://127.0.0.1:62018/oauth2callback',
       codeChallenge: 'mock-code-challenge',
       loginHint: 'steven.obiajulu@gmail.com',
-      scopes: ['https://mail.google.com/'],
+      scopes: ['https://www.googleapis.com/auth/gmail.modify'],
     });
 
     const allowlistPath = await getEffectiveSendAllowlistPath();

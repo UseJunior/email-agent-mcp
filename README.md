@@ -252,11 +252,13 @@ verification status, and no dependency on the hosted broker at
 Agent Email requests exactly one Gmail scope:
 
 ```text
-https://mail.google.com/
+https://www.googleapis.com/auth/gmail.modify
 ```
 
-This is a restricted scope covering read, send, modify, and delete. It is the
-single scope you add to your own OAuth consent screen.
+This is the narrowest Gmail scope that covers Agent Email's read, compose,
+send, label, and soft-delete-to-trash behavior. It does not permit immediate,
+permanent deletion. It is the single scope you add to your own OAuth consent
+screen.
 
 ### BYOK: create your own Google OAuth client
 
@@ -266,7 +268,7 @@ single scope you add to your own OAuth consent screen.
 3. **Configure the OAuth consent screen** under *APIs & Services → OAuth consent screen*:
    - User type **External** for a personal `@gmail.com` account, or **Internal**
      if you are on Google Workspace and only your own org needs access.
-   - Add the scope `https://mail.google.com/`.
+   - Add the scope `https://www.googleapis.com/auth/gmail.modify`.
    - While the app is in *Testing*, add your own Gmail address under **Test users**,
      or consent will be refused.
 4. **Create the OAuth client** under *APIs & Services → Credentials → Create

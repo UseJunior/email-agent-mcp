@@ -1,0 +1,6 @@
+- [x] Change the Gmail provider default to `gmail.modify`
+- [x] Change and test the OAuth broker default
+- [x] Verify direct and broker authorization URLs request the narrow scope
+- [x] Update root, provider, and broker documentation
+- [x] Run `openspec validate narrow-gmail-oauth-scope --strict`
+- [x] Run build, lint, tests, and OpenSpec traceability validation

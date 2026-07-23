@@ -68,7 +68,9 @@ export interface GmailProfile {
   threadsTotal?: number;
 }
 
-export const GMAIL_OAUTH_SCOPES = ['https://mail.google.com/'];
+export const GMAIL_OAUTH_SCOPES = [
+  'https://www.googleapis.com/auth/gmail.modify',
+];
 
 function collectAuthErrorStrings(err: unknown): string[] {
   const values = new Set<string>();

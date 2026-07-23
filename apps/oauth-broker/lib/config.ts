@@ -42,7 +42,10 @@ export function getConfig(): BrokerConfig {
     clientId,
     clientSecret,
     redirectUri,
-    scopes: (process.env['GMAIL_OAUTH_SCOPES'] ?? 'https://mail.google.com/').split(/\s+/).filter(Boolean),
+    scopes: (
+      process.env['GMAIL_OAUTH_SCOPES'] ??
+      'https://www.googleapis.com/auth/gmail.modify'
+    ).split(/\s+/).filter(Boolean),
     ticketTtlMs: Number(process.env['BROKER_TICKET_TTL_MS'] ?? 5 * 60 * 1000),
     useKv,
     brokerOrigin,

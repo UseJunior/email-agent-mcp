@@ -74,7 +74,7 @@ describe('provider-gmail/OAuth2 Authentication', () => {
     await expect(auth.connect({})).rejects.toThrow('access_token or refresh_token');
   });
 
-  it('Scenario: generateAuthUrl returns OAuth2 URL with Gmail scope and PKCE', async () => {
+  it('Scenario: Gmail OAuth requests the narrowest implemented scope', async () => {
     const auth = new GmailAuthManager({
       clientId: 'test-client',
       clientSecret: 'test-secret',
@@ -89,6 +89,10 @@ describe('provider-gmail/OAuth2 Authentication', () => {
     });
 
     expect(url).toContain('accounts.google.com');
+    expect(GMAIL_OAUTH_SCOPES).toEqual([
+      'https://www.googleapis.com/auth/gmail.modify',
+    ]);
+    expect(url).not.toContain(encodeURIComponent('https://mail.google.com/'));
     expect(auth.getOAuth2Client().generateAuthUrl).toHaveBeenCalledWith({
       access_type: 'offline',
       include_granted_scopes: true,

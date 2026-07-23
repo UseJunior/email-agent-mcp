@@ -64,7 +64,8 @@ The simplest path is Google's OAuth 2.0 Playground using your own client credent
 1. Open `https://developers.google.com/oauthplayground/`.
 2. Click the gear icon and enable "Use your own OAuth credentials".
 3. Paste your Google `client_id` and `client_secret`.
-4. Authorize the Gmail scope `https://mail.google.com/`.
+4. Authorize the Gmail scope
+   `https://www.googleapis.com/auth/gmail.modify`.
 5. Exchange the authorization code for tokens.
 6. Copy the returned `refresh_token`.
 
