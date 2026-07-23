@@ -45,6 +45,8 @@ const CreateDraftInput = z.object({
   body: z.string().optional(),
   body_file: z.string().optional(),
   reply_to: z.string().optional(),
+  reply_all: z.boolean().optional().default(true)
+    .describe('Only relevant when reply_to is set. When false, the draft replies only to the original sender. Default true preserves reply-all behavior (cc the original thread).'),
   include_quoted: z.boolean().optional().default(false)
     .describe('Include provider-assembled quoted history in preview.bodyHtml. This affects only the preview, never the stored or sent body.'),
   mailbox: z.string().optional(),
@@ -61,7 +63,7 @@ export const createDraftAction: EmailAction<
   z.infer<typeof DraftOutput>
 > = {
   name: 'create_draft',
-  description: 'Create an email draft. Supports body_file with YAML frontmatter. Use reply_to for threaded reply drafts.',
+  description: 'Create an email draft. Supports body_file with YAML frontmatter. Use reply_to for threaded reply drafts; pass reply_all=false with reply_to to draft a sender-only reply.',
   input: CreateDraftInput,
   output: DraftOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -136,6 +138,7 @@ export const createDraftAction: EmailAction<
           cc: parsed.cc,
           bodyHtml: outBodyHtml,
           attachments: attachments.length > 0 ? attachments : undefined,
+          replyAll: input.reply_all,
         });
         const previewResult = result.success && result.draftId
           ? await buildDraftPreview(ctx.provider, result.draftId, {

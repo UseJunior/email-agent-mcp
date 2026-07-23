@@ -1116,3 +1116,122 @@ describe('email-write/Recoverable Mailbox-Required Error', () => {
 // packages/email-mcp/src/server.test.ts, because provider *selection* by name
 // happens in the MCP wrapper's resolveMailboxContext — at the core level the
 // `mailbox` field is only checked for presence, never used to pick a provider.
+
+describe('email-write/Reply Scope Control', () => {
+  // Zod defaults apply at parse() time, not in run(); the MCP server calls
+  // action.input.parse() before action.run() (server.ts:245). These tests parse
+  // first to mirror that real flow. Recipient semantics — that replyAll:false
+  // actually drops derived thread participants — are proven at the provider level
+  // (Graph createReply-vs-createReplyAll routing; Gmail Cc omission). Here we
+  // prove the action-level parameter is threaded through to the provider call.
+  // MockEmailProvider.createReplyDraft ignores replyAll, so a recipient assertion
+  // against the mock would pass vacuously; we assert on the forwarded call instead.
+
+  function addOriginal(): void {
+    provider.addMessage({
+      id: 'orig-msg',
+      subject: 'Original',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }, { email: 'teammate@allowed.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+  }
+
+  it('Scenario: Draft reply narrowed to the original sender', async () => {
+    addOriginal();
+    const draftSpy = vi.spyOn(provider, 'createReplyDraft');
+    const input = createDraftAction.input.parse({
+      reply_to: 'orig-msg',
+      to: 'partner@allowed.com',
+      subject: 'Re: Original',
+      body: 'Sender-only reply.',
+      reply_all: false,
+    });
+
+    const result = await createDraftAction.run(ctx, input);
+
+    expect(result.success).toBe(true);
+    expect(draftSpy).toHaveBeenCalledWith(
+      'orig-msg',
+      expect.any(String),
+      expect.objectContaining({ replyAll: false }),
+    );
+  });
+
+  it('Scenario: Draft reply defaults to reply-all', async () => {
+    addOriginal();
+    const draftSpy = vi.spyOn(provider, 'createReplyDraft');
+    const input = createDraftAction.input.parse({
+      reply_to: 'orig-msg',
+      to: 'partner@allowed.com',
+      subject: 'Re: Original',
+      body: 'Reply to everyone.',
+    });
+    expect(input.reply_all).toBe(true);
+
+    const result = await createDraftAction.run(ctx, input);
+
+    expect(result.success).toBe(true);
+    expect(draftSpy).toHaveBeenCalledWith(
+      'orig-msg',
+      expect.any(String),
+      expect.objectContaining({ replyAll: true }),
+    );
+  });
+
+  it('Scenario: Explicit cc survives a narrowed draft reply', async () => {
+    addOriginal();
+    const draftSpy = vi.spyOn(provider, 'createReplyDraft');
+    const input = createDraftAction.input.parse({
+      reply_to: 'orig-msg',
+      to: 'partner@allowed.com',
+      subject: 'Re: Original',
+      body: 'Sender plus one.',
+      reply_all: false,
+      cc: ['alice@allowed.com'],
+    });
+
+    const result = await createDraftAction.run(ctx, input);
+
+    expect(result.success).toBe(true);
+    expect(draftSpy).toHaveBeenCalledWith(
+      'orig-msg',
+      expect.any(String),
+      expect.objectContaining({
+        replyAll: false,
+        cc: expect.arrayContaining([
+          expect.objectContaining({ email: 'alice@allowed.com' }),
+        ]),
+      }),
+    );
+  });
+
+  it('Scenario: Send-path reply honors the same toggle', async () => {
+    provider.addMessage({
+      id: 'abc123def456ghi789jkl012',
+      subject: 'Hello',
+      from: { email: 'partner@allowed.com', name: 'Partner' },
+      to: [{ email: 'me@company.com' }, { email: 'teammate@allowed.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+    const replySpy = vi.spyOn(provider, 'replyToMessage');
+    const input = replyToEmailAction.input.parse({
+      message_id: 'abc123def456ghi789jkl012',
+      body: 'Sender only.',
+      reply_all: false,
+    });
+
+    const result = await replyToEmailAction.run(ctx, input);
+
+    expect(result.success).toBe(true);
+    expect(replySpy).toHaveBeenCalledWith(
+      'abc123def456ghi789jkl012',
+      expect.any(String),
+      expect.objectContaining({ replyAll: false }),
+    );
+  });
+});

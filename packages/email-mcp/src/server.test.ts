@@ -1104,6 +1104,66 @@ describe('mcp-transport/Lazy Provider State', () => {
     ]);
   });
 
+  // Plain `it` (no `Scenario:` prefix) so this does NOT create a phantom
+  // mcp-transport spec-coverage obligation. It guards the parse boundary that
+  // the core `email-write/Reply Scope Control` tests can only mirror by calling
+  // action.input.parse() by hand: here the real dispatcher (executeTool →
+  // action.input.parse → run) must apply the reply_all default of true when the
+  // caller omits it, and thread reply_all: false through unchanged.
+  it('create_draft reply_all default is applied by the dispatcher, not just parse()', async () => {
+    const createReplyDraft = vi.fn().mockResolvedValue({ success: true });
+
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { createReplyDraft } as never;
+    state.connectedMailbox = 'work@example.com';
+    state.connectedProvider = 'microsoft';
+    state.mailboxes = [
+      {
+        name: 'work',
+        emailAddress: 'work@example.com',
+        displayName: 'work@example.com',
+        providerType: 'microsoft',
+        provider: { createReplyDraft } as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+
+    // Omitted reply_all → default true reaches the provider.
+    const omitted = await executeTool(actions, {}, 'create_draft', {
+      reply_to: 'orig-msg',
+      to: 'partner@example.com',
+      subject: 'Re: Original',
+      body: 'Reply to all.',
+    });
+    expect((omitted.input as { reply_all?: boolean }).reply_all).toBe(true);
+    expect((omitted.result as { success: boolean }).success).toBe(true);
+    expect(createReplyDraft).toHaveBeenLastCalledWith(
+      'orig-msg',
+      expect.any(String),
+      expect.objectContaining({ replyAll: true }),
+    );
+
+    // Explicit reply_all: false is threaded through unchanged.
+    await executeTool(actions, {}, 'create_draft', {
+      reply_to: 'orig-msg',
+      to: 'partner@example.com',
+      subject: 'Re: Original',
+      body: 'Sender only.',
+      reply_all: false,
+    });
+    expect(createReplyDraft).toHaveBeenLastCalledWith(
+      'orig-msg',
+      expect.any(String),
+      expect.objectContaining({ replyAll: false }),
+    );
+  });
+
   it('Scenario: wrapped send_email uses the requested mailbox provider', async () => {
     const workCreateDraft = vi.fn().mockResolvedValue({ success: true, draftId: 'draft-work' });
     const personalCreateDraft = vi.fn().mockResolvedValue({ success: true, draftId: 'draft-personal' });
