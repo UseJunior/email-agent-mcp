@@ -1,0 +1,15 @@
+- [x] Add provider-neutral scheduled-send types and an optional `EmailScheduledSender` capability to email-core; export the new types
+- [x] Add a shared `scheduled_send_at` schema/runtime validator that requires an explicit timezone, rejects invalid/past timestamps, and normalizes accepted values to UTC
+- [x] Extend `send_email` with `scheduled_send_at`, preserve allowlist/rate-limit checks, reject `draft: true` combined with scheduling, and dispatch through `scheduleMessage` without whole-operation retry
+- [x] Extend `send_draft` with `scheduled_send_at`, preserve recipient allowlist/rate-limit checks, and dispatch through `scheduleDraft`
+- [x] Add `cancel_scheduled_send` and `list_scheduled_sends` actions in `packages/email-core/src/actions/`, with cancellation marked destructive and listing marked read-only
+- [x] Implement Microsoft scheduling with `SystemTime 0x3FEF`: create/PATCH draft first, POST `/send` second, retain the held draft id, and return a structured partial-failure result if `/send` fails after draft creation
+- [x] Implement Microsoft list/cancel against Drafts; cancellation must verify `isDraft` plus the deferred property before DELETE, and all message ids must be URL-encoded
+- [x] Ensure Gmail/providers without the capability return structured `NOT_SUPPORTED` results and make no provider API calls
+- [x] Wire the two new actions through the MCP adapter, preserving the action-centric architecture and schema-derived tool inputs
+- [x] Add core action tests for validation, allowlist/rate-limit preservation, Microsoft-capability dispatch, unsupported providers, listing, and cancellation annotations
+- [x] Add Microsoft provider tests for call order/payloads, attachment preservation, permanent/ambiguous partial failure, encoded ids, paginated listing/property casing, cancellation verification/races, and arbitrary-message fail-closed behavior
+- [x] Add MCP tests proving both new actions are discoverable and route to the selected mailbox
+- [x] Update root/distribution tool documentation and scheduled-send caveats
+- [x] Run `openspec validate add-scheduled-send --strict`
+- [x] Run `npm run build`, `npm run test:run --workspaces --if-present`, `npm run lint`, and `npm run check:spec-coverage`

@@ -71,25 +71,43 @@ gemini extensions install https://github.com/UseJunior/email-agent-mcp
 
 ## Tool Reference
 
-Agent Email exposes 15 MCP tools:
+Agent Email exposes 26 MCP tools:
 
 | Tool | Description | Type |
 |------|-------------|------|
 | `list_emails` | List recent emails with filtering | read |
 | `read_email` | Read full email content as markdown | read |
 | `search_emails` | Full-text search across mailboxes | read |
+| `list_mailboxes` | Enumerate configured mailboxes, status, and default | read |
 | `get_mailbox_status` | Connection status and warnings | read |
 | `get_thread` | Full conversation context | read |
+| `list_attachments` | List attachment metadata for an email | read |
+| `download_attachment` | Download a file attachment as base64 | read |
 | `send_email` | Send new email (allowlist-gated) | write |
 | `reply_to_email` | Reply with RFC threading | write |
 | `create_draft` | Create email draft | write |
 | `update_draft` | Update draft content | write |
 | `send_draft` | Send a saved draft | write |
+| `list_scheduled_sends` | List pending provider-held scheduled sends (Microsoft 365) | read |
+| `cancel_scheduled_send` | Cancel a pending scheduled send (Microsoft 365) | destructive |
 | `label_email` | Apply labels/categories | write |
 | `flag_email` | Flag/unflag emails | write |
 | `mark_read` | Mark as read/unread | write |
 | `move_to_folder` | Move between folders | write |
 | `delete_email` | Delete (requires operator env + caller flag) | destructive |
+| `list_folders` | List Microsoft 365 mail folders | read |
+| `create_folder` | Create a Microsoft 365 custom folder | write |
+| `delete_folder` | Delete a Microsoft 365 custom folder | destructive |
+| `list_inbox_rules` | List Microsoft 365 inbox rules | read |
+| `create_inbox_rule` | Create a safe Microsoft 365 inbox rule | write |
+| `delete_inbox_rule` | Delete a Microsoft 365 inbox rule | destructive |
+
+`send_email` and `send_draft` accept an optional `scheduled_send_at` ISO 8601
+future timestamp with an explicit timezone. Microsoft 365 holds scheduled
+messages server-side. The returned `messageId` can be listed or cancelled while
+pending, but changes after delivery when Graph moves the item to Sent Items.
+Gmail scheduled send is `NOT_SUPPORTED` because the public Gmail API exposes no
+equivalent operation.
 
 `send_email`, `reply_to_email`, `create_draft`, and `update_draft` accept an
 optional `attachments` array — each entry is a sandboxed file `path` or inline

@@ -9,6 +9,8 @@ export type {
   ComposeMessage,
   OutboundAttachment,
   SendResult,
+  ScheduledSend,
+  ScheduledSendResult,
   DraftResult,
   EmailError,
   ListOptions,
@@ -17,6 +19,7 @@ export type {
 export type {
   EmailReader,
   EmailSender,
+  EmailScheduledSender,
   EmailSubscriber,
   EmailCategorizer,
   EmailAttachmentHandler,
@@ -57,6 +60,12 @@ export {
 } from './actions/search.js';
 export { replyToEmailAction } from './actions/reply.js';
 export { createDraftAction, sendDraftAction, updateDraftAction } from './actions/draft.js';
+export {
+  cancelScheduledSendAction,
+  listScheduledSendsAction,
+  ScheduledSendAtSchema,
+  validateScheduledSendAt,
+} from './actions/scheduling.js';
 export { getThreadAction } from './actions/conversation.js';
 export { listAttachmentsAction, downloadAttachmentAction } from './actions/attachments.js';
 export { labelEmailAction, flagEmailAction, markReadAction, deleteEmailAction } from './actions/label.js';

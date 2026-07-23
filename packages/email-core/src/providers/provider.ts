@@ -9,6 +9,8 @@ import type {
   ReplyOptions,
   Subscription,
   EmailError,
+  ScheduledSend,
+  ScheduledSendResult,
 } from '../types.js';
 
 export interface EmailReader {
@@ -25,6 +27,13 @@ export interface EmailSender {
   sendDraft(draftId: string): Promise<SendResult>;
   createReplyDraft?(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult>;
   updateDraft?(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult>;
+}
+
+export interface EmailScheduledSender {
+  scheduleMessage(msg: ComposeMessage, scheduledSendAt: string): Promise<ScheduledSendResult>;
+  scheduleDraft(draftId: string, scheduledSendAt: string): Promise<ScheduledSendResult>;
+  listScheduledSends(): Promise<ScheduledSend[]>;
+  cancelScheduledSend(messageId: string): Promise<void>;
 }
 
 export interface EmailSubscriber {
@@ -102,6 +111,7 @@ export interface EmailRuleManager {
 // Combined provider type — providers implement what they support
 export type EmailProvider = EmailReader
   & EmailSender
+  & Partial<EmailScheduledSender>
   & Partial<EmailSubscriber>
   & Partial<EmailCategorizer>
   & Partial<EmailAttachmentHandler>
@@ -117,7 +127,7 @@ export interface ProviderInfo {
   // support both. Note: no provider currently exports a ProviderInfo value —
   // this is a forward-compat type surface; wiring a real metadata surface
   // that declares these is a follow-up.
-  capabilities: ('read' | 'send' | 'subscribe' | 'categorize' | 'attachments' | 'outbound-attachments' | 'folders' | 'rules')[];
+  capabilities: ('read' | 'send' | 'scheduled-send' | 'subscribe' | 'categorize' | 'attachments' | 'outbound-attachments' | 'folders' | 'rules')[];
 }
 
 // Error normalization

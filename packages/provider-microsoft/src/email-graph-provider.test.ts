@@ -916,6 +916,281 @@ describe('provider-microsoft/Draft-Then-Send via createReplyAll', () => {
   });
 });
 
+describe('provider-microsoft/Deferred Delivery via Graph Extended Property', () => {
+  it('Scenario: New scheduled message uses draft then send', async () => {
+    const post = vi.fn()
+      .mockResolvedValueOnce({ id: 'scheduled-draft-1' })
+      .mockResolvedValueOnce({});
+    const client = createMockClient({ post });
+    const provider = new GraphEmailProvider(client);
+    const attachment = Buffer.from('scheduled attachment');
+
+    const result = await provider.scheduleMessage({
+      to: [{ email: 'alice@example.com', name: 'Alice' }],
+      cc: [{ email: 'copy@example.com' }],
+      subject: 'Deferred',
+      body: 'plain fallback',
+      bodyHtml: '<p>Deferred</p>',
+      attachments: [{
+        filename: 'note.txt',
+        mimeType: 'text/plain',
+        content: attachment,
+      }],
+    }, '2026-07-24T12:00:00.000Z');
+
+    expect(result).toEqual({
+      success: true,
+      messageId: 'scheduled-draft-1',
+      scheduledSendAt: '2026-07-24T12:00:00.000Z',
+    });
+    expect(post).toHaveBeenNthCalledWith(1, '/me/messages', expect.objectContaining({
+      subject: 'Deferred',
+      body: { contentType: 'HTML', content: '<p>Deferred</p>' },
+      toRecipients: [{ emailAddress: { address: 'alice@example.com', name: 'Alice' } }],
+      ccRecipients: [{ emailAddress: { address: 'copy@example.com', name: undefined } }],
+      attachments: [{
+        '@odata.type': '#microsoft.graph.fileAttachment',
+        name: 'note.txt',
+        contentType: 'text/plain',
+        contentBytes: attachment.toString('base64'),
+      }],
+      singleValueExtendedProperties: expect.arrayContaining([
+        { id: 'SystemTime 0x3FEF', value: '2026-07-24T12:00:00.000Z' },
+      ]),
+    }));
+    expect(post).toHaveBeenNthCalledWith(
+      2,
+      '/me/messages/scheduled-draft-1/send',
+      {},
+    );
+  });
+
+  it('Scenario: Existing draft is patched before send', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.scheduleDraft(
+      'AAMk/draft+=',
+      '2026-07-24T12:00:00.000Z',
+    );
+
+    expect(client.patch).toHaveBeenCalledWith(
+      '/me/messages/AAMk%2Fdraft%2B%3D',
+      {
+        singleValueExtendedProperties: [{
+          id: 'SystemTime 0x3FEF',
+          value: '2026-07-24T12:00:00.000Z',
+        }],
+      },
+    );
+    expect(client.post).toHaveBeenCalledWith(
+      '/me/messages/AAMk%2Fdraft%2B%3D/send',
+      {},
+    );
+    expect((client.patch as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0])
+      .toBeLessThan((client.post as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]!);
+    expect(result.messageId).toBe('AAMk/draft+=');
+  });
+
+  it('Scenario: Ambiguous send failure preserves a non-retryable status-unknown handle', async () => {
+    const post = vi.fn()
+      .mockResolvedValueOnce({ id: 'held-draft' })
+      .mockRejectedValueOnce(new GraphApiError(503, 'temporarily unavailable'));
+    const provider = new GraphEmailProvider(createMockClient({ post }));
+
+    const result = await provider.scheduleMessage({
+      to: [{ email: 'alice@example.com' }],
+      subject: 'Partial failure',
+      body: 'Draft remains',
+    }, '2026-07-24T12:00:00.000Z');
+
+    expect(result).toMatchObject({
+      success: false,
+      messageId: 'held-draft',
+      scheduledSendAt: '2026-07-24T12:00:00.000Z',
+      error: {
+        code: 'SCHEDULE_SEND_STATUS_UNKNOWN',
+        recoverable: false,
+      },
+    });
+    expect(result.error?.message).toContain('may have accepted');
+    expect(result.error?.message).toContain('Do not schedule a duplicate');
+    expect(post).toHaveBeenCalledTimes(2);
+  });
+
+  it('Scenario: Permanent send rejection preserves the handle without suggesting retry', async () => {
+    const post = vi.fn()
+      .mockResolvedValueOnce({ id: 'rejected-draft' })
+      .mockRejectedValueOnce(new GraphApiError(400, 'ErrorInvalidRecipients'));
+    const provider = new GraphEmailProvider(createMockClient({ post }));
+
+    const result = await provider.scheduleMessage({
+      to: [{ email: 'invalid@example.com' }],
+      subject: 'Rejected',
+      body: 'Draft remains',
+    }, '2026-07-24T12:00:00.000Z');
+
+    expect(result).toMatchObject({
+      success: false,
+      messageId: 'rejected-draft',
+      error: {
+        code: 'SCHEDULE_SEND_FAILED',
+        recoverable: false,
+      },
+    });
+    expect(result.error?.message).toContain('rejected');
+  });
+});
+
+describe('provider-microsoft/Graph Scheduled Send Inspection and Cancellation', () => {
+  it('Scenario: Deferred property casing is normalized', async () => {
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({
+        value: [
+          {
+            id: 'scheduled-1',
+            subject: 'Pending',
+            toRecipients: [{
+              emailAddress: { address: 'alice@example.com', name: 'Alice' },
+            }],
+            isDraft: true,
+            singleValueExtendedProperties: [{
+              id: 'SystemTime 0x3fef',
+              value: '2026-07-24T08:00:00-04:00',
+            }],
+          },
+          {
+            id: 'ordinary-draft',
+            subject: 'Not scheduled',
+            isDraft: true,
+          },
+          {
+            id: 'not-a-draft',
+            subject: 'Already moved',
+            isDraft: false,
+            singleValueExtendedProperties: [{
+              id: 'SystemTime 0x3FEF',
+              value: '2026-07-24T12:00:00Z',
+            }],
+          },
+        ],
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.listScheduledSends();
+
+    expect(result).toEqual([{
+      messageId: 'scheduled-1',
+      subject: 'Pending',
+      to: [{ email: 'alice@example.com', name: 'Alice' }],
+      scheduledSendAt: '2026-07-24T12:00:00.000Z',
+    }]);
+    expect(client.get).toHaveBeenCalledWith(
+      expect.stringContaining('/me/mailFolders/drafts/messages?$select=id,subject,toRecipients,isDraft&$top=100'),
+    );
+    expect(client.get).toHaveBeenCalledWith(
+      expect.stringContaining("$expand=singleValueExtendedProperties($filter=id eq 'SystemTime 0x3FEF')"),
+    );
+  });
+
+  it('Scenario: Cancellation verifies before delete', async () => {
+    const get = vi.fn().mockResolvedValue({
+      id: 'AAMk/scheduled+=',
+      isDraft: true,
+      singleValueExtendedProperties: [{
+        id: 'SystemTime 0x3fef',
+        value: '2026-07-24T12:00:00Z',
+      }],
+    });
+    const client = createMockClient({ get });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.cancelScheduledSend('AAMk/scheduled+=');
+
+    expect(get).toHaveBeenCalledWith(
+      expect.stringContaining('/me/messages/AAMk%2Fscheduled%2B%3D?'),
+    );
+    expect(client.delete).toHaveBeenCalledWith(
+      '/me/messages/AAMk%2Fscheduled%2B%3D',
+    );
+
+    const unsafeClient = createMockClient({
+      get: vi.fn().mockResolvedValue({
+        id: 'ordinary',
+        isDraft: true,
+        singleValueExtendedProperties: [],
+      }),
+    });
+    const unsafeProvider = new GraphEmailProvider(unsafeClient);
+    await expect(unsafeProvider.cancelScheduledSend('ordinary'))
+      .rejects.toMatchObject({ code: 'NOT_SCHEDULED' });
+    expect(unsafeClient.delete).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Scheduled send listing follows Graph pagination', async () => {
+    const secondPage = 'https://graph.microsoft.com/v1.0/me/mailFolders/drafts/messages?next=2';
+    const get = vi.fn()
+      .mockResolvedValueOnce({
+        value: [{
+          id: 'scheduled-page-1',
+          subject: 'First',
+          toRecipients: [],
+          isDraft: true,
+          singleValueExtendedProperties: [{
+            id: 'SystemTime 0x3FEF',
+            value: '2026-07-24T12:00:00Z',
+          }],
+        }],
+        '@odata.nextLink': secondPage,
+      })
+      .mockResolvedValueOnce({
+        value: [{
+          id: 'scheduled-page-2',
+          subject: 'Second',
+          toRecipients: [],
+          isDraft: true,
+          singleValueExtendedProperties: [{
+            id: 'SystemTime 0x3fef',
+            value: '2026-07-24T13:00:00Z',
+          }],
+        }],
+      });
+    const provider = new GraphEmailProvider(createMockClient({ get }));
+
+    const result = await provider.listScheduledSends();
+
+    expect(result.map(item => item.messageId)).toEqual([
+      'scheduled-page-1',
+      'scheduled-page-2',
+    ]);
+    expect(get).toHaveBeenNthCalledWith(2, secondPage);
+  });
+
+  it('Scenario: Delivered handle is no longer scheduled before or during cancellation', async () => {
+    const missingBeforeGet = createMockClient({
+      get: vi.fn().mockRejectedValue(new GraphApiError(404, 'ErrorItemNotFound')),
+    });
+    await expect(new GraphEmailProvider(missingBeforeGet).cancelScheduledSend('delivered'))
+      .rejects.toMatchObject({ code: 'NOT_SCHEDULED' });
+    expect(missingBeforeGet.delete).not.toHaveBeenCalled();
+
+    const missingDuringDelete = createMockClient({
+      get: vi.fn().mockResolvedValue({
+        id: 'race',
+        isDraft: true,
+        singleValueExtendedProperties: [{
+          id: 'SystemTime 0x3FEF',
+          value: '2026-07-24T12:00:00Z',
+        }],
+      }),
+      delete: vi.fn().mockRejectedValue(new GraphApiError(404, 'ErrorItemNotFound')),
+    });
+    await expect(new GraphEmailProvider(missingDuringDelete).cancelScheduledSend('race'))
+      .rejects.toMatchObject({ code: 'NOT_SCHEDULED' });
+  });
+});
+
 describe('provider-microsoft/update_draft Quote Preservation', () => {
   // Compose the realistic "post-prepareReplyDraft" fixture by simulating the
   // create-path: caller fragment inserted by the same merge logic the production

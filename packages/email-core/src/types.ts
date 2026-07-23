@@ -95,6 +95,17 @@ export interface SendResult {
   error?: EmailError;
 }
 
+export interface ScheduledSendResult extends SendResult {
+  scheduledSendAt?: string;
+}
+
+export interface ScheduledSend {
+  messageId: string;
+  subject: string;
+  to: EmailAddress[];
+  scheduledSendAt: string;
+}
+
 export interface DraftResult {
   success: boolean;
   draftId?: string;
