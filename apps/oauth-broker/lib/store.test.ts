@@ -1,6 +1,5 @@
-// In-memory store covers the protocol logic. The KV path is a thin
-// wrapper around the same shape; we test it via integration in the
-// route tests with a fake @vercel/kv mock.
+// In-memory store covers the protocol logic. The KV-specific atomic
+// claim behavior is covered separately in store.kv.test.ts.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
