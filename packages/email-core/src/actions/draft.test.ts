@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { MockEmailProvider } from '../testing/mock-provider.js';
 import { createDraftAction, sendDraftAction, updateDraftAction } from './draft.js';
 import { sendEmailAction } from './send.js';
+import { replyToEmailAction } from './reply.js';
 import { ProviderError } from '../providers/provider.js';
 import type { ActionContext } from './registry.js';
 import type { EmailMessage } from '../types.js';
@@ -842,3 +843,77 @@ describe('email-write/send_email Draft Preview (issue #75)', () => {
     expect(result.previewError).toBeUndefined();
   });
 });
+
+describe('email-write/Recoverable Mailbox-Required Error', () => {
+  // A two-mailbox context: no `mailbox` selector supplied, so every write action
+  // trips checkMailboxRequired. Order is intentionally non-default-first to keep
+  // the enumeration assertion order-agnostic.
+  function twoMailboxes(): void {
+    const secondProvider = new MockEmailProvider();
+    ctx.allMailboxes = [
+      { name: 'work', provider, providerType: 'microsoft', isDefault: true, status: 'connected' },
+      { name: 'personal', provider: secondProvider, providerType: 'gmail', isDefault: false, status: 'connected' },
+    ];
+  }
+
+  it('Scenario: Mailbox-required error enumerates available mailbox names', async () => {
+    twoMailboxes();
+
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Test',
+      body: 'Body',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('MAILBOX_REQUIRED');
+    // Both names present, exactly once each, no ordering assertion.
+    expect([...result.error!.availableMailboxes!].sort()).toEqual(['personal', 'work']);
+    // Code and message remain unchanged.
+    expect(result.error!.message).toBe(
+      'mailbox parameter required when multiple mailboxes are configured',
+    );
+  });
+
+  it('Scenario: Mailbox-required error is reported as recoverable', async () => {
+    twoMailboxes();
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Test',
+      body: 'Body',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('MAILBOX_REQUIRED');
+    expect(result.error!.recoverable).toBe(true);
+  });
+
+  it('Scenario: Mailbox-required error names the marked default', async () => {
+    twoMailboxes();
+
+    const withDefault = await replyToEmailAction.run(ctx, {
+      message_id: 'AAA-some-message-id',
+      body: 'Body',
+    });
+
+    expect(withDefault.error!.code).toBe('MAILBOX_REQUIRED');
+    expect(withDefault.error!.defaultMailbox).toBe('work');
+
+    // When no entry is marked default, defaultMailbox is omitted entirely.
+    ctx.allMailboxes = ctx.allMailboxes!.map(m => ({ ...m, isDefault: false }));
+    const noDefault = await replyToEmailAction.run(ctx, {
+      message_id: 'AAA-some-message-id',
+      body: 'Body',
+    });
+
+    expect(noDefault.error!.code).toBe('MAILBOX_REQUIRED');
+    expect('defaultMailbox' in noDefault.error!).toBe(false);
+  });
+});
+
+// Note: the spec-traceable round-trip scenario
+// (mailbox-config/Mailbox Names Are Round-Trippable Selectors) lives in
+// packages/email-mcp/src/server.test.ts, because provider *selection* by name
+// happens in the MCP wrapper's resolveMailboxContext — at the core level the
+// `mailbox` field is only checked for presence, never used to pick a provider.

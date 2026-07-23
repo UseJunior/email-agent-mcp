@@ -1787,3 +1787,134 @@ describe('mcp-transport/Delete policy wiring', () => {
     expect(deleteMessage).toHaveBeenCalledWith('msg-1', true);
   });
 });
+
+describe('mcp-transport/Recoverable Mailbox-Required Error End-to-End', () => {
+  const noAllowlist = () => undefined;
+
+  it('surfaces availableMailboxes and defaultMailbox through the MCP wrapper', async () => {
+    // Two connected mailboxes, no `mailbox` selector: resolveMailboxContext threads
+    // both into ctx.allMailboxes, so checkMailboxRequired trips and the enriched
+    // payload must survive the wrapAction path (server.ts:718-721) end-to-end.
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = {} as never;
+    state.connectedMailbox = 'work@example.com';
+    state.connectedProvider = 'microsoft';
+    state.mailboxes = [
+      {
+        name: 'work',
+        emailAddress: 'work@example.com',
+        displayName: 'work@example.com',
+        providerType: 'microsoft',
+        provider: {} as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+      {
+        name: 'personal',
+        emailAddress: 'personal@example.com',
+        displayName: 'personal@example.com',
+        providerType: 'gmail',
+        provider: {} as never,
+        auth: null,
+        isDefault: false,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const sendEmail = actions.find(a => a.name === 'send_email')!;
+    const result = await sendEmail.run({}, {
+      to: 'alice@allowed.com',
+      subject: 'Test',
+      body: 'Body',
+    }) as {
+      success: boolean;
+      error?: {
+        code: string;
+        recoverable: boolean;
+        availableMailboxes?: string[];
+        defaultMailbox?: string;
+      };
+    };
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('MAILBOX_REQUIRED');
+    expect(result.error!.recoverable).toBe(true);
+    expect([...result.error!.availableMailboxes!].sort()).toEqual(['personal', 'work']);
+    expect(result.error!.defaultMailbox).toBe('work');
+  });
+});
+
+describe('mailbox-config/Mailbox Names Are Round-Trippable Selectors', () => {
+  const noAllowlist = () => undefined;
+
+  it('Scenario: Mailbox name from an error is accepted on retry', async () => {
+    // Provider *selection* by name happens here in the MCP wrapper, so this is
+    // where the round trip must be proven end-to-end. The non-default mailbox is
+    // listed first so availableMailboxes[0] is the NON-default name — retrying
+    // with it must route to that mailbox's provider, not the default's.
+    const workCreate = vi.fn().mockResolvedValue({ success: true });
+    const personalCreate = vi.fn().mockResolvedValue({ success: true });
+
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { createDraft: workCreate } as never;
+    state.connectedMailbox = 'work@example.com';
+    state.connectedProvider = 'microsoft';
+    state.mailboxes = [
+      {
+        name: 'personal',
+        emailAddress: 'personal@example.com',
+        displayName: 'personal@example.com',
+        providerType: 'gmail',
+        provider: { createDraft: personalCreate } as never,
+        auth: null,
+        isDefault: false,
+        status: 'connected',
+      },
+      {
+        name: 'work',
+        emailAddress: 'work@example.com',
+        displayName: 'work@example.com',
+        providerType: 'microsoft',
+        provider: { createDraft: workCreate } as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const createDraft = actions.find(a => a.name === 'create_draft')!;
+
+    // First call without a selector → MAILBOX_REQUIRED enumerating both names.
+    const rejected = await createDraft.run({}, {
+      to: 'alice@example.com',
+      subject: 'Test',
+      body: 'Body',
+    }) as { success: boolean; error?: { code: string; availableMailboxes?: string[] } };
+
+    expect(rejected.error!.code).toBe('MAILBOX_REQUIRED');
+    const nameFromError = rejected.error!.availableMailboxes![0]!;
+    expect(nameFromError).toBe('personal'); // the non-default, listed first
+
+    // Retry with the name taken straight from the payload.
+    const retried = await createDraft.run({}, {
+      to: 'alice@example.com',
+      subject: 'Test',
+      body: 'Body',
+      mailbox: nameFromError,
+    }) as { success: boolean; error?: { code: string } };
+
+    // Dispatch selects the NAMED mailbox: its provider is called, the default is not,
+    // and MAILBOX_REQUIRED does not recur.
+    expect(retried.success).toBe(true);
+    expect(retried.error?.code).not.toBe('MAILBOX_REQUIRED');
+    expect(personalCreate).toHaveBeenCalledTimes(1);
+    expect(workCreate).not.toHaveBeenCalled();
+  });
+});
