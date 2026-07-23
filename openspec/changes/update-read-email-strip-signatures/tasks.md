@@ -1,9 +1,9 @@
-- [ ] Add `strip_signatures: z.boolean().optional().default(false)` to the inline `read_email` input schema in `packages/email-mcp/src/server.ts`
-- [ ] Forward the caller's value to `readEmailAction.run()` in place of the hardcoded `strip_signatures: false` at `server.ts:832`, and delete the "wiring it through is tracked separately" comment
-- [ ] Update the `read_email` tool description to mention the flag alongside `strip_quoted_history`, and note that it defaults to `false` here while the core action defaults to `true`
-- [ ] Add MCP-level tests in `packages/email-mcp/src/server.test.ts` under `describe('email-read/Optional Signature Stripping on the MCP Read Surface')` covering the flag omitted, `true`, and `true` combined with `strip_quoted_history: true`
-- [ ] For the composition test, build the fixture so the signature sits immediately before the terminal quoted-history block — a signature cannot trail the whole body while the quoted block is still terminal
-- [ ] Confirm the core signature-heuristic paths stay covered: RFC-3676 `-- ` delimiter, "Sent from my iPhone", confidentiality disclaimer
-- [ ] Assert semantically, not just by scenario name: the coverage checker does not bind an `it()` to its enclosing `describe()`, so a correctly-named test in the wrong block still passes the gate
-- [ ] Run `openspec validate update-read-email-strip-signatures --strict`
-- [ ] Run `npm run test:run --workspaces`, `npm run lint --workspaces`, and `npm run check:spec-coverage`
+- [x] Add `strip_signatures: z.boolean().optional().default(false)` to the inline `read_email` input schema in `packages/email-mcp/src/server.ts`
+- [x] Forward the caller's value to `readEmailAction.run()` in place of the hardcoded `strip_signatures: false` at `server.ts:832`, and delete the "wiring it through is tracked separately" comment
+- [x] Update the `read_email` tool description to mention the flag alongside `strip_quoted_history`, and note that it defaults to `false` here while the core action defaults to `true`
+- [x] Add MCP-level tests in `packages/email-mcp/src/server.test.ts` under `describe('email-read/Optional Signature Stripping on the MCP Read Surface')` covering the flag omitted, `true`, and `true` combined with `strip_quoted_history: true`
+- [x] For the composition test, build the fixture so the signature sits immediately before the terminal quoted-history block — a signature cannot trail the whole body while the quoted block is still terminal
+- [x] Confirm the core signature-heuristic paths stay covered: RFC-3676 `-- ` delimiter, "Sent from my iPhone", confidentiality disclaimer
+- [x] Assert semantically, not just by scenario name: the coverage checker does not bind an `it()` to its enclosing `describe()`, so a correctly-named test in the wrong block still passes the gate
+- [x] Run `openspec validate update-read-email-strip-signatures --strict`
+- [x] Run `npm run test:run --workspaces`, `npm run lint --workspaces`, and `npm run check:spec-coverage`

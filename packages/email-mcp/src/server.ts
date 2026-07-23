@@ -797,11 +797,12 @@ export async function buildLazyActions(
     },
     {
       name: 'read_email',
-      description: 'Read the full content of an email by ID, transformed to token-efficient markdown. Set strip_quoted_history to true to drop the terminal "On … wrote:" / Outlook-header / `>`-prefix reply chain and replace it with a short marker.',
+      description: 'Read the full content of an email by ID, transformed to token-efficient markdown. Set strip_quoted_history to true to drop the terminal "On … wrote:" / Outlook-header / `>`-prefix reply chain and replace it with a short marker. Set strip_signatures to true to remove detected signatures and legal disclaimers; it defaults to false here for MCP compatibility even though the core action defaults to true.',
       input: z.object({
         id: z.string(),
         mailbox: z.string().optional(),
         strip_quoted_history: z.boolean().optional().default(false),
+        strip_signatures: z.boolean().optional().default(false),
       }),
       output: z.object({
         id: z.string(),
@@ -826,20 +827,24 @@ export async function buildLazyActions(
       annotations: { readOnlyHint: true, destructiveHint: false },
       run: async (_ctx, input) => {
         await waitForInit(state);
-        const inp = input as { id: string; mailbox?: string; strip_quoted_history?: boolean };
+        const inp = input as {
+          id: string;
+          mailbox?: string;
+          strip_quoted_history?: boolean;
+          strip_signatures?: boolean;
+        };
         if (!getDefaultMailbox(state)) return demoReadEmail(inp.id);
         const { mailbox } = resolveMailboxContext(state, inp.mailbox);
         // Delegate to the canonical readEmailAction so MCP stays a thin adapter
         // (per AGENTS.md: actions are the single source of truth, transport layers
-        // must not re-implement business logic). strip_signatures stays false for
-        // backwards compatibility — wiring it through is tracked separately.
+        // must not re-implement business logic).
         const { readEmailAction } = await import('@usejunior/email-core');
         const actionResult = await readEmailAction.run(
           { provider: mailbox.provider },
           {
             id: inp.id,
             mailbox: inp.mailbox,
-            strip_signatures: false,
+            strip_signatures: inp.strip_signatures ?? false,
             strip_quoted_history: inp.strip_quoted_history ?? false,
           },
         );
