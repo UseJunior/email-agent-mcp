@@ -23,6 +23,11 @@ npx -y email-agent-mcp
 
 The interactive setup wizard walks you through OAuth configuration and mailbox selection.
 
+`email-agent-mcp` is the canonical package name. The legacy
+`@usejunior/email-agent-mcp` compatibility package is published in lockstep for
+existing users, but new installations should use the unscoped package shown
+above.
+
 ## What Works Today
 
 - Microsoft 365 / Outlook mailbox access through MCP stdio

@@ -43,7 +43,7 @@ jobs:
           TAG_REF="${RELEASE_TAG:-$GITHUB_REF_NAME}"
           TAG_VERSION="${TAG_REF#v}"
 
-          for pkg in packages/email-core/package.json packages/email-mcp/package.json packages/provider-microsoft/package.json packages/provider-gmail/package.json packages/email-agent-mcp/package.json; do
+          for pkg in packages/email-core/package.json packages/email-mcp/package.json packages/provider-microsoft/package.json packages/provider-gmail/package.json packages/email-agent-mcp/package.json packages/email-agent-mcp-scoped/package.json; do
             PKG_VERSION="$(node -p "require('./${pkg}').version")"
             if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
               echo "Tag version ($TAG_VERSION) must match ${pkg} version ($PKG_VERSION)."
@@ -111,7 +111,7 @@ jobs:
 
       - name: Verify package contents (dry-run)
         run: |
-          for pkg in email-core provider-microsoft provider-gmail email-mcp email-agent-mcp; do
+          for pkg in email-core provider-microsoft provider-gmail email-mcp email-agent-mcp email-agent-mcp-scoped; do
             echo "=== packages/$pkg ==="
             (cd "packages/$pkg" && npm pack --dry-run)
           done
@@ -122,7 +122,7 @@ jobs:
           VERSION="${TAG_REF#v}"
           ALREADY=0
           TOTAL=0
-          for pkg in @usejunior/email-core @usejunior/provider-microsoft @usejunior/provider-gmail @usejunior/email-mcp email-agent-mcp; do
+          for pkg in @usejunior/email-core @usejunior/provider-microsoft @usejunior/provider-gmail @usejunior/email-mcp email-agent-mcp @usejunior/email-agent-mcp; do
             TOTAL=$((TOTAL + 1))
             if npm view "$pkg@$VERSION" version >/dev/null 2>&1; then
               echo "$pkg@$VERSION already published."
@@ -219,6 +219,11 @@ jobs:
 
           # Tier 4: depends on email-mcp
           publish_pkg "email-agent-mcp" "packages/email-agent-mcp"
+
+          sleep 10
+
+          # Tier 5: compatibility name depends on the canonical distribution
+          publish_pkg "@usejunior/email-agent-mcp" "packages/email-agent-mcp-scoped"
 
   publish-mcp-registry:
     name: Publish MCP Registry metadata
