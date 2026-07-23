@@ -756,6 +756,9 @@ describe('cli/Gmail Configure', () => {
       clientId: 'cli-client-id',
       clientSecret: 'cli-client-secret',
     });
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain(
+      'cli-client-secret',
+    );
   });
 
   it('Scenario: Partial BYOK credentials are rejected', async () => {

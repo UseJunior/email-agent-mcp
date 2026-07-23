@@ -1,0 +1,9 @@
+- [x] Add a Gmail authentication-mode picker to the first-run wizard
+- [x] Explain the hosted client's current Testing-status limitations
+- [x] Prompt for a Desktop OAuth client ID and masked client secret in BYOK mode
+- [x] Reject incomplete BYOK input before starting OAuth
+- [x] Preserve explicit flag/env credentials and saved reconnect behavior
+- [x] Add the linked Gmail Setup documentation to the root README
+- [x] Add wizard tests for default, BYOK, incomplete, confidential, explicit, and reconnect paths
+- [x] Run `openspec validate add-gmail-byok-wizard --strict`
+- [x] Run build, lint, tests, and OpenSpec traceability validation
