@@ -49,15 +49,34 @@ by `Map.delete` between awaits is effectively atomic.
 1. Register a Web-app OAuth client in Google Cloud Console. Authorized
    redirect URI: `https://<your-broker-domain>/api/callback`.
 2. `vercel link` this directory.
-3. Set required env vars in the Vercel project:
+3. Store the Web client credentials in the Vercel Production environment.
+   The helper prompts without echoing the secret or placing either credential
+   in shell history:
+
+   ```sh
+   ./scripts/configure-production-secrets.zsh
+   ```
+
+   To also retain a central copy in Azure Key Vault:
+
+   ```sh
+   ./scripts/configure-production-secrets.zsh --azure-vault <vault-name>
+   ```
+
+   This sets the required credential variables:
 
    ```
    GMAIL_OAUTH_CLIENT_ID=<from Cloud Console>
    GMAIL_OAUTH_CLIENT_SECRET=<from Cloud Console>
+   ```
+
+4. Set the remaining required env var in the Vercel project:
+
+   ```
    BROKER_PUBLIC_ORIGIN=https://<your-broker-domain>
    ```
 
-4. Optional:
+5. Optional:
 
    ```
    GMAIL_OAUTH_SCOPES=https://www.googleapis.com/auth/gmail.modify    # default
@@ -65,14 +84,14 @@ by `Map.delete` between awaits is effectively atomic.
    BROKER_REQUIRE_KV=true                         # force-fail without Redis even outside prod
    ```
 
-5. **Attach Redis** (Vercel Marketplace → Upstash, or Vercel-managed
+6. **Attach Redis** (Vercel Marketplace → Upstash, or Vercel-managed
    Redis). The store auto-detects `KV_REST_API_URL`. Production
    deployments **refuse to start** without it because Vercel Functions
    do not guarantee instance reuse — cross-request in-memory state is
    not actually shared. The in-memory fallback exists only for
    `vercel dev` and unit tests.
 
-6. `vercel --prod`.
+7. `vercel --prod`.
 
 ## Verification
 
