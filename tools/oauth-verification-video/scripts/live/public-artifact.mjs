@@ -35,26 +35,64 @@ export function validatePublishedScopeText(text) {
   return true;
 }
 
+function readPublishedDependency(exec, packageSpec, dependencyName) {
+  const raw = exec(
+    'npm',
+    ['view', packageSpec, `dependencies.${dependencyName}`, '--json'],
+    {encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']},
+  ).trim();
+  if (!raw) {
+    throw new Error(`Published ${packageSpec} does not depend on ${dependencyName}`);
+  }
+  const dependency = JSON.parse(raw);
+  if (typeof dependency !== 'string') {
+    throw new Error(`Published ${packageSpec} has an invalid ${dependencyName} dependency`);
+  }
+  return dependency;
+}
+
+function requireLockstepRange(packageSpec, dependencyName, range, packageVersion) {
+  if (![packageVersion, `^${packageVersion}`, `~${packageVersion}`].includes(range)) {
+    throw new Error(
+      `Published ${packageSpec} must use the release version of ${dependencyName}; found ${range}`,
+    );
+  }
+}
+
+export function resolvePublishedGmailProviderVersion(
+  packageVersion,
+  {exec = execFileSync} = {},
+) {
+  const cliSpec = `email-agent-mcp@${packageVersion}`;
+  const mcpRange = readPublishedDependency(
+    exec,
+    cliSpec,
+    '@usejunior/email-mcp',
+  );
+  requireLockstepRange(cliSpec, '@usejunior/email-mcp', mcpRange, packageVersion);
+
+  const mcpSpec = `@usejunior/email-mcp@${packageVersion}`;
+  const gmailRange = readPublishedDependency(
+    exec,
+    mcpSpec,
+    '@usejunior/provider-gmail',
+  );
+  requireLockstepRange(
+    mcpSpec,
+    '@usejunior/provider-gmail',
+    gmailRange,
+    packageVersion,
+  );
+  return packageVersion;
+}
+
 export function inspectPublicArtifact(
   packageVersion,
   {exec = execFileSync} = {},
 ) {
   const temporary = mkdtempSync(join(tmpdir(), 'email-agent-oauth-release-'));
   try {
-    const dependencyRaw = exec(
-      'npm',
-      [
-        'view',
-        `email-agent-mcp@${packageVersion}`,
-        'dependencies.@usejunior/provider-gmail',
-        '--json',
-      ],
-      {encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']},
-    ).trim();
-    const dependency = JSON.parse(dependencyRaw);
-    if (typeof dependency !== 'string' || !/^\d+\.\d+\.\d+(?:-.+)?$/.test(dependency)) {
-      throw new Error('Published email-agent-mcp must pin an exact @usejunior/provider-gmail version');
-    }
+    const dependency = resolvePublishedGmailProviderVersion(packageVersion, {exec});
 
     const archiveRaw = exec(
       'npm',

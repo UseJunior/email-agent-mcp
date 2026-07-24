@@ -18,7 +18,10 @@ import {
 } from '../scripts/live/commands.mjs';
 import {validateRecordingConfig} from '../scripts/live/config.mjs';
 import {buildLiveOperatorScript} from '../scripts/live/operator-script.mjs';
-import {validatePublishedScopeText} from '../scripts/live/public-artifact.mjs';
+import {
+  resolvePublishedGmailProviderVersion,
+  validatePublishedScopeText,
+} from '../scripts/live/public-artifact.mjs';
 import {
   uniqueTakePath,
   verifyUsableDuration,
@@ -148,6 +151,50 @@ test('published artifact scope check rejects the legacy broad scope', () => {
       'https://www.googleapis.com/auth/gmail.modify https://mail.google.com/.attacker.example',
     ),
     true,
+  );
+});
+
+test('published artifact follows the CLI dependency chain for the lockstep Gmail release', () => {
+  const calls = [];
+  const exec = (_command, args) => {
+    calls.push(args);
+    if (args[0] === 'view' && args[1] === 'email-agent-mcp@0.1.10') {
+      return '"^0.1.10"\n';
+    }
+    if (args[0] === 'view' && args[1] === '@usejunior/email-mcp@0.1.10') {
+      return '"^0.1.10"\n';
+    }
+    throw new Error(`Unexpected command: ${args.join(' ')}`);
+  };
+
+  assert.equal(
+    resolvePublishedGmailProviderVersion('0.1.10', {exec}),
+    '0.1.10',
+  );
+  assert.deepEqual(calls, [
+    [
+      'view',
+      'email-agent-mcp@0.1.10',
+      'dependencies.@usejunior/email-mcp',
+      '--json',
+    ],
+    [
+      'view',
+      '@usejunior/email-mcp@0.1.10',
+      'dependencies.@usejunior/provider-gmail',
+      '--json',
+    ],
+  ]);
+
+  assert.throws(
+    () => resolvePublishedGmailProviderVersion('0.1.10', {
+      exec: (_command, args) => (
+        args[1] === 'email-agent-mcp@0.1.10'
+          ? '"latest"\n'
+          : '"^0.1.10"\n'
+      ),
+    }),
+    /must use the release version/,
   );
 });
 
