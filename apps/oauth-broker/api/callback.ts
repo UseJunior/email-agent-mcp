@@ -10,58 +10,91 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { exchangeCode } from '../lib/google.js';
 import { getStore } from '../lib/store.js';
 import { ID_RE } from '../lib/http.js';
+import { logEvent, requestLogContext, sessionCorrelationId } from '../lib/log.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
-  if (req.method !== 'GET') {
-    res.status(405).json({ error: 'method_not_allowed' });
-    return;
-  }
-  res.setHeader('Cache-Control', 'no-store');
-
-  const state = typeof req.query['state'] === 'string' ? req.query['state'] : '';
-  const error = typeof req.query['error'] === 'string' ? req.query['error'] : undefined;
-  const code = typeof req.query['code'] === 'string' ? req.query['code'] : '';
-
-  if (!ID_RE.test(state)) {
-    renderTerminalPage(res, 400, 'Invalid OAuth callback: malformed state.');
-    return;
-  }
-
-  // Mark the session terminally failed for explicit user-facing reasons
-  // — this is what gives the CLI a distinguishable signal beyond "still
-  // pending".
-  if (error) {
-    await getStore().setFailed(state, 'denied', `User cancelled or denied: ${error}`);
-    renderTerminalPage(res, 400, `Authentication cancelled or denied: ${error}`);
-    return;
-  }
-
-  if (!code) {
-    await getStore().setFailed(state, 'exchange_failed', 'Google callback did not include a code.');
-    renderTerminalPage(res, 400, 'Invalid OAuth callback: missing code.');
-    return;
-  }
+  const startedAt = Date.now();
+  const request = requestLogContext(req);
+  let sessionSource: unknown = null;
+  let didLog = false;
+  const logOnce = (status: number, outcome: string): void => {
+    if (didLog) return;
+    didLog = true;
+    logEvent({
+      route: '/api/callback',
+      method: request.method,
+      status,
+      outcome,
+      host: request.host,
+      ua: request.ua,
+      sid: sessionCorrelationId(sessionSource),
+      dur_ms: Date.now() - startedAt,
+    });
+  };
 
   try {
-    const tokens = await exchangeCode(code);
-    const advanced = await getStore().setReady(state, {
-      access_token: tokens.access_token,
-      refresh_token: tokens.refresh_token,
-      expires_in: tokens.expires_in,
-      scope: tokens.scope,
-      token_type: tokens.token_type,
-    });
-    if (!advanced) {
-      // Session was missing, expired, or already advanced — nothing the
-      // user can do at this point.
-      renderTerminalPage(res, 410, 'This authentication session has expired. Re-run configure.');
+    if (req.method !== 'GET') {
+      logOnce(405, 'method_not_allowed');
+      res.status(405).json({ error: 'method_not_allowed' });
       return;
     }
-    renderTerminalPage(res, 200, 'Authentication complete. You can return to your terminal.');
+    res.setHeader('Cache-Control', 'no-store');
+
+    sessionSource = req.query['state'];
+    const state = typeof sessionSource === 'string' ? sessionSource : '';
+    const error = typeof req.query['error'] === 'string' ? req.query['error'] : undefined;
+    const code = typeof req.query['code'] === 'string' ? req.query['code'] : '';
+
+    if (!ID_RE.test(state)) {
+      logOnce(400, 'invalid_state');
+      renderTerminalPage(res, 400, 'Invalid OAuth callback: malformed state.');
+      return;
+    }
+
+    // Mark the session terminally failed for explicit user-facing reasons
+    // — this is what gives the CLI a distinguishable signal beyond "still
+    // pending".
+    if (error) {
+      await getStore().setFailed(state, 'denied', `User cancelled or denied: ${error}`);
+      logOnce(400, 'denied');
+      renderTerminalPage(res, 400, `Authentication cancelled or denied: ${error}`);
+      return;
+    }
+
+    if (!code) {
+      await getStore().setFailed(state, 'exchange_failed', 'Google callback did not include a code.');
+      logOnce(400, 'exchange_failed');
+      renderTerminalPage(res, 400, 'Invalid OAuth callback: missing code.');
+      return;
+    }
+
+    try {
+      const tokens = await exchangeCode(code);
+      const advanced = await getStore().setReady(state, {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expires_in: tokens.expires_in,
+        scope: tokens.scope,
+        token_type: tokens.token_type,
+      });
+      if (!advanced) {
+        // Session was missing, expired, or already advanced — nothing the
+        // user can do at this point.
+        logOnce(410, 'invalid_state');
+        renderTerminalPage(res, 410, 'This authentication session has expired. Re-run configure.');
+        return;
+      }
+      logOnce(200, 'ready');
+      renderTerminalPage(res, 200, 'Authentication complete. You can return to your terminal.');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'token exchange failed';
+      await getStore().setFailed(state, 'exchange_failed', message);
+      logOnce(502, 'exchange_failed');
+      renderTerminalPage(res, 502, `Authentication failed: ${message}`);
+    }
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'token exchange failed';
-    await getStore().setFailed(state, 'exchange_failed', message);
-    renderTerminalPage(res, 502, `Authentication failed: ${message}`);
+    logOnce(500, 'internal_error');
+    throw err;
   }
 }
 
