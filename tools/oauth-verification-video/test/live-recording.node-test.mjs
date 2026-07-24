@@ -137,6 +137,18 @@ test('published artifact scope check rejects the legacy broad scope', () => {
     ),
     /legacy scope/,
   );
+  assert.equal(
+    validatePublishedScopeText(
+      'https://www.googleapis.com/auth/gmail.modify https://attacker.example/https://mail.google.com/',
+    ),
+    true,
+  );
+  assert.equal(
+    validatePublishedScopeText(
+      'https://www.googleapis.com/auth/gmail.modify https://mail.google.com/.attacker.example',
+    ),
+    true,
+  );
 });
 
 test('take paths never overwrite and usable duration includes inMs', () => {

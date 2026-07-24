@@ -11,6 +11,7 @@ import {join} from 'node:path';
 
 const EXPECTED_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 const LEGACY_SCOPE = 'https://mail.google.com/';
+const URL_TOKEN = /https:\/\/[A-Za-z0-9./_-]+/g;
 
 function filesBelow(root) {
   const files = [];
@@ -24,10 +25,11 @@ function filesBelow(root) {
 }
 
 export function validatePublishedScopeText(text) {
-  if (!text.includes(EXPECTED_SCOPE)) {
+  const urls = new Set(text.match(URL_TOKEN) ?? []);
+  if (!urls.has(EXPECTED_SCOPE)) {
     throw new Error(`Published Gmail provider does not contain ${EXPECTED_SCOPE}`);
   }
-  if (text.includes(LEGACY_SCOPE)) {
+  if (urls.has(LEGACY_SCOPE)) {
     throw new Error(`Published Gmail provider still contains legacy scope ${LEGACY_SCOPE}`);
   }
   return true;
