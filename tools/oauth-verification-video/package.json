@@ -15,6 +15,6 @@
     "artifacts": "node scripts/generate-artifacts.mjs",
     "render:storyboard": "node scripts/render.mjs --mode storyboard --project project.example.json --fps 12 --output dist/oauth-verification-storyboard.mp4",
     "render:final": "node scripts/render.mjs --mode final --project .work/project.render.json --fps 30 --output dist/oauth-verification-final.mp4",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.node-test.mjs"
   }
 }
