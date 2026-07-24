@@ -53,7 +53,16 @@ export function requestLogContext(req: RequestLogSource): {
 }
 
 export function logEvent(fields: BrokerRequestLogFields): void {
-  console.log(JSON.stringify({ t: 'broker_request', ...fields }));
+  // Logging must never influence the OAuth flow. Every field is a string,
+  // number, or null, so JSON.stringify cannot throw today — but we swallow
+  // defensively so that a future field shape, or a console failure, can never
+  // discard a one-shot ticket or turn a 2xx into a 500. A dropped log line is
+  // always preferable to a broken auth response.
+  try {
+    console.log(JSON.stringify({ t: 'broker_request', ...fields }));
+  } catch {
+    // Intentionally ignored — see above.
+  }
 }
 
 function firstHeader(value: string | string[] | undefined): string {

@@ -84,4 +84,14 @@ describe('observability/Broker Request Logging', () => {
     expect(sessionCorrelationId('!'.repeat(40))).toBeNull();
     expect(sessionCorrelationId(undefined)).toBeNull();
   });
+
+  it('never throws, so logging cannot break the OAuth response', () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {
+      throw new Error('stdout is gone');
+    });
+    // A throwing console must not propagate — a dropped log line beats a
+    // broken auth response (one-shot ticket loss / 2xx turned into 500).
+    expect(() => logEvent(LOG_FIELDS)).not.toThrow();
+    spy.mockRestore();
+  });
 });
