@@ -57,6 +57,19 @@ The BYOK path runs the full local-loopback OAuth dance (`http://127.0.0.1`); no 
 
 The CLI saves mailbox metadata under `~/.email-agent-mcp/tokens/` and auto-adds the authenticated address to `send-allowlist.json`. Saved metadata is **never** rewritten with a different OAuth client on subsequent runs — re-running `configure` for an existing mailbox reuses whatever was saved (broker URL or BYOK credentials).
 
+## Disconnect and revoke
+
+Stop the MCP process, then use Finder to move only the intended mailbox's JSON
+file from `~/.email-agent-mcp/tokens/` to Trash. If
+`EMAIL_AGENT_MCP_HOME` is set, use its `tokens/` directory instead. Never open
+or share the token file, and preserve other mailbox files.
+
+Then visit [Google Account third-party
+connections](https://myaccount.google.com/connections), select Email Agent MCP
+(or your BYOK app name), and remove access. Local removal prevents this
+installation from loading the saved credential; Google Account revocation
+invalidates the grant itself.
+
 ## 3. Manual refresh-token path
 
 The simplest path is Google's OAuth 2.0 Playground using your own client credentials.

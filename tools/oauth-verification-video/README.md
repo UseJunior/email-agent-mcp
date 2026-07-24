@@ -76,6 +76,79 @@ Use a dedicated, empty Gmail account and a clean English-language browser
 profile. Revoke previous app access before recording so the complete consent
 flow appears. Use synthetic messages only.
 
+### macOS recording director
+
+The director is intentionally semi-automated. AppleScript arranges Terminal
+and the browser and runs only reviewed non-secret command files. You must
+personally select the Google account, enter any password or MFA value, review
+and grant consent, type the explicit `SEND` and `REPLY` confirmations for the
+synthetic writes, and revoke access. It does not use Accessibility keystrokes
+or automate browser clicks.
+
+Before the first rehearsal:
+
+1. In **System Settings → Privacy & Security → Screen & System Audio
+   Recording**, allow the Terminal or script runner that will launch the
+   director. Relaunch it after granting access.
+2. Allow Apple Events automation of Terminal and Google Chrome when macOS asks.
+   Accessibility permission is not required.
+3. Turn on Focus, close notifications and unrelated tabs, use a clean English
+   Chrome profile, enlarge Terminal/browser text, and select 1920×1080 display
+   scaling.
+4. Seed a two-message self-thread named `EA-MCP REVIEW READ 001` in the
+   otherwise empty review mailbox.
+5. Publish a post-`0.1.9` CLI release containing `gmail.modify`, deploy the
+   production broker, and revoke the mailbox's prior grant.
+
+Copy the example configuration, replace its mailbox and exact package version,
+set `exampleOnly` to `false`, and confirm each preparation item only after
+checking it:
+
+```bash
+cd tools/oauth-verification-video
+cp recording.example.json recording.local.json
+npm run record:dry-run
+npm run record:script
+npm run record:preflight
+```
+
+`record:preflight` downloads and inspects the named public package. It fails if
+the Gmail provider lacks `gmail.modify`, still contains `mail.google.com`, uses
+a floating version, cannot reach the production broker, or any operator
+confirmation remains false. To exercise macOS Screen Recording permission with
+a disposable one-second take, run:
+
+```bash
+node scripts/record-live.mjs \
+  --config recording.local.json \
+  --preflight --online --check-capture
+```
+
+Record one resumable, uniquely named take at a time:
+
+```bash
+node scripts/record-live.mjs --config recording.local.json --record identity
+node scripts/record-live.mjs --config recording.local.json --record auth-platform
+node scripts/record-live.mjs --config recording.local.json --record configure
+node scripts/record-live.mjs --config recording.local.json --record oauth-consent
+node scripts/record-live.mjs --config recording.local.json --record connected
+node scripts/record-live.mjs --config recording.local.json --record read
+node scripts/record-live.mjs --config recording.local.json --record send-reply
+node scripts/record-live.mjs --config recording.local.json --record revoke
+```
+
+The OAuth-consent take begins before the validated
+`https://oauth.usejunior.com/api/start` URL opens and remains continuous until
+Terminal reports the connection result. The director never persists that
+one-time URL.
+
+After independently reviewing and accepting the takes, populate the ignored
+render manifest without changing any attestation:
+
+```bash
+node scripts/record-live.mjs --config recording.local.json --sync-project
+```
+
 Copy `project.example.json` to the ignored `project.local.json`, then place
 recordings in the ignored `captures/` directory:
 
@@ -119,6 +192,15 @@ npm run preflight:final
 npm run render:final
 ```
 
+To mux a separately recorded and reviewed narration track:
+
+```bash
+npm run render:final -- --narration .work/narration.wav
+```
+
+Raw capture audio is discarded by default. A supplied narration track is
+padded or trimmed to the exact reviewed timeline and encoded as AAC.
+
 `captures:normalize` writes `.work/project.render.json`; the final renderer
 uses that generated manifest. Authentic media, expanded frames, local
 attestations, and all MP4 output are gitignored.
@@ -140,6 +222,7 @@ truth for timing and reviewer copy.
 --mode storyboard|final
 --project <manifest>
 --output <mp4>
+--narration <reviewed-audio-file>
 --fps <frames-per-second>
 --chrome <browser-binary>
 --ffmpeg <ffmpeg-binary>

@@ -325,6 +325,25 @@ window. Publishing your app (*OAuth consent screen → Publish app*) removes the
 7-day expiry. Since you own the app and are its only user, the 100-user test
 cap does not apply to you either way.
 
+### Disconnect Gmail and revoke access
+
+Disconnecting has two independent parts:
+
+1. Stop any running `email-agent-mcp` process. In Finder, open
+   `~/.email-agent-mcp/tokens/`, identify the single JSON file for the mailbox
+   you intend to disconnect, and move that exact file to Trash. Do not open,
+   paste, or share its contents, and do not delete the whole
+   `~/.email-agent-mcp` directory if other mailboxes are configured. If you
+   set `EMAIL_AGENT_MCP_HOME`, use that directory's `tokens/` folder instead.
+2. Open [Google Account third-party
+   connections](https://myaccount.google.com/connections), select Email Agent
+   MCP (or the name of your BYOK application), and remove its access.
+
+Deleting the local file prevents this installation from using the saved
+credential. Removing the Google Account connection revokes the grant at
+Google. Run `email-agent-mcp status` afterward to confirm the mailbox is no
+longer configured.
+
 ## Security Defaults
 
 Agent Email ships with restrictive defaults that you loosen as needed:

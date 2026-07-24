@@ -26,6 +26,10 @@ export function captureRequirements(scenes) {
       instruction: scene.recordingInstruction,
       requiredKind: scene.requiredKind ?? 'video',
       minimumDurationMs: scene.minimumCaptureMs ?? scene.durationMs,
+      requiredDurationMs: Math.max(
+        scene.minimumCaptureMs ?? 0,
+        scene.durationMs,
+      ),
     }));
 }
 
@@ -77,9 +81,17 @@ export function validateProjectShape(project, scenes, mode) {
         && capture.frameCount > 0
         && Number.isFinite(capture.fps)
         && capture.fps > 0
-        && (capture.frameCount / capture.fps) * 1000 < requirement.minimumDurationMs
+        && (
+          (capture.frameCount / capture.fps) * 1000
+          - (Number.isFinite(capture.inMs) ? capture.inMs : 0)
+        ) < requirement.requiredDurationMs
       ) {
-        errors.push(`${requirement.id}: authentic capture must be at least ${requirement.minimumDurationMs}ms`);
+        errors.push(
+          `${requirement.id}: authentic capture needs ${requirement.requiredDurationMs}ms usable after inMs`,
+        );
+      }
+      if (capture.inMs !== undefined && (!Number.isFinite(capture.inMs) || capture.inMs < 0)) {
+        errors.push(`${requirement.id}: inMs must be a non-negative number`);
       }
     }
   }

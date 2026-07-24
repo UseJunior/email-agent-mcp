@@ -1,0 +1,20 @@
+{
+  "exampleOnly": true,
+  "packageVersion": "0.1.10",
+  "reviewMailbox": "review-mailbox@example.com",
+  "brokerUrl": "https://oauth.usejunior.com",
+  "display": 1,
+  "maximumTakeSeconds": 300,
+  "emailAgentHome": ".work/live/email-agent-home",
+  "captureDirectory": "captures/live",
+  "workDirectory": ".work/live",
+  "seedSubject": "EA-MCP REVIEW READ 001",
+  "writeSubject": "EA-MCP REVIEW WRITE 001",
+  "operatorConfirmations": {
+    "dedicatedEmptyMailbox": false,
+    "cleanEnglishBrowserProfile": false,
+    "focusModeEnabled": false,
+    "previousGrantRevoked": false,
+    "soleProductionWebClient": false
+  }
+}

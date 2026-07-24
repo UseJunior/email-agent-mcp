@@ -16,6 +16,7 @@ test('renderer accepts the reviewed final-mode project and format', () => {
     '--mode', 'final',
     '--project', '.work/project.render.json',
     '--fps', '30',
+    '--narration', '.work/narration.wav',
     '--output', 'dist/final.mp4',
   ]);
   assert.equal(options.mode, 'final');
@@ -23,6 +24,7 @@ test('renderer accepts the reviewed final-mode project and format', () => {
   assert.equal(options.startFrame, 0);
   assert.equal(options.frames, undefined);
   assert.equal(options.output, 'dist/final.mp4');
+  assert.equal(options.narration, '.work/narration.wav');
 });
 
 test('renderer rejects invalid modes and frame counts', () => {
@@ -33,4 +35,5 @@ test('renderer rejects invalid modes and frame counts', () => {
   assert.throws(() => parseRenderArgs(['--mode', 'final', '--input', 'src/other.html']), /reviewed compositor/);
   assert.throws(() => parseRenderArgs(['--fps', '1000']), /must not exceed 60/);
   assert.throws(() => parseRenderArgs(['--mode', 'final', '--width', '1']), /1920x1080, 30 fps/);
+  assert.throws(() => parseRenderArgs(['--narration', '.work/narration.wav']), /only in final mode/);
 });

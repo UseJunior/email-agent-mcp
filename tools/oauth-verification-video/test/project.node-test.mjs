@@ -29,7 +29,7 @@ test('final mode accepts structurally complete authentic evidence', () => {
     capture.file = 'captures/authentic.mov';
     capture.kind = 'video';
     capture.frames = '.work/captures/authentic/frame-%06d.jpg';
-    capture.frameCount = 1_000;
+    capture.frameCount = 3_000;
     capture.fps = 30;
   }
   for (const key of Object.keys(project.attestations)) {
@@ -70,7 +70,26 @@ test('final mode rejects a static path disguised as normalized video', () => {
   capture.fps = 30;
   const result = validateProjectShape(project, scenes, 'final');
   assert.ok(result.errors.some(error => error.includes('normalized to a frame sequence')));
-  assert.ok(result.errors.some(error => error.includes('at least 8000ms')));
+  assert.ok(result.errors.some(error => error.includes('usable after inMs')));
+});
+
+test('final mode validates usable duration after a non-negative inMs offset', () => {
+  const project = exampleProject();
+  for (const capture of Object.values(project.captures)) {
+    capture.file = 'captures/authentic.mov';
+    capture.kind = 'video';
+    capture.frames = '.work/captures/authentic/frame-%06d.jpg';
+    capture.frameCount = 3_000;
+    capture.fps = 30;
+  }
+  project.captures.identity.inMs = 90_000;
+  project.captures.read.inMs = -1;
+  for (const key of Object.keys(project.attestations)) project.attestations[key] = true;
+  project.submission.productionOAuthClients[0].clientId = 'review-client.apps.googleusercontent.com';
+
+  const result = validateProjectShape(project, scenes, 'final');
+  assert.ok(result.errors.some(error => error.includes('identity: authentic capture needs')));
+  assert.ok(result.errors.some(error => error.includes('read: inMs must be a non-negative')));
 });
 
 test('capture requirements are unique and interactive', () => {
