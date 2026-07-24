@@ -3,6 +3,7 @@ captures/
 
 # Local operator state and attestations.
 project.local.json
+recording.local.json
 
 # Expanded capture frames and rendered artifacts.
 .work/

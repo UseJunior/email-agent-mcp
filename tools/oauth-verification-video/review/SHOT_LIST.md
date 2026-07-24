@@ -10,7 +10,7 @@ Generated title scene; no authentic capture required.
 
 Narration: This video demonstrates the production Email Agent MCP OAuth client and the Gmail features enabled by the requested permission.
 
-## 00:00:07–00:00:21 — Product identity & privacy
+## 00:00:07–00:00:25 — Product identity & privacy
 
 Capture ID: `identity`
 
@@ -18,7 +18,7 @@ Record usejunior.com/products/email-agent-mcp, click its privacy link, and show 
 
 Narration: Email Agent MCP is an open-source, locally run email client and productivity integration. Its public homepage links directly to the privacy policy and Google-data disclosures.
 
-## 00:00:21–00:00:35 — Production client & requested scope
+## 00:00:25–00:00:47 — Production client & requested scope
 
 Capture ID: `auth-platform`
 
@@ -26,13 +26,13 @@ Record Google Auth Platform Clients and Data Access. Show only the production We
 
 Narration: The production project contains the hosted Web OAuth client. Data Access requests gmail.modify and identifies the product as an email client and email productivity application.
 
-## 00:00:35–00:00:46 — OAuth broker, direct Gmail data path
+## 00:00:47–00:00:58 — OAuth broker, direct Gmail data path
 
 Generated architecture scene; no authentic capture required.
 
 Narration: The hosted broker exchanges authorization codes and refreshes tokens. Gmail messages travel directly between the user’s local process and Google; the broker never receives email content.
 
-## 00:00:46–00:00:58 — Configure the distributed CLI
+## 00:00:58–00:01:14 — Configure the distributed CLI
 
 Capture ID: `configure`
 
@@ -40,7 +40,7 @@ Using a clean local profile, record the released CLI version and the configure c
 
 Narration: This is the same public CLI users install. Configuration starts the hosted broker authorization flow at oauth.usejunior.com.
 
-## 00:00:58–00:01:44 — Complete, authentic OAuth grant
+## 00:01:14–00:02:19 — Complete, authentic OAuth grant
 
 Capture ID: `oauth-consent`
 
@@ -48,7 +48,7 @@ Continuously record the broker redirect, account chooser, any warning, app brand
 
 Narration: The user sees the complete Google consent flow in English, including the exact application identity and permission to read, compose, and send Gmail messages. The user explicitly continues before any Gmail access occurs.
 
-## 00:01:44–00:01:53 — Connected test mailbox
+## 00:02:19–00:02:29 — Connected test mailbox
 
 Capture ID: `connected`
 
@@ -56,7 +56,7 @@ Record the terminal connection success and email-agent-mcp status for the dedica
 
 Narration: Authorization returns to the local CLI, which reports the dedicated synthetic review mailbox as connected.
 
-## 00:01:53–00:02:18 — Search, read & retrieve the thread
+## 00:02:29–00:03:17 — Search, read & retrieve the thread
 
 Capture ID: `read`
 
@@ -64,7 +64,7 @@ Record list_emails, search_emails, read_email, and get_thread against the seeded
 
 Narration: List and search return Gmail message metadata. Read retrieves the selected synthetic message, and get thread returns its conversation. Gmail API traffic is direct from this local process.
 
-## 00:02:18–00:02:52 — Compose, send & reply
+## 00:03:17–00:04:22 — Compose, send & reply
 
 Capture ID: `send-reply`
 
@@ -72,13 +72,13 @@ Record send_email to the same allowlisted test account, confirm it in Gmail, run
 
 Narration: Email Agent MCP composes and sends a synthetic message through the Gmail API, restricted by the local recipient allowlist. It then sends a threaded reply and confirms the conversation in Gmail.
 
-## 00:02:52–00:03:04 — Content stays out of the broker
+## 00:04:22–00:04:34 — Content stays out of the broker
 
 Generated architecture scene; no authentic capture required.
 
 Narration: Only authorization codes and OAuth tokens traverse the broker for exchange and refresh. Message bodies stay between the local application and Gmail.
 
-## 00:03:04–00:03:17 — User control & revocation
+## 00:04:34–00:04:56 — User control & revocation
 
 Capture ID: `revoke`
 
@@ -86,7 +86,7 @@ Record the documented local credential-removal guidance and the Google Account t
 
 Narration: The user can remove local credentials and revoke the application’s access from their Google Account at any time.
 
-## 00:03:17–00:03:25 — One explicit grant. User-directed Gmail actions.
+## 00:04:56–00:05:04 — One explicit grant. User-directed Gmail actions.
 
 Generated closing scene; no authentic capture required.
 

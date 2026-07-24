@@ -13,6 +13,10 @@
     "preflight:final": "node scripts/preflight.mjs --mode final --project .work/project.render.json",
     "captures:normalize": "node scripts/normalize-captures.mjs --project project.local.json",
     "artifacts": "node scripts/generate-artifacts.mjs",
+    "record:dry-run": "node scripts/record-live.mjs --config recording.local.json --dry-run",
+    "record:preflight": "node scripts/record-live.mjs --config recording.local.json --preflight --online",
+    "record:script": "node scripts/record-live.mjs --config recording.local.json --script",
+    "record:status": "node scripts/record-live.mjs --config recording.local.json --status",
     "render:storyboard": "node scripts/render.mjs --mode storyboard --project project.example.json --fps 12 --output dist/oauth-verification-storyboard.mp4",
     "render:final": "node scripts/render.mjs --mode final --project .work/project.render.json --fps 30 --output dist/oauth-verification-final.mp4",
     "test": "node --test test/*.node-test.mjs"

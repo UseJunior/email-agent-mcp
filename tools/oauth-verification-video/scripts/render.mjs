@@ -66,6 +66,7 @@ Options:
   --url <url>                Render an already-served page instead of starting
                              the local static server
   --output <path>            Output MP4 path
+  --narration <path>         Reviewed narration audio to mux in final mode
   --fps <number>             Override the compositor frame rate
   --frames <number>          Override the compositor frame count
   --start-frame <number>     Start at this global compositor frame (default: 0)
@@ -139,6 +140,10 @@ export function parseRenderArgs(argv) {
         break;
       case '--output':
         options.output = requireValue(argv, index, option);
+        index += 1;
+        break;
+      case '--narration':
+        options.narration = requireValue(argv, index, option);
         index += 1;
         break;
       case '--fps':
@@ -232,6 +237,9 @@ export function validateRenderOptions(options) {
   }
   if (options.mode === 'final' && options.url) {
     throw new Error('--url is available only in storyboard mode; final mode requires a validated local project.');
+  }
+  if (options.narration && options.mode !== 'final') {
+    throw new Error('--narration is available only in final mode.');
   }
   if (options.mode === 'final' && options.input !== 'src/index.html') {
     throw new Error('--input is available only in storyboard mode; final mode uses the reviewed compositor entry point.');
@@ -484,9 +492,11 @@ function runFfmpeg(
     fps,
     totalFrames,
     output,
+    narration,
   },
 ) {
   const inputPattern = join(framesDir, `frame-%0${digits}d.png`);
+  const durationSeconds = totalFrames / fps;
   const args = [
     '-hide_banner',
     '-loglevel', 'warning',
@@ -495,7 +505,21 @@ function runFfmpeg(
     '-start_number', '0',
     '-i', inputPattern,
     '-frames:v', String(totalFrames),
-    '-an',
+  ];
+  if (narration) {
+    args.push(
+      '-i', narration,
+      '-map', '0:v:0',
+      '-map', '1:a:0',
+      '-af', `apad=whole_dur=${durationSeconds}`,
+      '-t', String(durationSeconds),
+      '-c:a', 'aac',
+      '-b:a', '192k',
+    );
+  } else {
+    args.push('-an');
+  }
+  args.push(
     '-c:v', 'libx264',
     '-preset', 'medium',
     '-crf', '18',
@@ -506,7 +530,7 @@ function runFfmpeg(
     '-metadata', 'creation_time=1970-01-01T00:00:00Z',
     '-movflags', '+faststart',
     output,
-  ];
+  );
 
   return new Promise((resolvePromise, reject) => {
     const child = spawn(executablePath, args, {
@@ -564,6 +588,9 @@ export async function renderVideo(options) {
   const chromePath = findChromeExecutable(options.chrome);
   const ffmpegPath = findFfmpegExecutable(options.ffmpeg);
   const outputPath = resolveFromRoot(options.output);
+  const narrationPath = options.narration
+    ? resolveFromRoot(options.narration)
+    : undefined;
 
   if (options.mode === 'final' && !options.url) {
     const result = preflight({ projectArg: options.project, mode: 'final' });
@@ -582,6 +609,9 @@ export async function renderVideo(options) {
     if (!existsSync(projectPath)) {
       throw new Error(`Project manifest not found: ${projectPath}`);
     }
+  }
+  if (narrationPath && (!existsSync(narrationPath) || !statSync(narrationPath).isFile())) {
+    throw new Error(`Narration audio not found: ${narrationPath}`);
   }
 
   await mkdir(dirname(outputPath), { recursive: true });
@@ -667,6 +697,7 @@ export async function renderVideo(options) {
       fps: timing.fps,
       totalFrames: timing.totalFrames,
       output: outputPath,
+      narration: narrationPath,
     });
 
     console.error(`[oauth-video] Render complete: ${outputPath}`);
