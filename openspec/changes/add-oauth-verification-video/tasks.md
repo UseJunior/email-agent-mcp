@@ -1,0 +1,10 @@
+- [x] Add the modular scene manifest, shared components, scene renderers, and styling
+- [x] Add project/capture manifest parsing with storyboard and final validation
+- [x] Add dependency-free Chromium DevTools-pipe rendering and ffmpeg encoding
+- [x] Add generated shot checklist, narration script, and WebVTT subtitles
+- [x] Add unit tests for timeline, manifest gates, capture requirements, and generated artifacts
+- [x] Add usage documentation and gitignore capture/output artifacts
+- [x] Correct the OAuth verification runbook to describe only implemented and live-verified Gmail behavior
+- [x] Render and visually inspect a watermarked storyboard draft
+- [x] Run `openspec validate add-oauth-verification-video --strict`
+- [x] Run the focused tests and repository validation

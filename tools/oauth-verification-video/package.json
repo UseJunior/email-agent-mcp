@@ -1,0 +1,20 @@
+{
+  "name": "email-agent-mcp-oauth-verification-video",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Deterministic compositor for the Email Agent MCP Google OAuth verification video",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "doctor": "node scripts/render.mjs --doctor",
+    "preflight:storyboard": "node scripts/preflight.mjs --mode storyboard --project project.example.json",
+    "preflight:final": "node scripts/preflight.mjs --mode final --project .work/project.render.json",
+    "captures:normalize": "node scripts/normalize-captures.mjs --project project.local.json",
+    "artifacts": "node scripts/generate-artifacts.mjs",
+    "render:storyboard": "node scripts/render.mjs --mode storyboard --project project.example.json --fps 12 --output dist/oauth-verification-storyboard.mp4",
+    "render:final": "node scripts/render.mjs --mode final --project .work/project.render.json --fps 30 --output dist/oauth-verification-final.mp4",
+    "test": "node --test test/*.test.mjs"
+  }
+}

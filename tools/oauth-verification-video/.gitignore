@@ -1,0 +1,9 @@
+# Authentic review footage can contain test-account identifiers.
+captures/
+
+# Local operator state and attestations.
+project.local.json
+
+# Expanded capture frames and rendered artifacts.
+.work/
+dist/
