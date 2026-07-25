@@ -173,6 +173,15 @@ Agent Email exposes 26 MCP tools:
 | `create_inbox_rule` | Create a persistent safe inbox rule; forwarding, redirection, deletion, and discarding to Deleted Items are blocked (Microsoft 365) | write |
 | `delete_inbox_rule` | Delete a server-side inbox rule (requires operator env + caller flag) (Microsoft 365) | destructive |
 
+Every row returned by `list_emails`, `search_emails`, and `get_thread`, and the
+`read_email` response, carries an always-present `isDraft` boolean. `isDraft: true`
+means the message is an unsent draft: it has **not** been sent, and its `receivedAt`
+is provider-supplied metadata rather than evidence of delivery. The field is never
+omitted, so a consuming agent can distinguish "not a draft" from "draft status not
+reported" — but note `false` asserts only that the provider did not mark the message
+as an unsent draft, not that the mailbox owner sent it (received mail is also
+`false`). Drafts otherwise appear in listings and search results as before.
+
 Folder and inbox-rule management requires Microsoft Graph `MailboxSettings.ReadWrite` consent. Existing Microsoft mailbox connections must re-consent after upgrading. Gmail uses labels rather than hierarchical folders/server-side Exchange rules, so these six tools return `NOT_SUPPORTED` for Gmail mailboxes.
 
 ### Scheduled send

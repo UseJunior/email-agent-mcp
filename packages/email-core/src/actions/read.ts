@@ -4,6 +4,7 @@ import type { EmailAction } from './registry.js';
 import { transformEmailContent } from '../content/sanitize.js';
 import { stripSignature } from '../content/signatures.js';
 import { stripQuotedHistory } from '../content/quotes.js';
+import { EmailDraftStatusSchema, getEmailDraftStatus } from './search.js';
 
 const ReadEmailInput = z.object({
   id: z.string(),
@@ -33,14 +34,20 @@ const ReadEmailOutput = z.object({
     contentId: z.string().optional(),
     isInline: z.boolean(),
   })).optional(),
-});
+}).extend(EmailDraftStatusSchema.shape);
+
+export const READ_EMAIL_DESCRIPTION =
+  'Read the full content of an email by ID, transformed to token-efficient markdown. '
+  + 'When the response has `isDraft: true` the message is an unsent draft — it has NOT '
+  + 'been sent, and `receivedAt` is provider-supplied metadata, not evidence of delivery. '
+  + 'Never describe it as a sent, delivered, or received email.';
 
 export const readEmailAction: EmailAction<
   z.infer<typeof ReadEmailInput>,
   z.infer<typeof ReadEmailOutput>
 > = {
   name: 'read_email',
-  description: 'Read the full content of an email by ID, transformed to token-efficient markdown',
+  description: READ_EMAIL_DESCRIPTION,
   input: ReadEmailInput,
   output: ReadEmailOutput,
   annotations: { readOnlyHint: true, destructiveHint: false },
@@ -66,6 +73,7 @@ export const readEmailAction: EmailAction<
       cc: (msg.cc ?? []).map(a => a.name ? `${a.name} <${a.email}>` : a.email),
       bcc: (msg.bcc ?? []).map(a => a.name ? `${a.name} <${a.email}>` : a.email),
       receivedAt: msg.receivedAt,
+      ...getEmailDraftStatus(msg),
       body,
       attachments: msg.attachments?.map(a => ({
         id: a.id,

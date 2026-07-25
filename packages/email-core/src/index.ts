@@ -53,7 +53,9 @@ export { htmlToMarkdown, transformEmailContent } from './content/sanitize.js';
 export { readEmailAction } from './actions/read.js';
 export { sendEmailAction } from './actions/send.js';
 export {
+  EmailDraftStatusSchema,
   EmailThreadFieldsSchema,
+  getEmailDraftStatus,
   getEmailThreadFields,
   SearchEmailThreadFieldsSchema,
   getSearchEmailThreadFields,

@@ -57,6 +57,43 @@ describe('provider-gmail/Message Mapping', () => {
     expect(msg.isRead).toBe(false); // Has UNREAD label
   });
 
+  it('Scenario: Gmail DRAFT label maps to isDraft and the drafts folder', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue({
+        id: 'msg-draft',
+        threadId: 'thread-draft',
+        // A draft reply carries DRAFT but neither INBOX nor SENT, so before this
+        // mapping it reported no folder at all and nothing marked it unsent.
+        labelIds: ['DRAFT'],
+        payload: {
+          headers: [
+            { name: 'From', value: '"Steven Obiajulu" <steven@usejunior.com>' },
+            { name: 'To', value: 'andy@sfumato.holdings' },
+            { name: 'Subject', value: 'RE: Sfumato Fund Docs' },
+            { name: 'Date', value: '2026-07-25T17:50:18Z' },
+          ],
+          body: { data: Buffer.from('Reviewing now.').toString('base64url') },
+        },
+      }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const msg = await provider.getMessage('msg-draft');
+
+    expect(msg.isDraft).toBe(true);
+    expect(msg.folder).toBe('drafts');
+  });
+
+  it('Scenario: a delivered Gmail message maps to isDraft false', async () => {
+    const client = createMockGmailClient();
+    const provider = new GmailEmailProvider(client);
+
+    const msg = await provider.getMessage('msg-1');
+
+    expect(msg.isDraft).toBe(false);
+    expect(msg.folder).toBe('inbox');
+  });
+
   it('Scenario: Cc and Bcc headers map to cc/bcc arrays (issue #102)', async () => {
     const client = createMockGmailClient({
       getMessage: vi.fn().mockResolvedValue({

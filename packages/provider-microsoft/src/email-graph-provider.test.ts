@@ -53,6 +53,7 @@ const MESSAGE_SELECT = [
   'internetMessageId',
   'internetMessageHeaders',
   'uniqueBody',
+  'isDraft',
 ].join(',');
 
 function assertAttachmentSelectValid(select: string): void {
@@ -129,6 +130,48 @@ function quotedReplyResponse(overrides: Record<string, unknown> = {}): Record<st
 }
 
 describe('provider-microsoft/Message Mapping', () => {
+  it('Scenario: Graph draft status maps to isDraft', async () => {
+    const client = createSchemaValidatingClient([
+      {
+        id: 'draft-1',
+        subject: 'RE: Sfumato Fund Docs',
+        from: { emailAddress: { address: 'steven@usejunior.com', name: 'Steven Obiajulu' } },
+        toRecipients: [{ emailAddress: { address: 'andy@sfumato.holdings' } }],
+        receivedDateTime: '2026-07-25T17:50:18Z',
+        isRead: true,
+        hasAttachments: false,
+        isDraft: true,
+      },
+    ]);
+    const provider = new GraphEmailProvider(client);
+
+    const msg = await provider.getMessage('draft-1');
+
+    expect(msg.isDraft).toBe(true);
+    // The explicit projection must ask for it, or Graph omits it and a draft
+    // silently reads as sent mail.
+    const url = (client.get as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(url).toContain('isDraft');
+  });
+
+  it('Scenario: a delivered Graph message maps to isDraft false', async () => {
+    const client = createSchemaValidatingClient([
+      {
+        id: 'delivered-1',
+        subject: 'Sfumato Fund Docs',
+        from: { emailAddress: { address: 'andy@sfumato.holdings' } },
+        toRecipients: [{ emailAddress: { address: 'steven@usejunior.com' } }],
+        receivedDateTime: '2026-07-25T17:43:06Z',
+        isRead: true,
+        hasAttachments: true,
+        isDraft: false,
+      },
+    ]);
+    const provider = new GraphEmailProvider(client);
+
+    expect((await provider.getMessage('delivered-1')).isDraft).toBe(false);
+  });
+
   it('Scenario: getMessage maps Graph attachment metadata and inline content ids', async () => {
     const client = createSchemaValidatingClient([
       {
