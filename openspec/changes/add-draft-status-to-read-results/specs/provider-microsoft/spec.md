@@ -4,7 +4,9 @@
 
 The system SHALL map Microsoft Graph's `message.isDraft` property onto `EmailMessage.isDraft`.
 
-`isDraft` SHALL be included in the explicit message `$select` projection used by `getMessage` and `getThread`. Without it Graph omits the property from the response and an unsent draft becomes indistinguishable from delivered mail. Listing and search send no `$select`, so Graph's default projection already carries the property there.
+`isDraft` SHALL be included in `MESSAGE_SELECT`, the explicit message `$select` projection used by `getMessage` and by `getThread`'s anchor lookup. Without it Graph omits the property from those responses and an unsent draft becomes indistinguishable from delivered mail.
+
+`listMessages`, `searchMessages`, and `getThread`'s paged conversation collection send no `$select` and therefore rely on Graph's default message projection, which carries `isDraft` (verified live: 25/25 drafts returned `isDraft: true` through both listing and search). Because the mapper coerces an absent property to `false`, a future narrowing of Graph's default projection would silently turn a real draft into an affirmative `isDraft: false`. Hardening those three paths with an explicit projection is tracked separately.
 
 The delta query projection is deliberately excluded: delta results feed only the watcher wake payload for newly-delivered inbox mail, which does not report draft status.
 

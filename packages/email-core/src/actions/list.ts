@@ -31,7 +31,7 @@ const ListEmailsOutput = z.object({
 export const LIST_EMAILS_DESCRIPTION =
   'List recent emails with filtering by unread status, folder, sender, and limit. '
   + 'A row with `isDraft: true` is an unsent draft — it has NOT been sent, and its '
-  + '`receivedAt` is when the draft was created or last edited, not a delivery time. '
+  + '`receivedAt` is provider-supplied metadata, not evidence of delivery. '
   + 'Never describe such a row as a sent, delivered, or received email.';
 
 export const listEmailsAction: EmailAction<

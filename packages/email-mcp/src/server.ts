@@ -764,7 +764,7 @@ export async function buildLazyActions(
   return [
     {
       name: 'list_emails',
-      description: 'List recent emails with filtering by unread status, folder, sender, and limit. Use offset for pagination. A row with `isDraft: true` is an unsent draft — it has NOT been sent, and its `receivedAt` is when the draft was created or last edited, not a delivery time. Never describe such a row as a sent, delivered, or received email.',
+      description: 'List recent emails with filtering by unread status, folder, sender, and limit. Use offset for pagination. A row with `isDraft: true` is an unsent draft — it has NOT been sent, and its `receivedAt` is provider-supplied metadata, not evidence of delivery. Never describe such a row as a sent, delivered, or received email.',
       input: z.object({ mailbox: z.string().optional(), unread: z.boolean().optional(), limit: z.number().optional(), offset: z.number().optional(), folder: z.string().optional() }),
       output: z.object({
         emails: z.array(z.object({
@@ -804,7 +804,7 @@ export async function buildLazyActions(
     },
     {
       name: 'read_email',
-      description: 'Read the full content of an email by ID, transformed to token-efficient markdown. When the response has `isDraft: true` the message is an unsent draft — it has NOT been sent, and `receivedAt` is when the draft was created or last edited, not a delivery time; never describe it as a sent, delivered, or received email. Set strip_quoted_history to true to drop the terminal "On … wrote:" / Outlook-header / `>`-prefix reply chain and replace it with a short marker. Set strip_signatures to true to remove detected signatures and legal disclaimers; it defaults to false here for MCP compatibility even though the core action defaults to true.',
+      description: 'Read the full content of an email by ID, transformed to token-efficient markdown. When the response has `isDraft: true` the message is an unsent draft — it has NOT been sent, and `receivedAt` is provider-supplied metadata, not evidence of delivery; never describe it as a sent, delivered, or received email. Set strip_quoted_history to true to drop the terminal "On … wrote:" / Outlook-header / `>`-prefix reply chain and replace it with a short marker. Set strip_signatures to true to remove detected signatures and legal disclaimers; it defaults to false here for MCP compatibility even though the core action defaults to true.',
       input: z.object({
         id: z.string(),
         mailbox: z.string().optional(),
@@ -864,7 +864,7 @@ export async function buildLazyActions(
     },
     {
       name: 'search_emails',
-      description: 'Search emails using full-text query across one or all mailboxes. Use offset for pagination. Results include unsent drafts: a row with `isDraft: true` has NOT been sent — its `receivedAt` is when the draft was created or last edited, not a delivery time. Never describe such a row as a sent, delivered, or received email.',
+      description: 'Search emails using full-text query across one or all mailboxes. Use offset for pagination. Results include unsent drafts: a row with `isDraft: true` has NOT been sent — its `receivedAt` is provider-supplied metadata, not evidence of delivery. Never describe such a row as a sent, delivered, or received email.',
       input: z.object({ query: z.string(), mailbox: z.string().nullable().optional(), limit: z.number().optional(), offset: z.number().optional() }),
       output: z.object({
         emails: z.array(z.object({

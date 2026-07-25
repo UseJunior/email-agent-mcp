@@ -4,9 +4,11 @@
 
 Read actions return unsent drafts alongside delivered mail. Every message row returned by `list_emails` and `search_emails`, and the `read_email` response, SHALL carry an `isDraft` boolean.
 
-The field SHALL always be present — `true` for an unsent draft, `false` otherwise — and SHALL NOT be omitted when false, so a caller can distinguish "this message was really sent" from "draft status was not reported." Providers that cannot determine draft status SHALL yield `false`.
+The field SHALL always be present — `true` for an unsent draft, `false` otherwise — and SHALL NOT be omitted when false, so a caller can distinguish "not a draft" from "draft status was not reported." Providers that cannot determine draft status SHALL yield `false`.
 
-A row with `isDraft: true` describes a message that has **not** been sent. Its `receivedAt` is the draft's creation or last-modification time, not a delivery time. The tool descriptions for these actions SHALL state this, so a consuming agent does not report a draft as a sent or received email.
+`false` SHALL be read as "the provider did not mark this message as an unsent draft" and nothing more. It does NOT assert that the mailbox owner sent the message: a received inbox message is `isDraft: false`.
+
+A row with `isDraft: true` describes a message that has **not** been sent. Its `receivedAt` is provider-supplied metadata and SHALL NOT be treated as evidence of delivery. The tool descriptions for these actions SHALL state this, so a consuming agent does not report a draft as a sent or received email.
 
 This is a labeling change only: drafts SHALL continue to be returned by listing and search exactly as before.
 

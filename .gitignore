@@ -54,3 +54,4 @@ openspec/private/*
 packages/*/src/**/*.js
 packages/*/src/**/*.js.map
 packages/*/src/**/*.d.ts.map
+.peer-review/

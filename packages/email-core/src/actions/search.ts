@@ -30,9 +30,13 @@ export function getEmailThreadFields(
  * nothing in the row distinguishes it from a sent message.
  *
  * Deliberately required rather than omitted-when-false: an absent key is
- * ambiguous between "not a draft" and "draft status not reported", and only an
- * explicit `false` positively asserts the message was really sent. Same reasoning
- * as the always-present `cc`/`bcc` arrays (issue #102).
+ * ambiguous between "not a draft" and "draft status not reported". Same
+ * reasoning as the always-present `cc`/`bcc` arrays (issue #102).
+ *
+ * `false` means only "the provider did not mark this as an unsent draft" — it
+ * says nothing about who sent the message. A received inbox message is
+ * `isDraft: false` and was never sent by the mailbox owner. A provider that
+ * cannot determine draft status also yields `false`.
  */
 export const EmailDraftStatusSchema = z.object({
   isDraft: z.boolean(),
@@ -75,8 +79,8 @@ const SearchEmailsOutput = z.object({
 
 export const SEARCH_EMAILS_DESCRIPTION =
   'Search emails using full-text query across one or all mailboxes. '
-  + 'Results include unsent drafts: a row with `isDraft: true` has NOT been sent — '
-  + 'its `receivedAt` is when the draft was created or last edited, not a delivery time. '
+  + 'Results include unsent drafts: a row with `isDraft: true` has NOT been sent, and its '
+  + '`receivedAt` is provider-supplied metadata, not evidence of delivery. '
   + 'Never describe such a row as a sent, delivered, or received email.';
 
 export const searchEmailsAction: EmailAction<

@@ -32,7 +32,8 @@ const GetThreadOutput = z.object({
 export const GET_THREAD_DESCRIPTION =
   'Retrieve all messages in a conversation thread by message ID. '
   + 'A thread can end with an unsent draft reply: a message with `isDraft: true` has '
-  + 'NOT been sent, so the conversation does not yet include a reply from its author. '
+  + 'NOT been sent, so it is not a sent reply — though earlier sent replies from the '
+  + 'same author may exist elsewhere in the thread. '
   + 'Never describe such a message as a sent, delivered, or received email.';
 
 export const getThreadAction: EmailAction<

@@ -39,8 +39,8 @@ const ReadEmailOutput = z.object({
 export const READ_EMAIL_DESCRIPTION =
   'Read the full content of an email by ID, transformed to token-efficient markdown. '
   + 'When the response has `isDraft: true` the message is an unsent draft — it has NOT '
-  + 'been sent, and `receivedAt` is when the draft was created or last edited, not a '
-  + 'delivery time. Never describe it as a sent, delivered, or received email.';
+  + 'been sent, and `receivedAt` is provider-supplied metadata, not evidence of delivery. '
+  + 'Never describe it as a sent, delivered, or received email.';
 
 export const readEmailAction: EmailAction<
   z.infer<typeof ReadEmailInput>,
