@@ -44,6 +44,13 @@ export interface EmailMessage {
   headers?: Record<string, string>;
   mailbox?: string;
   isFlagged?: boolean;
+  /**
+   * True when the message is an unsent draft. Graph reports `isDraft` directly;
+   * Gmail reports it via the `DRAFT` label. Optional on the domain type because a
+   * provider may not report it, but read actions always project it to a concrete
+   * boolean — see `getEmailDraftStatus` in `actions/search.ts`.
+   */
+  isDraft?: boolean;
 }
 
 export interface EmailThread {

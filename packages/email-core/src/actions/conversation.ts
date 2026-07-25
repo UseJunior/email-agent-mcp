@@ -1,6 +1,7 @@
 // get_thread action — retrieve conversation thread by message ID
 import { z } from 'zod';
 import type { EmailAction } from './registry.js';
+import { EmailDraftStatusSchema, getEmailDraftStatus } from './search.js';
 
 const GetThreadInput = z.object({
   message_id: z.string(),
@@ -23,17 +24,23 @@ const GetThreadOutput = z.object({
     receivedAt: z.string(),
     body: z.string().optional(),
     isRead: z.boolean(),
-  })),
+  }).extend(EmailDraftStatusSchema.shape)),
   messageCount: z.number(),
   isTruncated: z.boolean().optional(),
 });
+
+export const GET_THREAD_DESCRIPTION =
+  'Retrieve all messages in a conversation thread by message ID. '
+  + 'A thread can end with an unsent draft reply: a message with `isDraft: true` has '
+  + 'NOT been sent, so the conversation does not yet include a reply from its author. '
+  + 'Never describe such a message as a sent, delivered, or received email.';
 
 export const getThreadAction: EmailAction<
   z.infer<typeof GetThreadInput>,
   z.infer<typeof GetThreadOutput>
 > = {
   name: 'get_thread',
-  description: 'Retrieve all messages in a conversation thread by message ID',
+  description: GET_THREAD_DESCRIPTION,
   input: GetThreadInput,
   output: GetThreadOutput,
   annotations: { readOnlyHint: true, destructiveHint: false },
@@ -73,6 +80,7 @@ export const getThreadAction: EmailAction<
         receivedAt: m.receivedAt,
         body: m.body,
         isRead: m.isRead,
+        ...getEmailDraftStatus(m),
       })),
       messageCount,
       isTruncated,

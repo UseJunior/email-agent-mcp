@@ -554,6 +554,80 @@ describe('mcp-transport/Lazy Provider State', () => {
     expect(result.status).toBe('connected');
   });
 
+  it('surfaces draft status through the custom MCP list_emails and search_emails schemas', async () => {
+    // The MCP layer re-declares these schemas and mappings rather than delegating,
+    // so it can silently drop a field the core action carries. Prove it does not.
+    const messages = [
+      {
+        id: 'draft-reply',
+        subject: 'RE: Sfumato Fund Docs',
+        from: { email: 'steven@usejunior.com', name: 'Steven Obiajulu' },
+        receivedAt: '2026-07-25T17:50:18Z',
+        isRead: true,
+        hasAttachments: false,
+        isDraft: true,
+      },
+      {
+        id: 'delivered',
+        subject: 'Sfumato Fund Docs',
+        from: { email: 'andy@sfumato.holdings' },
+        receivedAt: '2026-07-25T17:43:06Z',
+        isRead: true,
+        hasAttachments: true,
+      },
+    ];
+    const provider = {
+      listMessages: vi.fn().mockResolvedValue(messages),
+      searchMessages: vi.fn().mockResolvedValue(messages),
+    } as never;
+
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = provider;
+    state.connectedMailbox = 'work@example.com';
+    state.connectedProvider = 'microsoft';
+    state.mailboxes = [
+      {
+        name: 'work',
+        emailAddress: 'work@example.com',
+        displayName: 'work@example.com',
+        providerType: 'microsoft',
+        provider,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const listEmails = actions.find(a => a.name === 'list_emails')!;
+    const searchEmails = actions.find(a => a.name === 'search_emails')!;
+
+    const listed = await listEmails.run({}, {}) as { emails: Array<{ id: string; isDraft: boolean }> };
+    const searched = await searchEmails.run({}, { query: 'Sfumato' }) as {
+      emails: Array<{ id: string; isDraft: boolean }>;
+    };
+
+    for (const result of [listed, searched]) {
+      expect(result.emails.find(e => e.id === 'draft-reply')!.isDraft).toBe(true);
+      // Present-and-false for a delivered message, never omitted.
+      const delivered = result.emails.find(e => e.id === 'delivered')!;
+      expect(Object.keys(delivered)).toContain('isDraft');
+      expect(delivered.isDraft).toBe(false);
+    }
+
+    // Both output schemas must accept the shape their run() actually returns.
+    expect(() => listEmails.output.parse(listed)).not.toThrow();
+    expect(() => searchEmails.output.parse(searched)).not.toThrow();
+
+    // And the descriptions must tell a consuming agent what isDraft means.
+    for (const action of [listEmails, searchEmails]) {
+      expect(action.description).toContain('isDraft');
+      expect(action.description).toMatch(/not been sent/i);
+    }
+  });
+
   it('Scenario: custom search_emails routes to the requested mailbox provider', async () => {
     const workSearch = vi.fn().mockResolvedValue([
       {
@@ -625,6 +699,7 @@ describe('mcp-transport/Lazy Provider State', () => {
         hasAttachments: true,
         mailbox: 'personal',
         threadId: 'gmail-thread-xyz',
+        isDraft: false,
       },
     ]);
   });
@@ -700,6 +775,7 @@ describe('mcp-transport/Lazy Provider State', () => {
         hasAttachments: true,
         mailbox: 'personal',
         threadId: 'gmail-thread-xyz',
+        isDraft: false,
       },
       {
         id: 'work-1',
@@ -710,6 +786,7 @@ describe('mcp-transport/Lazy Provider State', () => {
         hasAttachments: false,
         mailbox: 'work',
         conversationId: 'graph-conversation-abc',
+        isDraft: false,
       },
     ]);
   });
@@ -1227,6 +1304,7 @@ describe('mcp-transport/Lazy Provider State', () => {
         isRead: true,
         hasAttachments: true,
         threadId: 'gmail-thread-xyz',
+        isDraft: false,
       },
     ]);
   });

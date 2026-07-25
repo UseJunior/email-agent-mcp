@@ -229,6 +229,11 @@ const MESSAGE_SELECT = [
   'internetMessageId',
   'internetMessageHeaders',
   'uniqueBody',
+  // Without this, the explicit projection on getMessage/getThread narrows away
+  // the only signal that a message is an unsent draft, and a draft reply reads
+  // as though it had already been sent. list/search send no $select, so Graph's
+  // default projection already carries it there.
+  'isDraft',
 ].join(',');
 
 // Graph message and attachment IDs are base64url-flavored and routinely contain
@@ -1664,6 +1669,7 @@ function mapGraphMessage(msg: GraphMessage): EmailMessage {
     receivedAt: msg.receivedDateTime ?? new Date().toISOString(),
     isRead: msg.isRead ?? false,
     isFlagged: msg.flag?.flagStatus === 'flagged',
+    isDraft: msg.isDraft === true,
     hasAttachments: msg.hasAttachments ?? false,
     body: msg.body?.contentType?.toLowerCase() === 'text' ? msg.body.content : undefined,
     bodyHtml,

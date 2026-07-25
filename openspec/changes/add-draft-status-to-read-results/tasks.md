@@ -1,0 +1,15 @@
+- [x] Add optional `isDraft?: boolean` to `EmailMessage` in `packages/email-core/src/types.ts`, documenting that read actions always project it to a concrete boolean
+- [x] Add `EmailDraftStatusSchema` + `getEmailDraftStatus` next to the existing `EmailThreadFieldsSchema` fragment in `packages/email-core/src/actions/search.ts`, and export both from `packages/email-core/src/index.ts`. One fragment rather than six inline copies: "required, coerced from optional" must be a single decision or the duplicated schemas drift
+- [x] Extend the row/response schemas and mappings in all four core actions — `search.ts` (both the fan-out and single-provider branches), `list.ts`, `conversation.ts` (thread message rows), `read.ts`
+- [x] Extend the duplicated inline schemas and mappings in `packages/email-mcp/src/server.ts` for `list_emails`, `search_emails`, and `read_email`, plus the two demo fallback payloads (`demoListEmails`, `demoReadEmail`) which must satisfy the now-required field
+- [x] Map `isDraft` in `mapGraphMessage` from `msg.isDraft === true` and add `isDraft` to `MESSAGE_SELECT` (`packages/provider-microsoft/src/email-graph-provider.ts`), keeping the mirrored `MESSAGE_SELECT` list in `email-graph-provider.test.ts` in sync
+- [x] Leave `DELTA_SELECT` unchanged — it feeds only the watcher wake payload for newly-delivered inbox mail, which never surfaces draft status
+- [x] Map `isDraft` in `mapGmailMessage` from `labelIds` containing `DRAFT`, and branch `folder` on `DRAFT` **before** `INBOX`/`SENT` so a draft stops reporting no folder (`packages/provider-gmail/src/email-gmail-provider.ts`)
+- [x] Put the consequence in the tool descriptions an agent actually reads — the field alone does not fix the misreading. Name `isDraft`, state that the message has not been sent, note that `receivedAt` is a creation/edit time, and forbid describing it as sent. Do this in both the core action descriptions and the MCP-layer overrides, which are separate strings
+- [x] Add core scenario tests in a new `packages/email-core/src/actions/draft-status.test.ts` under `describe('email-read/Draft Status on Read Results')`, plus a `describe('email-threading/Draft Status on Thread Messages')` block in `conversation.test.ts`
+- [x] Assert the field is **present and false** for delivered mail (`Object.keys(row)` contains `isDraft`), not merely falsy — an omitted key is the exact failure this change exists to prevent
+- [x] Add provider mapper tests for Graph (`isDraft` true/false, and that the request `$select` includes `isDraft`) and Gmail (`DRAFT` label → `isDraft` + `drafts` folder)
+- [x] Add an MCP-layer test proving the field survives the re-declared transport schemas for both `list_emails` and `search_emails`, and that each schema `.parse()`es the shape its own `run()` returns
+- [x] Update the three exact-shape `toEqual` expectations in `packages/email-mcp/src/server.test.ts` that now carry `isDraft: false`
+- [x] Run `openspec validate add-draft-status-to-read-results --strict`
+- [x] Run `npm run build`, `npm run test:run --workspaces`, `npm run lint --workspaces`, and `npm run check:spec-coverage`

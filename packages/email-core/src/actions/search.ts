@@ -23,6 +23,29 @@ export function getEmailThreadFields(
   };
 }
 
+/**
+ * Draft status surfaced on every read row so an unsent draft is never mistaken
+ * for mail that actually went out. A draft reply sits in the mailbox owner's own
+ * name with a `RE:` subject and a plausible `receivedAt`, so without this field
+ * nothing in the row distinguishes it from a sent message.
+ *
+ * Deliberately required rather than omitted-when-false: an absent key is
+ * ambiguous between "not a draft" and "draft status not reported", and only an
+ * explicit `false` positively asserts the message was really sent. Same reasoning
+ * as the always-present `cc`/`bcc` arrays (issue #102).
+ */
+export const EmailDraftStatusSchema = z.object({
+  isDraft: z.boolean(),
+});
+
+export function getEmailDraftStatus(
+  message: Pick<EmailMessage, 'isDraft'>,
+): z.infer<typeof EmailDraftStatusSchema> {
+  // Collapse the optional domain field to a concrete boolean: a provider that
+  // does not report draft status yields `false`, never a missing key.
+  return { isDraft: message.isDraft === true };
+}
+
 /** @deprecated Use EmailThreadFieldsSchema. */
 export const SearchEmailThreadFieldsSchema = EmailThreadFieldsSchema;
 
@@ -47,15 +70,21 @@ const SearchEmailsOutput = z.object({
     hasAttachments: z.boolean(),
     mailbox: z.string().optional(),
     snippet: z.string().optional(),
-  }).extend(EmailThreadFieldsSchema.shape)),
+  }).extend(EmailThreadFieldsSchema.shape).extend(EmailDraftStatusSchema.shape)),
 });
+
+export const SEARCH_EMAILS_DESCRIPTION =
+  'Search emails using full-text query across one or all mailboxes. '
+  + 'Results include unsent drafts: a row with `isDraft: true` has NOT been sent — '
+  + 'its `receivedAt` is when the draft was created or last edited, not a delivery time. '
+  + 'Never describe such a row as a sent, delivered, or received email.';
 
 export const searchEmailsAction: EmailAction<
   z.infer<typeof SearchEmailsInput>,
   z.infer<typeof SearchEmailsOutput>
 > = {
   name: 'search_emails',
-  description: 'Search emails using full-text query across one or all mailboxes',
+  description: SEARCH_EMAILS_DESCRIPTION,
   input: SearchEmailsInput,
   output: SearchEmailsOutput,
   annotations: { readOnlyHint: true, destructiveHint: false },
@@ -84,6 +113,7 @@ export const searchEmailsAction: EmailAction<
           mailbox: m.mailbox,
           snippet: m.snippet,
           ...getEmailThreadFields(m),
+          ...getEmailDraftStatus(m),
         })),
       };
     }
@@ -100,6 +130,7 @@ export const searchEmailsAction: EmailAction<
         mailbox: ctx.mailboxName,
         snippet: m.snippet,
         ...getEmailThreadFields(m),
+        ...getEmailDraftStatus(m),
       })),
     };
   },

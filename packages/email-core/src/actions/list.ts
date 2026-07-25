@@ -1,7 +1,12 @@
 // list_emails action — list recent emails with filtering
 import { z } from 'zod';
 import type { EmailAction } from './registry.js';
-import { EmailThreadFieldsSchema, getEmailThreadFields } from './search.js';
+import {
+  EmailDraftStatusSchema,
+  EmailThreadFieldsSchema,
+  getEmailDraftStatus,
+  getEmailThreadFields,
+} from './search.js';
 
 const ListEmailsInput = z.object({
   mailbox: z.string().optional(),
@@ -20,15 +25,21 @@ const ListEmailsOutput = z.object({
     receivedAt: z.string(),
     isRead: z.boolean(),
     hasAttachments: z.boolean(),
-  }).extend(EmailThreadFieldsSchema.shape)),
+  }).extend(EmailThreadFieldsSchema.shape).extend(EmailDraftStatusSchema.shape)),
 });
+
+export const LIST_EMAILS_DESCRIPTION =
+  'List recent emails with filtering by unread status, folder, sender, and limit. '
+  + 'A row with `isDraft: true` is an unsent draft — it has NOT been sent, and its '
+  + '`receivedAt` is when the draft was created or last edited, not a delivery time. '
+  + 'Never describe such a row as a sent, delivered, or received email.';
 
 export const listEmailsAction: EmailAction<
   z.infer<typeof ListEmailsInput>,
   z.infer<typeof ListEmailsOutput>
 > = {
   name: 'list_emails',
-  description: 'List recent emails with filtering by unread status, folder, sender, and limit',
+  description: LIST_EMAILS_DESCRIPTION,
   input: ListEmailsInput,
   output: ListEmailsOutput,
   annotations: { readOnlyHint: true, destructiveHint: false },
@@ -51,6 +62,7 @@ export const listEmailsAction: EmailAction<
         isRead: m.isRead,
         hasAttachments: m.hasAttachments,
         ...getEmailThreadFields(m),
+        ...getEmailDraftStatus(m),
       })),
     };
   },

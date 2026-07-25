@@ -168,6 +168,37 @@ describe('email-threading/Get Thread', () => {
   });
 });
 
+describe('email-threading/Draft Status on Thread Messages', () => {
+  it('Scenario: Thread with an unsent draft reply labels the draft', async () => {
+    provider.addMessage({
+      id: 'inbound', subject: 'Sfumato Fund Docs', conversationId: 'conv-draft',
+      from: { email: 'andy@sfumato.holdings' }, receivedAt: '2026-07-25T17:43:06Z',
+      isRead: true, hasAttachments: true,
+    });
+    // The newest message in the thread is an unsent draft reply — the most
+    // consequential confusion, because it reads as the conversation's outcome.
+    provider.addMessage({
+      id: 'draft-reply', subject: 'RE: Sfumato Fund Docs', conversationId: 'conv-draft',
+      from: { email: 'steven@usejunior.com' }, receivedAt: '2026-07-25T17:50:18Z',
+      isRead: true, hasAttachments: false, isDraft: true,
+    });
+
+    const result = await getThreadAction.run(ctx, { message_id: 'inbound' });
+
+    const draft = result.messages.find(m => m.id === 'draft-reply');
+    const delivered = result.messages.find(m => m.id === 'inbound');
+    expect(draft?.isDraft).toBe(true);
+    expect(delivered?.isDraft).toBe(false);
+    // Present-and-false, never omitted.
+    expect(Object.keys(delivered!)).toContain('isDraft');
+  });
+
+  it('states the draft consequence in the get_thread description', () => {
+    expect(getThreadAction.description).toContain('isDraft');
+    expect(getThreadAction.description).toMatch(/not been sent/i);
+  });
+});
+
 describe('email-threading/RFC Header Fallback', () => {
   it('Scenario: Reconstruct broken thread', async () => {
     // Messages with incomplete conversationId but valid RFC headers

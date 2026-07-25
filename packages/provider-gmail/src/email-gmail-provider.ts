@@ -472,7 +472,13 @@ function mapGmailMessage(msg: GmailMessage): EmailMessage {
     inReplyTo,
     references,
     labels,
-    folder: labels.includes('INBOX') ? 'inbox' : labels.includes('SENT') ? 'sent' : undefined,
+    // Gmail's DRAFT label is the only marker that a message was never sent. Check
+    // it before INBOX/SENT: a draft reply carries neither of those, so without an
+    // explicit branch a draft reported no folder at all.
+    isDraft: labels.includes('DRAFT'),
+    folder: labels.includes('DRAFT')
+      ? 'drafts'
+      : labels.includes('INBOX') ? 'inbox' : labels.includes('SENT') ? 'sent' : undefined,
     attachments: attachments.length > 0 ? attachments : undefined,
   };
 }
