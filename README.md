@@ -213,21 +213,34 @@ or `html`:
 `format: "html"` returns the message's raw body HTML verbatim. Reach for it when
 you need styling that markdown cannot carry — `color`, `background-color`,
 `text-decoration`, `<u>` — for example to change one sentence of a formatted body
-and write the rest back byte-for-byte with `update_draft` and `format: "html"`.
-Through the markdown path that styling is silently destroyed on the way out.
+and leave the rest alone. Through the markdown path that styling is silently
+destroyed on the way out.
 
 Two fields come back with it:
 
 - `bodyFormat` — always present: `markdown`, `html`, or `text`. You get `text`
   when you asked for `html` but the message has no HTML part, in which case the
   plain-text body is returned. Check this before writing a body back.
-- `bodyTruncated` — present and `true` only if the raw HTML exceeded the 256 KB
-  response budget. Do not write a truncated body back to a draft.
+- `bodyTruncated` — present and `true` only if the body exceeded the 256 KB
+  response budget for `format: "html"` (the markdown path is unbounded, as
+  before). Do not write a truncated body back to a draft.
 
 Raw HTML costs far more tokens than its markdown reduction, so leave the default
 alone unless you need the styling. `strip_quoted_history` and `strip_signatures`
 are markdown-shaped text transforms and are not applied when `format` is `html` —
-the raw HTML is returned untouched so it round-trips exactly.
+the raw HTML is returned untouched.
+
+**Writing it back.** Pass `format: "html"` **and `force_black: false`**:
+
+```json
+{ "draft_id": "AAMkAD...", "body": "<edited html>", "format": "html", "force_black": false }
+```
+
+`force_black` defaults to `true`, which wraps whatever HTML you send in a
+`<div style="color: #000000;">`. That is right for HTML you authored yourself,
+but on a body you just read back it nests one more wrapper on every cycle — after
+fifteen revisions you have fifteen nested divs. With `force_black: false` the
+bytes survive the round trip untouched.
 
 ### Scheduled send
 

@@ -7,8 +7,13 @@ import { stripQuotedHistory } from '../content/quotes.js';
 import { truncateForPreview } from './compose-helpers.js';
 import { EmailDraftStatusSchema, getEmailDraftStatus } from './search.js';
 
-// Byte cap on a raw-HTML `body`, mirroring the PREVIEW_BODY_LIMIT budget that
-// bounds draft previews. It is deliberately larger than that 32 KB preview cap:
+// Byte cap on the `body` returned for `format: 'html'` — the raw HTML, and the
+// plain-text fallback when the message has no HTML part, since both are the same
+// `format: 'html'` response headed for the same budget. The markdown path is
+// deliberately left uncapped: it is the default, and the default does not change.
+//
+// Mirrors the PREVIEW_BODY_LIMIT budget that bounds draft previews, but is
+// deliberately larger than that 32 KB preview cap:
 // a preview exists so an agent can *eyeball* what was persisted, whereas the
 // raw-HTML read exists so an agent can round-trip a formatted body — edit one
 // sentence and write the rest back byte-identical. Truncating that defeats the
@@ -53,7 +58,7 @@ const ReadEmailOutput = z.object({
   bodyFormat: z.enum(['markdown', 'html', 'text'])
     .describe('What `body` actually contains: the markdown conversion, the raw message HTML, or the plain-text body when `format: "html"` was requested and the message has no HTML part.'),
   bodyTruncated: z.boolean().optional()
-    .describe('True if `body` was truncated to fit the MCP response budget. Only ever set for `format: "html"`; the message itself is unchanged. Do NOT write a truncated body back to a draft.'),
+    .describe('True if `body` was truncated to fit the MCP response budget. Only ever set when `format: "html"` was requested (the markdown path is unbounded, exactly as before); the message itself is unchanged. Do NOT write a truncated body back to a draft.'),
   attachments: z.array(z.object({
     id: z.string(),
     filename: z.string(),
@@ -68,12 +73,15 @@ export const READ_EMAIL_DESCRIPTION =
   'Read the full content of an email by ID, transformed to token-efficient markdown. '
   + "Set format to 'html' to get the raw body HTML instead — use this when you need to "
   + 'preserve inline styling (colour, background-colour, underline, strikethrough) that the '
-  + 'markdown conversion discards, e.g. to change one sentence of a formatted body and write '
-  + 'the rest back unchanged. Raw HTML costs far more tokens than markdown, so leave the '
-  + 'default alone unless you need the styling. Check `bodyFormat` before writing a body '
-  + 'back: `text` means the message had no HTML part. `strip_signatures` and '
+  + 'markdown conversion discards, e.g. to change one sentence of a formatted body and leave '
+  + 'the rest alone. Raw HTML costs far more tokens than markdown, so leave the default alone '
+  + 'unless you need the styling. The returned HTML is verbatim: `strip_signatures` and '
   + '`strip_quoted_history` are markdown-shaped text transforms and are NOT applied when '
-  + "format is 'html' — the raw HTML is returned verbatim so it round-trips byte-for-byte. "
+  + "format is 'html'. Before writing a body back, check `bodyFormat` — `text` means the "
+  + 'message had no HTML part, so do not send it as HTML — and check `bodyTruncated`, which '
+  + 'means you do not have the whole body and must not write it back. When you do write raw '
+  + "HTML back, pass format: 'html' AND force_black: false, or the compose action wraps your "
+  + 'HTML in a force-black div and every round trip nests another one. '
   + 'When the response has `isDraft: true` the message is an unsent draft — it has NOT '
   + 'been sent, and `receivedAt` is provider-supplied metadata, not evidence of delivery. '
   + 'Never describe it as a sent, delivered, or received email.';
@@ -102,8 +110,14 @@ export const readEmailAction: EmailAction<
       const raw = msg.bodyHtml;
       // No HTML part — fall back to the plain-text body rather than returning
       // nothing, and say so via `bodyFormat` so the caller does not write plain
-      // text back as HTML.
+      // text back as HTML. (Both parts absent yields `''` with `bodyFormat: 'text'`,
+      // which is honest: there is nothing to round-trip.)
       bodyFormat = raw !== undefined ? 'html' : 'text';
+      // The cap applies to whichever body this branch returns, not only to real
+      // HTML. The text fallback is still a `format: 'html'` response headed for the
+      // same MCP budget, and an unbounded one truncated by the transport instead
+      // would arrive silently mangled with no flag on it. The markdown path stays
+      // uncapped exactly as before — that is the default and it must not change.
       const cut = truncateForPreview(raw ?? msg.body ?? '', READ_HTML_BODY_LIMIT);
       body = cut.text;
       bodyTruncated = cut.truncated;

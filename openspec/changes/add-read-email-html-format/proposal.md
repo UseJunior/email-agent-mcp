@@ -23,7 +23,13 @@ So the provider hands the action `bodyHtml` and the action throws it away before
 - Add `bodyFormat: 'markdown' | 'html' | 'text'` to the output, always present.
 - Add `bodyTruncated?: boolean`, set only when a raw-HTML body exceeded `READ_HTML_BODY_LIMIT`.
 - Mirror the change in the re-declared MCP transport schemas in `packages/email-mcp/src/server.ts`, and in the demo fallback payload.
-- Document `read_email`'s `format` and the compose-side `format` in the README. Both were undocumented; the compose-side one is the other half of the round trip and is useless if a caller cannot discover it.
+- Document `read_email`'s `format` and the compose-side `format` in both the root README and the README published with the `email-agent-mcp` npm package. Both were undocumented; the compose-side one is the other half of the round trip and is useless if a caller cannot discover it.
+
+### The other half of the round trip: `force_black`
+
+`renderEmailBody` defaults `forceBlack` to true even for `format: 'html'`, wrapping whatever HTML it is handed in `<div style="color: #000000;">`. On a body that was just read back, that nests one more wrapper on every cycle — fifteen revisions, fifteen nested divs. So the round trip this change advertises is only exact when the compose call also passes `force_black: false`.
+
+The compose-side default is deliberately **not** changed. It is correct for its actual job: HTML the agent authored itself, which may be a bare fragment with no colour of its own and which Outlook dark mode would otherwise render white-on-white. Flipping it for `format: 'html'` would silently change how every existing HTML sender's mail renders, in a published package, to fix a problem that only arises on the read-back path. Instead both agent-facing tool descriptions and both READMEs state the requirement explicitly, and a test pins it: three cycles with `force_black: false` are byte-identical, and the wrapper demonstrably appears without it.
 
 ### The markdown default stays
 
@@ -39,7 +45,7 @@ So the `'html'` branch applies none of them. Byte fidelity is the entire feature
 
 `bodyFormat` follows the recipient-topology precedent from issue #102: an omitted key is ambiguous, and a caller about to write this body back must not have to guess what it is holding. In particular, `format: 'html'` on a message with no HTML part yields the plain-text body — writing that back as HTML would mangle it, so `text` must be distinguishable from `html` rather than silently looking like it.
 
-`bodyTruncated` is a warning, not a status field. It follows `DraftPreviewSchema`'s `bodyTruncated` / `bodyHtmlTruncated`, which are set only when they fire. Absence means "safe to write back," which is exactly the question the caller is asking.
+`bodyTruncated` is a warning, not a status field. It follows `DraftPreviewSchema`'s `bodyTruncated` / `bodyHtmlTruncated`, which are set only when they fire. Absence means "safe to write back," which is exactly the question the caller is asking. The cap covers whatever the `'html'` branch returns, including the plain-text fallback: that is still a `format: 'html'` response headed for the same transport budget, and an unbounded one truncated by the transport instead would arrive mangled with no flag on it. The markdown path stays uncapped — it is the default, and the default does not change.
 
 ### Why the cap is 256 KB and not `PREVIEW_BODY_LIMIT`
 

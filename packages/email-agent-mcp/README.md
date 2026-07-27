@@ -81,7 +81,7 @@ Agent Email exposes 26 MCP tools:
 | Tool | Description | Type |
 |------|-------------|------|
 | `list_emails` | List recent emails with filtering | read |
-| `read_email` | Read full email content as markdown | read |
+| `read_email` | Read full email content as markdown, or raw HTML with `format: "html"` | read |
 | `search_emails` | Full-text search across mailboxes | read |
 | `list_mailboxes` | Enumerate configured mailboxes, status, and default | read |
 | `get_mailbox_status` | Connection status and warnings | read |
@@ -117,6 +117,23 @@ equivalent operation.
 `send_email`, `reply_to_email`, `create_draft`, and `update_draft` accept an
 optional `attachments` array — each entry is a sandboxed file `path` or inline
 `base64`, with optional `filename` / `mimeType`. Files are capped at 25MB each.
+
+Bodies cross the wire as markdown by default in both directions, because markdown
+is token-efficient. Both directions can opt out. The four compose tools above take
+a `format` of `markdown` (default, rendered as GFM), `html` (passthrough), or
+`text`, plus `force_black` (default true) which wraps rendered HTML in a
+force-black div so Outlook dark mode does not hide the text.
+
+`read_email` takes a `format` of `markdown` (default) or `html`. `html` returns
+the message's raw body HTML verbatim — reach for it when you need styling that
+markdown cannot carry (`color`, `background-color`, `text-decoration`, `<u>`),
+for example to change one sentence of a formatted body and leave the rest alone.
+It also returns `bodyFormat` (`markdown` / `html` / `text` — `text` means the
+message had no HTML part) and, if the raw body exceeded the 256KB response
+budget, `bodyTruncated: true`. Raw HTML costs far more tokens than markdown, and
+`strip_quoted_history` / `strip_signatures` are not applied to it. When writing
+raw HTML back, pass `format: "html"` **and** `force_black: false` — otherwise
+each round trip nests another force-black wrapper.
 
 ## Provider Support
 

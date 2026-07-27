@@ -10,9 +10,9 @@ When `format` is `html`, the system SHALL return the message's raw body HTML ver
 
 The response SHALL carry a `bodyFormat` field, always present, reporting what `body` actually contains: `markdown`, `html`, or `text`. `text` SHALL be reported when `format: 'html'` was requested for a message that carries no HTML part, in which case the plain-text body is returned — a caller must be able to tell that case apart from real HTML, because writing plain text back as HTML would mangle it.
 
-A raw HTML body SHALL be capped at a documented byte budget and, when the cap fires, SHALL set `bodyTruncated: true` rather than being silently cut. The flag SHALL be absent rather than `false` when nothing was cut, so its absence means the body is safe to write back. `bodyTruncated` applies only to the `html` format; the markdown path is unbounded exactly as before.
+The body returned for `format: 'html'` SHALL be capped at a documented byte budget — covering both the raw HTML and the plain-text fallback, since both are the same response headed for the same transport budget — and, when the cap fires, SHALL set `bodyTruncated: true` rather than being silently cut. The flag SHALL be absent rather than `false` when nothing was cut, so its absence means the body is safe to write back. The markdown path SHALL remain unbounded exactly as before.
 
-The tool description SHALL tell the agent that raw HTML costs materially more tokens than markdown, that the markdown path discards styling, and that `bodyFormat` must be checked before writing a body back.
+The tool description SHALL tell the agent that raw HTML costs materially more tokens than markdown, that the markdown path discards styling, that `bodyFormat` and `bodyTruncated` must be checked before writing a body back, and that writing raw HTML back requires `force_black: false` on the compose action — `force_black` defaults to true and wraps the body in a force-black div, so leaving it on nests another wrapper on every round trip.
 
 #### Scenario: Omitting format returns markdown exactly as before
 - **WHEN** `read_email` is called with `{id: "msg123"}` on a message whose HTML body carries inline colour, background-colour, and underline styling
@@ -39,6 +39,16 @@ The tool description SHALL tell the agent that raw HTML costs materially more to
 - **WHEN** `read_email` is called with `{format: "html"}` on a message whose raw HTML body exceeds the response byte budget
 - **THEN** `body` is cut at a safe UTF-8 boundary and is a prefix of the original
 - **AND** `bodyTruncated` is `true`
+
+#### Scenario: Oversized plain-text fallback is flagged as truncated
+- **WHEN** `read_email` is called with `{format: "html"}` on a plain-text-only message whose body exceeds the response byte budget
+- **THEN** `bodyFormat` is `text` and `bodyTruncated` is `true`
+- **AND** the same message read on the default markdown path is returned in full, unflagged
+
+#### Scenario: Raw HTML round-trips unchanged through the compose renderer
+- **WHEN** a body read with `{format: "html"}` is written back with `format: "html"` and `force_black: false`, repeatedly
+- **THEN** the HTML is byte-identical after every cycle
+- **AND** leaving `force_black` at its default wraps the body in a force-black div, nesting one more wrapper per cycle — which is why the tool description requires `force_black: false`
 
 #### Scenario: Raw HTML body under the budget is not flagged as truncated
 - **WHEN** `read_email` is called with `{format: "html"}` on a message whose raw HTML body is within the budget
