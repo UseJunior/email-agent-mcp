@@ -348,7 +348,11 @@ export interface BuildDraftPreviewResult {
 // "exceeded email size limits" notice (that would mislead an agent into
 // thinking the persisted draft itself was capped). Truncation is signalled
 // structurally via bodyTruncated / bodyHtmlTruncated in DraftPreviewSchema.
-function truncateForPreview(input: string, maxBytes: number): { text: string; truncated: boolean } {
+//
+// Exported so read.ts can reuse the identical byte-safe cut for its raw-HTML
+// body — one implementation, so the two truncation signals can never disagree
+// about where a multi-byte codepoint boundary is.
+export function truncateForPreview(input: string, maxBytes: number): { text: string; truncated: boolean } {
   const encoded = Buffer.from(input, 'utf-8');
   if (encoded.length <= maxBytes) return { text: input, truncated: false };
 

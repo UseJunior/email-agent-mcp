@@ -147,7 +147,7 @@ Agent Email exposes 26 MCP tools:
 | Tool | Description | Type |
 |------|-------------|------|
 | `list_emails` | List recent emails with filtering | read |
-| `read_email` | Read full email content as markdown | read |
+| `read_email` | Read full email content as markdown, or raw HTML with `format: "html"` | read |
 | `search_emails` | Full-text search across mailboxes | read |
 | `list_mailboxes` | Enumerate configured mailboxes, their status, and the default | read |
 | `get_mailbox_status` | Connection status and warnings | read |
@@ -183,6 +183,51 @@ as an unsent draft, not that the mailbox owner sent it (received mail is also
 `false`). Drafts otherwise appear in listings and search results as before.
 
 Folder and inbox-rule management requires Microsoft Graph `MailboxSettings.ReadWrite` consent. Existing Microsoft mailbox connections must re-consent after upgrading. Gmail uses labels rather than hierarchical folders/server-side Exchange rules, so these six tools return `NOT_SUPPORTED` for Gmail mailboxes.
+
+### Body formats
+
+Bodies cross the wire as markdown by default in both directions. That default is
+deliberate — markdown is token-efficient, and a routine read should stay cheap.
+Both directions can opt out of it.
+
+**Writing** — `send_email`, `reply_to_email`, `create_draft`, and `update_draft`
+accept an optional `format`:
+
+| `format` | Behavior |
+|----------|----------|
+| `markdown` (default) | Rendered to HTML via `marked` (GFM, `breaks: true`). Raw HTML embedded in the markdown is preserved. |
+| `html` | Passthrough — your HTML is sent as-is. |
+| `text` | No rendering; sent as plain text. |
+
+For `markdown` and `html` the rendered HTML is wrapped in a
+`<div style="color: #000000;">` so Outlook's dark mode does not turn the text
+white-on-white.
+
+**Reading** — `read_email` accepts an optional `format` of `markdown` (default)
+or `html`:
+
+```json
+{ "id": "AAMkAD...", "format": "html" }
+```
+
+`format: "html"` returns the message's raw body HTML verbatim. Reach for it when
+you need styling that markdown cannot carry — `color`, `background-color`,
+`text-decoration`, `<u>` — for example to change one sentence of a formatted body
+and write the rest back byte-for-byte with `update_draft` and `format: "html"`.
+Through the markdown path that styling is silently destroyed on the way out.
+
+Two fields come back with it:
+
+- `bodyFormat` — always present: `markdown`, `html`, or `text`. You get `text`
+  when you asked for `html` but the message has no HTML part, in which case the
+  plain-text body is returned. Check this before writing a body back.
+- `bodyTruncated` — present and `true` only if the raw HTML exceeded the 256 KB
+  response budget. Do not write a truncated body back to a draft.
+
+Raw HTML costs far more tokens than its markdown reduction, so leave the default
+alone unless you need the styling. `strip_quoted_history` and `strip_signatures`
+are markdown-shaped text transforms and are not applied when `format` is `html` —
+the raw HTML is returned untouched so it round-trips exactly.
 
 ### Scheduled send
 

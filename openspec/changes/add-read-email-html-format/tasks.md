@@ -1,0 +1,16 @@
+- [x] Add `format?: 'markdown' | 'html'` (default `'markdown'`) to `ReadEmailInput` in `packages/email-core/src/actions/read.ts`, with a `.describe()` that says why a caller would reach for `'html'`
+- [x] Branch `run()` on `format`: the `'html'` branch returns `msg.bodyHtml` verbatim — no `transformEmailContent`, no attachment summary, no `stripQuotedHistory`, no `stripSignature`. Every one of those rewrites the string and byte fidelity is the whole feature
+- [x] Fall back to the plain-text body when `format: 'html'` is requested for a message with no HTML part, and report it as `bodyFormat: 'text'` rather than passing it off as HTML
+- [x] Add `bodyFormat: 'markdown' | 'html' | 'text'` to `ReadEmailOutput` as a **required, always-present** field, following the issue #102 recipient-topology precedent — an omitted key is ambiguous and a caller about to write the body back must not have to guess
+- [x] Add `bodyTruncated?: boolean`, set only when it fires, mirroring `DraftPreviewSchema`'s `bodyTruncated` / `bodyHtmlTruncated`
+- [x] Export `truncateForPreview` from `compose-helpers.ts` and reuse it in `read.ts` rather than reimplementing the byte-safe cut, so the two truncation signals cannot disagree about a codepoint boundary
+- [x] Define `READ_HTML_BODY_LIMIT` (256 KB) with a comment justifying why it is larger than the 32 KB `PREVIEW_BODY_LIMIT`, and export it from `packages/email-core/src/index.ts` so tests assert against the constant rather than a magic number
+- [x] Extend the re-declared MCP transport schemas in `packages/email-mcp/src/server.ts` — `format` on the input, `bodyFormat` + `bodyTruncated` on the output — and thread `format` through to the core action
+- [x] Add `bodyFormat` to the `demoReadEmail` fallback payload, which must satisfy the now-required field
+- [x] Put the trade-off in both tool descriptions (core and the MCP-layer override, which are separate strings): raw HTML costs more tokens, the markdown path discards styling, check `bodyFormat` before writing back, and the text transforms do not apply to `'html'`
+- [x] Document `read_email`'s `format` and the compose-side `format` in the README — the compose-side parameter is the other half of the round trip and was undocumented too
+- [x] Core tests in `read.test.ts` under `describe('email-read/Raw HTML Body Output')`: default unchanged (including byte-identical to explicit pre-existing defaults), `'html'` preserves colour/background-colour/underline/strikethrough, transforms skipped, attachment summary not appended, truncation flag set above the cap and absent below it, `text` reported for a message with no HTML part
+- [x] MCP-layer tests in `server.test.ts`: `format` present on the transport input schema with default `'markdown'`, raw HTML survives the re-declared `output.parse`, and the demo payload still parses
+- [x] Run `openspec validate add-read-email-html-format --strict`
+- [x] Run `npm run build`, `npm run test:run`, `npm run lint`, and `npm run check:spec-coverage`
+- [x] Peer review with Codex (dynamic — files opened, tests run, truncation logic and default-unchanged guarantee checked)

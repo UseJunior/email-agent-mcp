@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { MockEmailProvider } from '../testing/mock-provider.js';
-import { readEmailAction } from './read.js';
+import { readEmailAction, READ_HTML_BODY_LIMIT } from './read.js';
 import type { ActionContext } from './registry.js';
 
 let provider: MockEmailProvider;
@@ -314,5 +314,178 @@ describe('email-read/Read Email', () => {
 
     expect(result.attachments).toHaveLength(1);
     expect(result.attachments![0]!.contentId).toBe('cid:logo@example.com');
+  });
+});
+
+// A body carrying hand-applied inline styling — the shape that motivated issue
+// #156. Red strikethrough and blue underline mark proposed contract edits; the
+// markdown conversion cannot carry any of it, so a read → edit → write round
+// trip through markdown flattens the document.
+const STYLED_BODY_HTML = [
+  '<div style="color: #000000;">',
+  '<p>The term is ',
+  '<span style="color:#FF0000;text-decoration:line-through">thirty (30) days</span> ',
+  '<span style="color:#0000FF;text-decoration:underline">sixty (60) days</span>',
+  ' from the Effective Date.</p>',
+  '<p>Please confirm <mark style="background-color:#FFFF00">the fee schedule</mark> is right.</p>',
+  '<p><u>Signature blocks</u> are attached separately.</p>',
+  '</div>',
+].join('');
+
+describe('email-read/Raw HTML Body Output', () => {
+  it('Scenario: Omitting format returns markdown exactly as before', async () => {
+    provider.addMessage({ id: 'msg-styled', bodyHtml: STYLED_BODY_HTML });
+
+    const result = await readEmailAction.run(ctx, { id: 'msg-styled' });
+
+    expect(result.bodyFormat).toBe('markdown');
+    expect(result.bodyTruncated).toBeUndefined();
+    // Prose survives; every styling carrier is gone. This is the failure the
+    // html format exists to avoid, asserted here so the default stays honest.
+    expect(result.body).toContain('sixty (60) days');
+    expect(result.body).not.toContain('color:#FF0000');
+    expect(result.body).not.toContain('color:#0000FF');
+    expect(result.body).not.toContain('text-decoration:underline');
+    expect(result.body).not.toContain('background-color:#FFFF00');
+    expect(result.body).not.toContain('<span');
+    expect(result.body).not.toContain('<u>');
+
+    // Byte-identical to what the action returned before `format` existed:
+    // explicitly passing the pre-existing defaults must produce the same string.
+    const explicitDefaults = await readEmailAction.run(ctx, {
+      id: 'msg-styled',
+      strip_signatures: true,
+      strip_quoted_history: false,
+      format: 'markdown',
+    });
+    expect(explicitDefaults.body).toBe(result.body);
+  });
+
+  it("Scenario: format 'html' returns styling the markdown conversion destroys", async () => {
+    provider.addMessage({ id: 'msg-styled', bodyHtml: STYLED_BODY_HTML });
+
+    const result = await readEmailAction.run(ctx, { id: 'msg-styled', format: 'html' });
+
+    expect(result.bodyFormat).toBe('html');
+    // Verbatim — this is what makes a round trip possible at all.
+    expect(result.body).toBe(STYLED_BODY_HTML);
+    // Named individually so a regression says which carrier was lost.
+    expect(result.body).toContain('color:#FF0000');
+    expect(result.body).toContain('text-decoration:line-through');
+    expect(result.body).toContain('color:#0000FF');
+    expect(result.body).toContain('text-decoration:underline');
+    expect(result.body).toContain('background-color:#FFFF00');
+    expect(result.body).toContain('<u>Signature blocks</u>');
+    expect(result.bodyTruncated).toBeUndefined();
+  });
+
+  it("Scenario: format 'html' skips the markdown-shaped text transforms", async () => {
+    // stripQuotedHistory and stripSignature operate on markdown-shaped text and
+    // rewrite the string. Running either over raw HTML would break the byte
+    // fidelity the html format exists to provide, so both are skipped.
+    const html = [
+      '<div><p>Confirmed — 10am works.</p>',
+      '<p>-- <br>Bob Jones<br>Senior Partner</p>',
+      '<div class="gmail_quote">',
+      '<div>On Wed, Mar 13, 2024 at 9:30 AM Alice &lt;alice@corp.com&gt; wrote:</div>',
+      '<blockquote>Can we move it to 10am?</blockquote>',
+      '</div></div>',
+    ].join('');
+    provider.addMessage({ id: 'msg-html-verbatim', bodyHtml: html });
+
+    const result = await readEmailAction.run(ctx, {
+      id: 'msg-html-verbatim',
+      format: 'html',
+      strip_quoted_history: true,
+      strip_signatures: true,
+    });
+
+    expect(result.body).toBe(html);
+    expect(result.body).not.toContain(QUOTE_MARKER);
+    expect(result.body).toContain('Senior Partner');
+    expect(result.body).toContain('Can we move it to 10am?');
+  });
+
+  it("Scenario: format 'html' does not append the attachment summary", async () => {
+    // The markdown path appends an "Attachments: …" line. Appending prose to raw
+    // HTML would be written straight back into the message body on a round trip.
+    provider.addMessage({
+      id: 'msg-html-att',
+      bodyHtml: '<p style="color:#FF0000">See attached.</p>',
+      attachments: [
+        { id: 'att1', filename: 'contract.pdf', mimeType: 'application/pdf', size: 245000, isInline: false },
+      ],
+    });
+
+    const markdown = await readEmailAction.run(ctx, { id: 'msg-html-att' });
+    const raw = await readEmailAction.run(ctx, { id: 'msg-html-att', format: 'html' });
+
+    expect(markdown.body).toContain('Attachments: contract.pdf');
+    expect(raw.body).toBe('<p style="color:#FF0000">See attached.</p>');
+    // Still reported structurally, so nothing is actually lost.
+    expect(raw.attachments).toHaveLength(1);
+    expect(raw.attachments![0]!.filename).toBe('contract.pdf');
+  });
+
+  it('Scenario: Oversized raw HTML body is flagged as truncated', async () => {
+    // Raw HTML is many times larger than its markdown reduction, so the cap can
+    // realistically fire here where it never does on the markdown path.
+    const filler = '<p style="color:#FF0000">padding padding padding</p>'.repeat(8000);
+    const bodyHtml = `<div>${filler}</div>`;
+    expect(Buffer.byteLength(bodyHtml, 'utf-8')).toBeGreaterThan(READ_HTML_BODY_LIMIT);
+    provider.addMessage({ id: 'msg-huge', bodyHtml });
+
+    const result = await readEmailAction.run(ctx, { id: 'msg-huge', format: 'html' });
+
+    expect(result.bodyTruncated).toBe(true);
+    expect(result.bodyFormat).toBe('html');
+    expect(Buffer.byteLength(result.body, 'utf-8')).toBeLessThanOrEqual(READ_HTML_BODY_LIMIT);
+    expect(bodyHtml.startsWith(result.body)).toBe(true);
+  });
+
+  it('Scenario: Raw HTML body under the budget is not flagged as truncated', async () => {
+    // The flag is a warning, not a status field: it must be absent in the common
+    // case, and a caller must be able to treat its absence as "safe to write back".
+    const bodyHtml = `<div>${'<p style="color:#0000FF">short</p>'.repeat(10)}</div>`;
+    expect(Buffer.byteLength(bodyHtml, 'utf-8')).toBeLessThan(READ_HTML_BODY_LIMIT);
+    provider.addMessage({ id: 'msg-small', bodyHtml });
+
+    const result = await readEmailAction.run(ctx, { id: 'msg-small', format: 'html' });
+
+    expect(result.body).toBe(bodyHtml);
+    expect(result.bodyTruncated).toBeUndefined();
+  });
+
+  it("Scenario: format 'html' on a message with no HTML part reports text", async () => {
+    // Writing a plain-text body back as HTML would mangle it, so this case must
+    // be distinguishable from a real HTML body rather than silently looking like one.
+    provider.addMessage({ id: 'msg-text-only', body: 'Plain text only.\n\nNo HTML part here.' });
+
+    const result = await readEmailAction.run(ctx, { id: 'msg-text-only', format: 'html' });
+
+    expect(result.bodyFormat).toBe('text');
+    expect(result.body).toBe('Plain text only.\n\nNo HTML part here.');
+  });
+
+  it('Scenario: Every read reports what body it returned', async () => {
+    // Always present, never omitted — the recipient-topology precedent from
+    // issue #102. A caller about to write the body back must not have to guess.
+    provider.addMessage({ id: 'msg-shape', bodyHtml: '<p>hello</p>' });
+
+    const markdown = await readEmailAction.run(ctx, { id: 'msg-shape' });
+    const raw = await readEmailAction.run(ctx, { id: 'msg-shape', format: 'html' });
+
+    expect('bodyFormat' in markdown).toBe(true);
+    expect('bodyFormat' in raw).toBe(true);
+    expect(markdown.bodyFormat).toBe('markdown');
+    expect(raw.bodyFormat).toBe('html');
+  });
+
+  it('tells the agent in the tool description when to reach for raw HTML', () => {
+    // The parameter only helps if the agent knows the markdown path destroys
+    // styling and that raw HTML costs tokens.
+    expect(readEmailAction.description).toContain("format to 'html'");
+    expect(readEmailAction.description).toMatch(/bodyFormat/);
+    expect(readEmailAction.description).toMatch(/token/i);
   });
 });

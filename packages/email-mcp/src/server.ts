@@ -757,6 +757,9 @@ export async function buildLazyActions(
     cc: [],
     bcc: [],
     body: NO_MAILBOX_CONFIGURED_MESSAGE,
+    // The demo payload is prose, not a rendered message — it is markdown-shaped
+    // regardless of what `format` the caller asked for, and must say so.
+    bodyFormat: 'markdown' as const,
     receivedAt: new Date().toISOString(),
     isDraft: false,
   });
@@ -804,12 +807,13 @@ export async function buildLazyActions(
     },
     {
       name: 'read_email',
-      description: 'Read the full content of an email by ID, transformed to token-efficient markdown. When the response has `isDraft: true` the message is an unsent draft — it has NOT been sent, and `receivedAt` is provider-supplied metadata, not evidence of delivery; never describe it as a sent, delivered, or received email. Set strip_quoted_history to true to drop the terminal "On … wrote:" / Outlook-header / `>`-prefix reply chain and replace it with a short marker. Set strip_signatures to true to remove detected signatures and legal disclaimers; it defaults to false here for MCP compatibility even though the core action defaults to true.',
+      description: 'Read the full content of an email by ID, transformed to token-efficient markdown. When the response has `isDraft: true` the message is an unsent draft — it has NOT been sent, and `receivedAt` is provider-supplied metadata, not evidence of delivery; never describe it as a sent, delivered, or received email. Set format to \'html\' to get the raw body HTML instead of markdown — use this when you need to preserve inline styling (colour, background-colour, underline, strikethrough) that the markdown conversion discards, e.g. to change one sentence of a formatted body and write the rest back unchanged via create_draft/update_draft with format: \'html\'. Raw HTML costs far more tokens than markdown, so leave the default alone unless you need the styling; check `bodyFormat` (`html` vs `text`) before writing a body back, and never write one back with `bodyTruncated: true`. strip_quoted_history and strip_signatures are markdown-shaped text transforms and are NOT applied when format is \'html\'. Set strip_quoted_history to true to drop the terminal "On … wrote:" / Outlook-header / `>`-prefix reply chain and replace it with a short marker. Set strip_signatures to true to remove detected signatures and legal disclaimers; it defaults to false here for MCP compatibility even though the core action defaults to true.',
       input: z.object({
         id: z.string(),
         mailbox: z.string().optional(),
         strip_quoted_history: z.boolean().optional().default(false),
         strip_signatures: z.boolean().optional().default(false),
+        format: z.enum(['markdown', 'html']).optional().default('markdown'),
       }),
       output: z.object({
         id: z.string(),
@@ -821,6 +825,11 @@ export async function buildLazyActions(
         cc: z.array(z.string()),
         bcc: z.array(z.string()),
         body: z.string(),
+        // What `body` actually holds. Always present — a caller about to write
+        // this body back must not have to guess, and `text` (format: 'html'
+        // requested, message had no HTML part) must be distinguishable from `html`.
+        bodyFormat: z.enum(['markdown', 'html', 'text']),
+        bodyTruncated: z.boolean().optional(),
         receivedAt: z.string(),
         attachments: z.array(z.object({
           id: z.string(),
@@ -839,6 +848,7 @@ export async function buildLazyActions(
           mailbox?: string;
           strip_quoted_history?: boolean;
           strip_signatures?: boolean;
+          format?: 'markdown' | 'html';
         };
         if (!getDefaultMailbox(state)) return demoReadEmail(inp.id);
         const { mailbox } = resolveMailboxContext(state, inp.mailbox);
@@ -853,6 +863,7 @@ export async function buildLazyActions(
             mailbox: inp.mailbox,
             strip_signatures: inp.strip_signatures ?? false,
             strip_quoted_history: inp.strip_quoted_history ?? false,
+            format: inp.format ?? 'markdown',
           },
         );
         // Return the canonical action result verbatim, including `cc`/`bcc`.
