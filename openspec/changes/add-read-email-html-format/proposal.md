@@ -21,7 +21,7 @@ So the provider hands the action `bodyHtml` and the action throws it away before
 - Add `format?: 'markdown' | 'html'` to the `read_email` input, defaulting to `'markdown'`.
 - When `'html'`, return the message's raw `bodyHtml` **verbatim** as `body`.
 - Add `bodyFormat: 'markdown' | 'html' | 'text'` to the output, always present.
-- Add `bodyTruncated?: boolean`, set only when a raw-HTML body exceeded `READ_HTML_BODY_LIMIT`.
+- Add `bodyTruncated?: boolean`, set only when the body returned for `format: 'html'` — the raw HTML, or the plain-text fallback when the message has no HTML part — exceeded `READ_HTML_BODY_LIMIT`. The markdown path stays uncapped.
 - Mirror the change in the re-declared MCP transport schemas in `packages/email-mcp/src/server.ts`, and in the demo fallback payload.
 - Document `read_email`'s `format` and the compose-side `format` in both the root README and the README published with the `email-agent-mcp` npm package. Both were undocumented; the compose-side one is the other half of the round trip and is useless if a caller cannot discover it.
 

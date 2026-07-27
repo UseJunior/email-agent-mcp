@@ -79,7 +79,7 @@ Agent Email 提供 15 个 MCP 工具：
 | 工具 | 描述 | 类型 |
 |------|------|------|
 | `list_emails` | 列出近期邮件并支持筛选 | 读取 |
-| `read_email` | 读取完整邮件内容（Markdown 格式） | 读取 |
+| `read_email` | 读取完整邮件内容（Markdown 格式，或使用 `format: "html"` 获取原始 HTML） | 读取 |
 | `search_emails` | 跨邮箱全文搜索 | 读取 |
 | `get_mailbox_status` | 获取连接状态和警告信息 | 读取 |
 | `get_thread` | 获取完整会话上下文 | 读取 |
