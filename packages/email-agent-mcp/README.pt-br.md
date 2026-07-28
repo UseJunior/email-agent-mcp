@@ -79,7 +79,7 @@ O Agent Email expoe 15 ferramentas MCP:
 | Ferramenta | Descricao | Tipo |
 |------------|-----------|------|
 | `list_emails` | Lista e-mails recentes com filtragem | leitura |
-| `read_email` | Le o conteudo completo de um e-mail como markdown | leitura |
+| `read_email` | Le o conteudo completo de um e-mail como markdown, ou como HTML bruto com `format: "html"` | leitura |
 | `search_emails` | Busca textual completa nas caixas de correio | leitura |
 | `get_mailbox_status` | Status da conexao e avisos | leitura |
 | `get_thread` | Contexto completo da conversa | leitura |

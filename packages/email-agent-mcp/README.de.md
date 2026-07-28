@@ -79,7 +79,7 @@ Agent Email stellt 15 MCP-Tools bereit:
 | Tool | Beschreibung | Typ |
 |------|--------------|-----|
 | `list_emails` | Aktuelle E-Mails mit Filteroptionen auflisten | Lesen |
-| `read_email` | Vollstaendigen E-Mail-Inhalt als Markdown lesen | Lesen |
+| `read_email` | Vollstaendigen E-Mail-Inhalt als Markdown lesen, oder als rohes HTML mit `format: "html"` | Lesen |
 | `search_emails` | Volltextsuche ueber alle Postfaecher | Lesen |
 | `get_mailbox_status` | Verbindungsstatus und Warnungen abrufen | Lesen |
 | `get_thread` | Vollstaendigen Konversationskontext abrufen | Lesen |

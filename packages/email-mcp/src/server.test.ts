@@ -952,6 +952,93 @@ describe('mcp-transport/Lazy Provider State', () => {
     expect(parsed.strip_quoted_history).toBe(false);
   });
 
+  it("read_email exposes format with default 'markdown' on the MCP wire (issue #156)", async () => {
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { getMessage: vi.fn() } as never;
+    state.connectedMailbox = 'work@example.com';
+    state.mailboxes = [];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const readEmail = actions.find(a => a.name === 'read_email')!;
+
+    const inputSchema = readEmail.input as {
+      shape?: Record<string, unknown>;
+      parse: (v: unknown) => Record<string, unknown>;
+    };
+    expect(inputSchema.shape!.format).toBeDefined();
+    // The transport schema is re-declared here rather than reused from the core
+    // action, so the default must be asserted at this layer too — a drift would
+    // silently change what every MCP caller gets back.
+    expect(inputSchema.parse({ id: 'msg1' }).format).toBe('markdown');
+    expect(inputSchema.parse({ id: 'msg1', format: 'html' }).format).toBe('html');
+
+    const outputShape = (readEmail.output as { shape?: Record<string, unknown> }).shape!;
+    expect(outputShape.bodyFormat).toBeDefined();
+    expect(outputShape.bodyTruncated).toBeDefined();
+  });
+
+  it('read_email with format html returns styling the markdown path destroys (issue #156)', async () => {
+    // End-to-end through the transport adapter, not just the core action: the
+    // MCP layer re-declares both schemas, so raw HTML has to survive output.parse.
+    const bodyHtml = '<p><span style="color:#FF0000;text-decoration:line-through">thirty (30) days</span>'
+      + '<span style="color:#0000FF;text-decoration:underline">sixty (60) days</span></p>';
+    const getMessage = vi.fn().mockResolvedValue({
+      id: 'msg-styled',
+      subject: 'Redline',
+      from: { email: 'alice@corp.com', name: 'Alice' },
+      to: [{ email: 'bob@corp.com', name: 'Bob' }],
+      receivedAt: '2026-07-27T12:00:00.000Z',
+      bodyHtml,
+    });
+
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.provider = { getMessage } as never;
+    state.connectedMailbox = 'alice@corp.com';
+    state.mailboxes = [
+      {
+        name: 'alice',
+        emailAddress: 'alice@corp.com',
+        displayName: 'alice@corp.com',
+        providerType: 'gmail',
+        provider: { getMessage } as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const readEmail = actions.find(a => a.name === 'read_email')!;
+
+    const raw = await readEmail.run({}, { id: 'msg-styled', format: 'html' }) as Record<string, unknown>;
+    expect(raw.bodyFormat).toBe('html');
+    expect(raw.body).toBe(bodyHtml);
+    // The schema the adapter advertises must accept the shape its own run() returns.
+    expect(() => (readEmail.output as { parse: (v: unknown) => unknown }).parse(raw)).not.toThrow();
+
+    const markdown = await readEmail.run({}, { id: 'msg-styled' }) as Record<string, unknown>;
+    expect(markdown.bodyFormat).toBe('markdown');
+    expect(markdown.body as string).not.toContain('color:#FF0000');
+    expect(() => (readEmail.output as { parse: (v: unknown) => unknown }).parse(markdown)).not.toThrow();
+  });
+
+  it('read_email demo payload satisfies the bodyFormat the output schema now requires', async () => {
+    const state = createLazyProviderState();
+    state.status = 'configuring';
+    state.initPromise = Promise.resolve();
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const readEmail = actions.find(a => a.name === 'read_email')!;
+
+    const result = await readEmail.run({}, { id: 'demo-1' }) as Record<string, unknown>;
+    expect(result.bodyFormat).toBe('markdown');
+    expect(() => (readEmail.output as { parse: (v: unknown) => unknown }).parse(result)).not.toThrow();
+  });
+
   it('Scenario: read_email with strip_quoted_history=true delegates to action and strips quoted reply', async () => {
     const getMessage = vi.fn().mockResolvedValue({
       id: 'msg-quoted',

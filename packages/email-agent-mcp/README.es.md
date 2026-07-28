@@ -79,7 +79,7 @@ Agent Email expone 15 herramientas MCP:
 | Herramienta | Descripcion | Tipo |
 |-------------|-------------|------|
 | `list_emails` | Listar correos recientes con filtrado | lectura |
-| `read_email` | Leer el contenido completo de un correo como markdown | lectura |
+| `read_email` | Leer el contenido completo de un correo como markdown, o como HTML sin procesar con `format: "html"` | lectura |
 | `search_emails` | Busqueda de texto completo en buzones | lectura |
 | `get_mailbox_status` | Estado de conexion y advertencias | lectura |
 | `get_thread` | Contexto completo de la conversacion | lectura |
