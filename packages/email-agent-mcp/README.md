@@ -121,7 +121,7 @@ optional `attachments` array — each entry is a sandboxed file `path` or inline
 Bodies cross the wire as markdown by default in both directions, because markdown
 is token-efficient. Both directions can opt out. The four compose tools above take
 a `format` of `markdown` (default, rendered as GFM), `html` (unsanitised
-passthrough — your markup goes to the wire as-is), or `text`, plus
+passthrough — your markup is not sanitised or rewritten), or `text`, plus
 `force_black` (default true) which wraps rendered HTML in a force-black div so
 Outlook dark mode does not hide the text.
 

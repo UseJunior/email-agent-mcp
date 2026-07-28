@@ -199,17 +199,20 @@ accept an optional `format`:
 | `html` | Passthrough — your HTML is sent as-is. |
 | `text` | No rendering; sent as plain text. |
 
-`html` is unsanitised passthrough: no sanitiser, no allowlist, no rewriting.
-Your markup and inline CSS reach the wire byte-for-byte — that is what makes
-styled mail possible, and it means you own whatever you send.
+`html` is unsanitised passthrough: no sanitiser, no allowlist, no rewriting of
+your markup. Inline CSS and arbitrary tags survive to the wire — that is what
+makes styled mail possible, and it means you own whatever you send. The one
+default modification is the force-black wrapper below; with `force_black:
+false` the body passes through byte-for-byte.
 
 For `markdown` and `html` the rendered HTML is wrapped in a
 `<div style="color: #000000;">` so Outlook's dark mode does not turn the text
 white-on-white.
 
 **Body files** — `send_email`, `create_draft`, and `update_draft` also accept
-`body_file`: a path to a `.md`, `.html`, or `.txt` file — sandboxed to the
-working directory — used as the body instead of `body`. A `.md` body file may
+`body_file`: a path to a `.md`, `.html`, or `.txt` file (read relative to
+`EMAIL_MCP_SAFE_DIR`, default the process working directory) used as the body
+instead of `body`. A `.md` body file may
 open with a YAML frontmatter block:
 
 ```md
@@ -225,9 +228,9 @@ force_black: false
 Recognized keys are `to`, `cc`, `subject`, `reply_to`, `draft`, `format`, and
 `force_black` (`draft: true` turns a `send_email` call into a draft save). A
 frontmatter value overrides the same-named tool parameter. Frontmatter is
-parsed only from `.md` files, and the file extension never sets the format —
-a `.html` body file is still rendered as markdown unless `format: "html"`
-accompanies it as a tool parameter.
+parsed only from `.md` files, and the file extension never selects the format —
+without an explicit `format` tool parameter, even a `.html` body file gets the
+default markdown rendering; pass `format: "html"` for passthrough.
 
 **Reading** — `read_email` accepts an optional `format` of `markdown` (default)
 or `html`:
