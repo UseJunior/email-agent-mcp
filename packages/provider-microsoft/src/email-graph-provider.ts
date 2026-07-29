@@ -866,6 +866,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       singleValueExtendedProperties: [
         { id: TRACKING_PROPERTY, value: trackingId },
         { id: DEFERRED_SEND_PROPERTY, value: scheduledSendAt },
+        { id: DRAFT_ORIGIN_PROPERTY, value: 'non_reply' },
       ],
     };
     if (msg.attachments && msg.attachments.length > 0) {
@@ -1113,7 +1114,6 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
 
     const conversationIndexBytes = decodeConversationIndex(metadata.conversationIndex);
     if (conversationIndexBytes === undefined) return 'indeterminate';
-    if (conversationIndexBytes === 22) return 'non_reply';
     return conversationIndexBytes > 22 ? 'reply' : 'indeterminate';
   }
 

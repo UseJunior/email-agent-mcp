@@ -1004,6 +1004,10 @@ describe('provider-microsoft/Deferred Delivery via Graph Extended Property', () 
       }],
       singleValueExtendedProperties: expect.arrayContaining([
         { id: 'SystemTime 0x3FEF', value: '2026-07-24T12:00:00.000Z' },
+        {
+          id: 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailDraftOrigin',
+          value: 'non_reply',
+        },
       ]),
     }));
     expect(post).toHaveBeenNthCalledWith(
@@ -1281,20 +1285,34 @@ describe('provider-microsoft/update_draft Reply Metadata', () => {
     await expect(provider.getDraftReplyStatus('fresh-draft')).resolves.toBe('non_reply');
   });
 
-  it.each([
-    { bytes: 22, expected: 'non_reply' as const },
-    { bytes: 27, expected: 'reply' as const },
-  ])('Scenario: unstamped conversationIndex with $bytes bytes is $expected', async ({ bytes, expected }) => {
+  it('Scenario: unstamped valid root conversationIndex is indeterminate', async () => {
+    const rootConversationIndex = Buffer.alloc(22);
+    rootConversationIndex[0] = 0x01;
     const client = createMockClient({
       get: vi.fn().mockResolvedValueOnce({
         id: 'external-draft',
         isDraft: true,
-        conversationIndex: Buffer.alloc(bytes, 0x5a).toString('base64url'),
+        conversationIndex: rootConversationIndex.toString('base64'),
       }),
     });
     const provider = new GraphEmailProvider(client);
 
-    await expect(provider.getDraftReplyStatus('external-draft')).resolves.toBe(expected);
+    await expect(provider.getDraftReplyStatus('external-draft')).resolves.toBe('indeterminate');
+  });
+
+  it('Scenario: unstamped child conversationIndex is positive reply evidence', async () => {
+    const childConversationIndex = Buffer.alloc(27);
+    childConversationIndex[0] = 0x01;
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValueOnce({
+        id: 'external-reply-draft',
+        isDraft: true,
+        conversationIndex: childConversationIndex.toString('base64'),
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('external-reply-draft')).resolves.toBe('reply');
   });
 
   it.each([
@@ -1307,6 +1325,12 @@ describe('provider-microsoft/update_draft Reply Metadata', () => {
     { isDraft: true, conversationIndex: 'not base64!' },
     { isDraft: true, conversationIndex: 42 },
     { isDraft: true, conversationIndex: Buffer.alloc(21).toString('base64') },
+    {
+      isDraft: true,
+      singleValueExtendedProperties: [
+        { id: draftOriginProperty, value: 'unexpected' },
+      ],
+    },
   ])('Scenario: absent or invalid reply evidence is indeterminate', async (metadata) => {
     const client = createMockClient({
       get: vi.fn().mockResolvedValueOnce({ id: 'unknown-draft', ...metadata }),
