@@ -27,6 +27,22 @@ function createMockGmailClient(overrides: Partial<GmailApiClient> = {}): GmailAp
       },
       internalDate: String(new Date('2024-03-15T10:00:00Z').getTime()),
     }),
+    getDraft: vi.fn().mockResolvedValue({
+      id: 'draft-abc',
+      message: {
+        id: 'msg-draft',
+        threadId: 'thread-draft',
+        labelIds: ['DRAFT'],
+        payload: {
+          headers: [
+            { name: 'From', value: 'me@corp.com' },
+            { name: 'To', value: 'bob@corp.com' },
+            { name: 'Subject', value: 'Draft' },
+          ],
+          body: { data: Buffer.from('Draft body').toString('base64url') },
+        },
+      },
+    }),
     getAttachment: vi.fn().mockResolvedValue({
       data: Buffer.from('attachment bytes').toString('base64url'),
       size: 16,
@@ -989,7 +1005,7 @@ describe('provider-gmail/Reply Threading on Send', () => {
 describe('provider-gmail/Update Draft', () => {
   function draftMessageMock() {
     return {
-      id: 'draft-existing',
+      id: 'msg-backing-existing',
       threadId: 'thread-draft',
       labelIds: ['DRAFT'],
       payload: {
@@ -1010,13 +1026,18 @@ describe('provider-gmail/Update Draft', () => {
 
   it('Scenario: updateDraft merges partial over current draft and preserves threading', async () => {
     const client = createMockGmailClient({
-      getMessage: vi.fn().mockResolvedValue(draftMessageMock()),
+      getDraft: vi.fn().mockResolvedValue({
+        id: 'draft-existing',
+        message: draftMessageMock(),
+      }),
     });
     const provider = new GmailEmailProvider(client);
 
     const result = await provider.updateDraft('draft-existing', { subject: 'New subject' });
 
     expect(result.success).toBe(true);
+    expect(client.getDraft).toHaveBeenCalledWith('draft-existing');
+    expect(client.getMessage).not.toHaveBeenCalled();
     expect(client.updateDraft).toHaveBeenCalledWith('draft-existing', expect.any(String), 'thread-draft');
 
     // updateDraft signature is (draftId, raw, threadId) — raw is at index 1.
@@ -1048,7 +1069,10 @@ describe('provider-gmail/Update Draft', () => {
 
   it('Scenario: updateDraft returns structured UPDATE_DRAFT_FAILED on error', async () => {
     const client = createMockGmailClient({
-      getMessage: vi.fn().mockResolvedValue(draftMessageMock()),
+      getDraft: vi.fn().mockResolvedValue({
+        id: 'draft-existing',
+        message: draftMessageMock(),
+      }),
       updateDraft: vi.fn().mockRejectedValue(new Error('draft not found')),
     });
     const provider = new GmailEmailProvider(client);
@@ -1086,6 +1110,10 @@ describe('provider-gmail/Update Draft', () => {
       size: attachmentBytes.length,
     });
     const client = createMockGmailClient({
+      getDraft: vi.fn().mockResolvedValue({
+        id: 'draft-existing',
+        message: draftWithAttachment,
+      }),
       getMessage: vi.fn().mockResolvedValue(draftWithAttachment),
       getAttachment,
     });
@@ -1126,7 +1154,10 @@ describe('provider-gmail/Update Draft', () => {
       internalDate: String(Date.now()),
     };
     const client = createMockGmailClient({
-      getMessage: vi.fn().mockResolvedValue(draftWithInline),
+      getDraft: vi.fn().mockResolvedValue({
+        id: 'draft-existing',
+        message: draftWithInline,
+      }),
     });
     const provider = new GmailEmailProvider(client);
 
@@ -1135,6 +1166,22 @@ describe('provider-gmail/Update Draft', () => {
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('INLINE_ATTACHMENTS_UNSUPPORTED');
   });
+
+  it('Scenario: reply status reads the nested draft message by draft resource id', async () => {
+    const backingMessage = draftMessageMock();
+    const client = createMockGmailClient({
+      getDraft: vi.fn().mockResolvedValue({
+        id: 'draft-resource-1',
+        message: backingMessage,
+      }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('draft-resource-1')).resolves.toBe('reply');
+    expect(client.getDraft).toHaveBeenCalledWith('draft-resource-1');
+    expect(client.getMessage).not.toHaveBeenCalled();
+  });
+
 });
 
 describe('provider-gmail/buildRawMessage attachments', () => {

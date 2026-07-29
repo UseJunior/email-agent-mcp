@@ -951,11 +951,16 @@ describe('provider-microsoft/Draft-Then-Send via createReplyAll', () => {
     const patch = patchArgs[1] as {
       body: { content: string };
       ccRecipients: Array<{ emailAddress: { address: string } }>;
+      singleValueExtendedProperties: Array<{ id: string; value: string }>;
     };
     expect(patch.body.content).toContain('<p>rendered</p>');
     expect(patch.body.content).toContain('From:</b> Alice');
     const addresses = patch.ccRecipients.map(r => r.emailAddress.address.toLowerCase()).sort();
     expect(addresses).toEqual(['alice@corp.com', 'bob@corp.com']);
+    expect(patch.singleValueExtendedProperties).toContainEqual({
+      id: 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailDraftOrigin',
+      value: 'reply',
+    });
   });
 });
 
@@ -1235,14 +1240,16 @@ describe('provider-microsoft/Graph Scheduled Send Inspection and Cancellation', 
 });
 
 describe('provider-microsoft/update_draft Reply Metadata', () => {
+  const draftOriginProperty = 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailDraftOrigin';
+
   it('Scenario: update_draft preserves Graph auto-quoted thread', async () => {
     const client = createMockClient({
       get: vi.fn().mockResolvedValueOnce({
         id: 'reply-draft',
         isDraft: true,
-        conversationId: 'conversation-1',
-        internetMessageHeaders: [
-          { name: 'In-Reply-To', value: '<original@example.com>' },
+        conversationIndex: Buffer.alloc(22).toString('base64'),
+        singleValueExtendedProperties: [
+          { id: draftOriginProperty, value: 'reply' },
         ],
       }),
     });
@@ -1250,19 +1257,22 @@ describe('provider-microsoft/update_draft Reply Metadata', () => {
 
     await expect(provider.getDraftReplyStatus('reply-draft')).resolves.toBe('reply');
     expect(client.get).toHaveBeenCalledWith(expect.stringContaining(
-      '$select=isDraft,conversationId,internetMessageHeaders',
+      '$select=isDraft,conversationIndex',
+    ));
+    expect(client.get).toHaveBeenCalledWith(expect.stringContaining(
+      `$expand=singleValueExtendedProperties($filter=id eq '${draftOriginProperty}')`,
     ));
     expect(client.patch).not.toHaveBeenCalled();
   });
 
-  it('Scenario: A fresh draft is identified when metadata has no in-reply-to relationship', async () => {
+  it('Scenario: stamped non-reply draft is authoritative', async () => {
     const client = createMockClient({
       get: vi.fn().mockResolvedValueOnce({
         id: 'fresh-draft',
         isDraft: true,
-        conversationId: 'conversation-2',
-        internetMessageHeaders: [
-          { name: 'Message-ID', value: '<fresh@example.com>' },
+        conversationIndex: Buffer.alloc(27).toString('base64'),
+        singleValueExtendedProperties: [
+          { id: draftOriginProperty, value: 'non_reply' },
         ],
       }),
     });
@@ -1272,10 +1282,32 @@ describe('provider-microsoft/update_draft Reply Metadata', () => {
   });
 
   it.each([
-    { isDraft: true, internetMessageHeaders: [] },
-    { isDraft: true, conversationId: 'conversation-3' },
-    { conversationId: 'conversation-3', internetMessageHeaders: [] },
-  ])('Scenario: Incomplete Graph metadata is indeterminate', async (metadata) => {
+    { bytes: 22, expected: 'non_reply' as const },
+    { bytes: 27, expected: 'reply' as const },
+  ])('Scenario: unstamped conversationIndex with $bytes bytes is $expected', async ({ bytes, expected }) => {
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValueOnce({
+        id: 'external-draft',
+        isDraft: true,
+        conversationIndex: Buffer.alloc(bytes, 0x5a).toString('base64url'),
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('external-draft')).resolves.toBe(expected);
+  });
+
+  it.each([
+    {
+      isDraft: true,
+      conversationId: 'conversation-3',
+      internetMessageHeaders: [],
+    },
+    { isDraft: true },
+    { isDraft: true, conversationIndex: 'not base64!' },
+    { isDraft: true, conversationIndex: 42 },
+    { isDraft: true, conversationIndex: Buffer.alloc(21).toString('base64') },
+  ])('Scenario: absent or invalid reply evidence is indeterminate', async (metadata) => {
     const client = createMockClient({
       get: vi.fn().mockResolvedValueOnce({ id: 'unknown-draft', ...metadata }),
     });
@@ -2339,10 +2371,15 @@ describe('provider-microsoft/Outbound Recipients', () => {
       toRecipients: Array<{ emailAddress: { address: string } }>;
       ccRecipients?: Array<{ emailAddress: { address: string; name?: string } }>;
       bccRecipients?: Array<{ emailAddress: { address: string } }>;
+      singleValueExtendedProperties: Array<{ id: string; value: string }>;
     };
     expect(msg.toRecipients.map(r => r.emailAddress.address)).toEqual(['alice@corp.com']);
     expect(msg.ccRecipients).toEqual([{ emailAddress: { address: 'carol@corp.com', name: 'Carol' } }]);
     expect(msg.bccRecipients).toEqual([{ emailAddress: { address: 'dave@corp.com', name: undefined } }]);
+    expect(msg.singleValueExtendedProperties).toContainEqual({
+      id: 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailDraftOrigin',
+      value: 'non_reply',
+    });
   });
 
   // Asserted against the real wire body, not the provider-level payload: the

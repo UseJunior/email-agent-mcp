@@ -113,6 +113,7 @@ class GraphAttachmentError extends Error {
 
 // Sent message tracking via custom extended property
 const TRACKING_PROPERTY = 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailTrackingId';
+const DRAFT_ORIGIN_PROPERTY = 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailDraftOrigin';
 const DEFERRED_SEND_PROPERTY = 'SystemTime 0x3FEF';
 
 const WELL_KNOWN_FOLDER_ALIASES: Record<string, string> = {
@@ -834,6 +835,9 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       toRecipients: toGraphRecipients(msg.to),
       ccRecipients: toGraphRecipients(msg.cc),
       bccRecipients: toGraphRecipients(msg.bcc),
+      singleValueExtendedProperties: [
+        { id: DRAFT_ORIGIN_PROPERTY, value: 'non_reply' },
+      ],
     };
     if (msg.attachments && msg.attachments.length > 0) {
       graphMsg.attachments = msg.attachments.map(toGraphFileAttachment);
@@ -1054,6 +1058,9 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
 
     const patch: Record<string, unknown> = {
       body: { contentType: 'HTML', content: truncateBody(merged) },
+      singleValueExtendedProperties: [
+        { id: DRAFT_ORIGIN_PROPERTY, value: 'reply' },
+      ],
     };
 
     const ccMerged = mergeRecipients(draftCc, opts?.cc ?? []);
@@ -1086,26 +1093,28 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
   }
 
   async getDraftReplyStatus(draftId: string): Promise<DraftReplyStatus> {
+    const propertyFilter = `$filter=id eq '${DRAFT_ORIGIN_PROPERTY}'`;
     const metadata = await this.client.get(
-      `${this.basePath}/messages/${encodeGraphPathId(draftId)}?$select=isDraft,conversationId,internetMessageHeaders`,
+      `${this.basePath}/messages/${encodeGraphPathId(draftId)}`
+      + `?$select=isDraft,conversationIndex`
+      + `&$expand=singleValueExtendedProperties(${propertyFilter})`,
     ) as unknown as GraphMessage;
 
-    if (
-      metadata.isDraft !== true
-      || typeof metadata.conversationId !== 'string'
-      || metadata.conversationId.trim().length === 0
-      || !Array.isArray(metadata.internetMessageHeaders)
-    ) {
+    if (metadata.isDraft !== true) return 'indeterminate';
+
+    const originStamp = metadata.singleValueExtendedProperties?.find(
+      property => property.id.toLowerCase() === DRAFT_ORIGIN_PROPERTY.toLowerCase(),
+    );
+    if (originStamp) {
+      if (originStamp.value === 'reply') return 'reply';
+      if (originStamp.value === 'non_reply') return 'non_reply';
       return 'indeterminate';
     }
 
-    const inReplyTo = metadata.internetMessageHeaders.find(
-      header => typeof header.name === 'string'
-        && header.name.toLowerCase() === 'in-reply-to',
-    );
-    if (!inReplyTo) return 'non_reply';
-    if (typeof inReplyTo.value !== 'string') return 'indeterminate';
-    return inReplyTo.value.trim().length > 0 ? 'reply' : 'indeterminate';
+    const conversationIndexBytes = decodeConversationIndex(metadata.conversationIndex);
+    if (conversationIndexBytes === undefined) return 'indeterminate';
+    if (conversationIndexBytes === 22) return 'non_reply';
+    return conversationIndexBytes > 22 ? 'reply' : 'indeterminate';
   }
 
   async updateDraft(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult> {
@@ -1511,6 +1520,25 @@ function findDeferredSendProperty(
   );
 }
 
+function decodeConversationIndex(value: unknown): number | undefined {
+  if (typeof value !== 'string' || value.length === 0 || value !== value.trim()) {
+    return undefined;
+  }
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(value)) return undefined;
+
+  const firstPadding = value.indexOf('=');
+  if (firstPadding >= 0 && value.length % 4 !== 0) return undefined;
+
+  const unpadded = value.replace(/=+$/, '');
+  if (unpadded.length % 4 === 1) return undefined;
+  const normalized = unpadded.replace(/-/g, '+').replace(/_/g, '/');
+
+  const decoded = Buffer.from(normalized, 'base64');
+  const canonical = decoded.toString('base64').replace(/=+$/, '');
+  if (canonical !== normalized) return undefined;
+  return decoded.length;
+}
+
 function scheduledDraftSendFailure(
   draftId: string,
   scheduledSendAt: string,
@@ -1566,6 +1594,7 @@ interface GraphMessage {
   uniqueBody?: { contentType: string; content: string };
   categories?: string[];
   conversationId?: string;
+  conversationIndex?: string;
   flag?: { flagStatus?: string };
   internetMessageId?: string;
   internetMessageHeaders?: Array<{ name: string; value: string }>;

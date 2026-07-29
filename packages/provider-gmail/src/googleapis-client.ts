@@ -193,6 +193,21 @@ export class GoogleapisGmailClient implements GmailApiClient {
     }
   }
 
+  async getDraft(draftId: string): Promise<{ id: string; message: GmailMessage }> {
+    const response = await this.api.users.drafts.get({
+      userId: 'me',
+      id: draftId,
+      format: 'full',
+    });
+    if (!response.data?.id || !response.data.message?.id || !response.data.message.threadId) {
+      throw new Error('Gmail API drafts.get returned an incomplete draft payload');
+    }
+    return {
+      id: response.data.id,
+      message: response.data.message,
+    };
+  }
+
   async getAttachment(messageId: string, attachmentId: string): Promise<{ data?: string; size?: number }> {
     const response = await this.api.users.messages.attachments.get({
       userId: 'me',

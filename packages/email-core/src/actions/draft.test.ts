@@ -742,6 +742,24 @@ describe('email-write/Authored-Only Reply Draft Preview', () => {
     expect(providerWrite).not.toHaveBeenCalled();
   });
 
+  it('Scenario: Draft preview prefers a provider draft-resource read', async () => {
+    const getMessage = vi.fn();
+    const getDraft = vi.fn().mockResolvedValue(persistedDraft({
+      id: 'backing-message-1',
+      subject: 'Persisted Gmail draft',
+    }));
+
+    const result = await buildDraftPreview(
+      { getMessage, getDraft },
+      'draft-resource-1',
+      { retryDelayMs: 0 },
+    );
+
+    expect(result.preview?.subject).toBe('Persisted Gmail draft');
+    expect(getDraft).toHaveBeenCalledWith('draft-resource-1');
+    expect(getMessage).not.toHaveBeenCalled();
+  });
+
   it('Scenario: Gmail and fresh drafts are unaffected', async () => {
     const freshHtml = '<html><body><p>Fresh draft</p><hr><p>Authored horizontal rule tail</p></body></html>';
     vi.spyOn(provider, 'getMessage').mockResolvedValueOnce(persistedDraft({

@@ -34,6 +34,7 @@ const SUBJECT_MAX_LENGTH = 255;
 export interface GmailApiClient {
   listMessages(opts: { labelIds?: string[]; maxResults?: number; q?: string }): Promise<{ messages?: Array<{ id: string; threadId: string }>; resultSizeEstimate?: number }>;
   getMessage(id: string): Promise<GmailMessage>;
+  getDraft(draftId: string): Promise<{ id: string; message: GmailMessage }>;
   getAttachment(messageId: string, attachmentId: string): Promise<{ data?: string; size?: number }>;
   /**
    * Send a raw RFC 2822 message. Optional `threadId` routes the send into
@@ -111,6 +112,11 @@ export class GmailEmailProvider {
   async getMessage(id: string): Promise<EmailMessage> {
     const msg = await this.client.getMessage(id);
     return mapGmailMessage(msg);
+  }
+
+  async getDraft(draftId: string): Promise<EmailMessage> {
+    const draft = await this.client.getDraft(draftId);
+    return mapGmailMessage(draft.message);
   }
 
   async searchMessages(query: string, _folder?: string, limit?: number, offset?: number): Promise<EmailMessage[]> {
@@ -293,7 +299,7 @@ export class GmailEmailProvider {
       // current draft, merge the partial over it, and re-upload. Preserve
       // threading headers from the original draft so edits don't silently
       // lose thread association.
-      const current = await this.getMessage(draftId);
+      const current = await this.getDraft(draftId);
 
       // Attachments: drafts.update is a full replacement, so an omitted
       // `attachments` field must be rehydrated from the existing draft or it
@@ -359,7 +365,7 @@ export class GmailEmailProvider {
   }
 
   async getDraftReplyStatus(draftId: string): Promise<DraftReplyStatus> {
-    const draft = await this.getMessage(draftId);
+    const draft = await this.getDraft(draftId);
     if (draft.isDraft !== true) return 'indeterminate';
     return draft.inReplyTo && draft.inReplyTo.trim().length > 0 ? 'reply' : 'non_reply';
   }

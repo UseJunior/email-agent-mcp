@@ -462,10 +462,9 @@ export const updateDraftAction: EmailAction<
 
     try {
       const result = await ctx.provider.updateDraft(input.draft_id, partial);
-      // Note: Gmail's updateDraft already does an internal getMessage to merge
-      // partial updates, so this read-back is a second redundant GET on Gmail.
-      // Acceptable for v1 — see buildDraftPreview docs for the optimization
-      // path (provider returning the persisted draft directly).
+      // Read the persisted draft back for the preview. Providers whose draft
+      // resources have distinct identifiers (Gmail) use their draft-specific
+      // read path through buildDraftPreview.
       const previewResult = result.success && result.draftId
         ? await buildDraftPreview(ctx.provider, result.draftId, {
           authoredOnly: !input.include_quoted,
