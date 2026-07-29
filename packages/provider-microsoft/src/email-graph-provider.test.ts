@@ -1234,56 +1234,59 @@ describe('provider-microsoft/Graph Scheduled Send Inspection and Cancellation', 
   });
 });
 
-describe('provider-microsoft/update_draft Quote Preservation', () => {
-  // Compose the realistic "post-prepareReplyDraft" fixture by simulating the
-  // create-path: caller fragment inserted by the same merge logic the production
-  // code uses. Round-trips through the merge helper so the fixture stays in sync
-  // with the splice anatomy if either side changes.
-  function replyDraftWith(callerFragment: string): string {
-    const bodyOpenEnd = QUOTED_REPLY_BODY.match(/<body[^>]*>/i);
-    if (!bodyOpenEnd || bodyOpenEnd.index === undefined) {
-      throw new Error('QUOTED_REPLY_BODY fixture missing <body> tag');
-    }
-    const idx = bodyOpenEnd.index + bodyOpenEnd[0].length;
-    return QUOTED_REPLY_BODY.slice(0, idx) + callerFragment + QUOTED_REPLY_BODY.slice(idx);
-  }
-
+describe('provider-microsoft/update_draft Reply Metadata', () => {
   it('Scenario: update_draft preserves Graph auto-quoted thread', async () => {
-    const replyDraftBody = replyDraftWith('<div>Old caller content</div>');
     const client = createMockClient({
       get: vi.fn().mockResolvedValueOnce({
-        id: 'draft-update-1',
-        body: { contentType: 'html', content: replyDraftBody },
+        id: 'reply-draft',
+        isDraft: true,
+        conversationId: 'conversation-1',
+        internetMessageHeaders: [
+          { name: 'In-Reply-To', value: '<original@example.com>' },
+        ],
       }),
-      patch: vi.fn().mockResolvedValueOnce({}),
     });
     const provider = new GraphEmailProvider(client);
 
-    const result = await provider.updateDraft('draft-update-1', { body: 'Updated reply text' });
-
-    expect(result.success).toBe(true);
-    // Narrowed GET — only the body field is fetched
-    expect(client.get).toHaveBeenCalledWith(expect.stringContaining('$select=body'));
-    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
-    const patchBody = (patchArgs[1] as { body: { contentType: string; content: string } }).body;
-    expect(patchBody.contentType).toBe('HTML');
-    expect(patchBody.content).toContain('Updated reply text');
-    expect(patchBody.content).not.toContain('Old caller content');
-    // Quoted thread preserved (divider, header block, prior message body)
-    expect(patchBody.content).toContain('divRplyFwdMsg');
-    expect(patchBody.content).toContain('From:</b> Alice');
-    expect(patchBody.content).toContain('Original message content');
+    await expect(provider.getDraftReplyStatus('reply-draft')).resolves.toBe('reply');
+    expect(client.get).toHaveBeenCalledWith(expect.stringContaining(
+      '$select=isDraft,conversationId,internetMessageHeaders',
+    ));
+    expect(client.patch).not.toHaveBeenCalled();
   });
 
-  it('Scenario: update_draft does not mistake an authored horizontal rule for the Graph boundary', async () => {
-    const replyDraftBody = replyDraftWith(
-      '<div>Old authored start<hr><p>Old authored tail</p></div>',
-    );
+  it('Scenario: A fresh draft is identified when metadata has no in-reply-to relationship', async () => {
     const client = createMockClient({
       get: vi.fn().mockResolvedValueOnce({
-        id: 'draft-update-authored-hr',
-        body: { contentType: 'html', content: replyDraftBody },
+        id: 'fresh-draft',
+        isDraft: true,
+        conversationId: 'conversation-2',
+        internetMessageHeaders: [
+          { name: 'Message-ID', value: '<fresh@example.com>' },
+        ],
       }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('fresh-draft')).resolves.toBe('non_reply');
+  });
+
+  it.each([
+    { isDraft: true, internetMessageHeaders: [] },
+    { isDraft: true, conversationId: 'conversation-3' },
+    { conversationId: 'conversation-3', internetMessageHeaders: [] },
+  ])('Scenario: Incomplete Graph metadata is indeterminate', async (metadata) => {
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValueOnce({ id: 'unknown-draft', ...metadata }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('unknown-draft')).resolves.toBe('indeterminate');
+  });
+
+  it('Scenario: update_draft on a fresh draft replaces body wholesale', async () => {
+    const client = createMockClient({
+      get: vi.fn(),
       patch: vi.fn().mockResolvedValueOnce({}),
     });
     const provider = new GraphEmailProvider(client);
@@ -1292,35 +1295,13 @@ describe('provider-microsoft/update_draft Quote Preservation', () => {
       bodyHtml: '<div>Replacement authored body<hr><p>Replacement tail</p></div>',
     });
 
-    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
-    const patchBody = (patchArgs[1] as { body: { content: string } }).body;
-    expect(patchBody.content).toContain('Replacement authored body');
-    expect(patchBody.content).toContain('Replacement tail');
-    expect(patchBody.content).not.toContain('Old authored start');
-    expect(patchBody.content).not.toContain('Old authored tail');
-    expect(patchBody.content).toContain('divRplyFwdMsg');
-    expect(patchBody.content).toContain('Original message content');
-  });
-
-  it('Scenario: update_draft on a fresh draft replaces body wholesale', async () => {
-    // No <hr> after <body> → no recognizable Graph reply anatomy → fall through to buildGraphBody
-    const FRESH_DRAFT_BODY = '<html><body><div>Old fresh content</div></body></html>';
-    const client = createMockClient({
-      get: vi.fn().mockResolvedValueOnce({
-        id: 'draft-update-2',
-        body: { contentType: 'html', content: FRESH_DRAFT_BODY },
-      }),
-      patch: vi.fn().mockResolvedValueOnce({}),
-    });
-    const provider = new GraphEmailProvider(client);
-
-    await provider.updateDraft('draft-update-2', { body: 'New body' });
-
+    expect(client.get).not.toHaveBeenCalled();
     const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
     const patchBody = (patchArgs[1] as { body: { contentType: string; content: string } }).body;
-    expect(patchBody.contentType).toBe('Text');
-    expect(patchBody.content).toBe('New body');
-    expect(patchBody.content).not.toContain('Old fresh content');
+    expect(patchBody).toEqual({
+      contentType: 'HTML',
+      content: '<div>Replacement authored body<hr><p>Replacement tail</p></div>',
+    });
   });
 });
 

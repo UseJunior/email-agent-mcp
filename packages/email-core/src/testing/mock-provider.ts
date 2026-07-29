@@ -22,11 +22,13 @@ import {
   type EmailAttachmentHandler,
   type EmailScheduledSender,
   type DownloadedAttachment,
+  type DraftReplyStatus,
 } from '../providers/provider.js';
 
 export class MockEmailProvider implements EmailReader, EmailSender, EmailScheduledSender, EmailSubscriber, EmailCategorizer, EmailAttachmentHandler {
   private messages: EmailMessage[] = [];
   private drafts: Map<string, ComposeMessage> = new Map();
+  private replyDraftIds: Set<string> = new Set();
   private sentMessages: ComposeMessage[] = [];
   private scheduledSends: ScheduledSend[] = [];
   private subscriptions: Map<string, (msg: EmailMessage) => void> = new Map();
@@ -259,6 +261,7 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSchedul
       throw new ProviderError('DRAFT_NOT_FOUND', `Draft not found: ${draftId}`, 'mock', false);
     }
     this.drafts.delete(draftId);
+    this.replyDraftIds.delete(draftId);
     this.sentMessages.push(draft);
     return { success: true, messageId: `sent-${this.nextId++}` };
   }
@@ -324,7 +327,14 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSchedul
       bodyHtml: opts?.bodyHtml,
       attachments: opts?.attachments,
     });
+    this.replyDraftIds.add(draftId);
     return { success: true, draftId };
+  }
+
+  async getDraftReplyStatus(draftId: string): Promise<DraftReplyStatus> {
+    this.maybeThrow();
+    if (!this.drafts.has(draftId)) return 'indeterminate';
+    return this.replyDraftIds.has(draftId) ? 'reply' : 'non_reply';
   }
 
   async updateDraft(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult> {

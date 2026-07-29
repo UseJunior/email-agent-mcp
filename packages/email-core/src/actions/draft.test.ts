@@ -246,22 +246,160 @@ describe('email-write/Send Draft', () => {
 });
 
 describe('email-write/Update Draft', () => {
-  it('Scenario: Update draft body', async () => {
+  it('Scenario: Body edit on a non-reply draft requires explicit opt-in', async () => {
     const draftResult = await createDraftAction.run(ctx, {
       to: 'alice@allowed.com',
       subject: 'Original Subject',
       body: 'Original body',
     });
 
-    const result = await updateDraftAction.run(ctx, {
+    const refused = await updateDraftAction.run(ctx, {
       draft_id: draftResult.draftId!,
       body: 'Updated body',
     });
 
+    expect(refused.success).toBe(false);
+    expect(refused.error).toMatchObject({
+      code: 'DRAFT_BODY_REPLACE_CONFIRMATION_REQUIRED',
+      recoverable: true,
+    });
+    expect(refused.error!.message).toContain('replace_body: true');
+
+    const result = await updateDraftAction.run(ctx, {
+      draft_id: draftResult.draftId!,
+      body: 'Updated body',
+      replace_body: true,
+    });
+
     expect(result.success).toBe(true);
+    expect(result).not.toHaveProperty('warnings');
     const drafts = provider.getDrafts();
     const draft = drafts.get(draftResult.draftId!)!;
     expect(draft.body).toBe('Updated body');
+  });
+
+  it('Scenario: An authored horizontal rule does not accumulate stacked copies', async () => {
+    const created = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Horizontal rule',
+      body: 'Old start\n\n---\n\nOld tail',
+    });
+
+    const result = await updateDraftAction.run(ctx, {
+      draft_id: created.draftId!,
+      body: 'Replacement start\n\n---\n\nReplacement tail',
+      replace_body: true,
+    });
+
+    expect(result.success).toBe(true);
+    const draft = provider.getDrafts().get(created.draftId!)!;
+    expect(draft.body).toBe('Replacement start\n\n---\n\nReplacement tail');
+    expect(draft.body).not.toContain('Old start');
+    expect(draft.body).not.toContain('Old tail');
+    expect(draft.bodyHtml).toContain('<hr>');
+  });
+
+  it.each([
+    '<html><body><div>Reply</div><hr><div id="m_123divRplyFwdMsg">Quoted Gmail history</div></body></html>',
+    '<html><body><div>Reply</div><div id="mail-editor-reference-message-container"><div class="ms-outlook-mobile-reference-message">Quoted mobile history</div></div></body></html>',
+  ])('Scenario: A prefixed or absent boundary marker does not destroy quoted history', async (replyBody) => {
+    provider.addMessage({
+      id: 'original-for-boundary',
+      subject: 'Original',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+    const created = await createDraftAction.run(ctx, {
+      to: 'partner@allowed.com',
+      subject: 'Re: Original',
+      body: replyBody,
+      format: 'html',
+      force_black: false,
+      reply_to: 'original-for-boundary',
+    });
+    const before = provider.getDrafts().get(created.draftId!)!;
+    const updateSpy = vi.spyOn(provider, 'updateDraft');
+
+    const result = await updateDraftAction.run(ctx, {
+      draft_id: created.draftId!,
+      body: '<div>Replacement</div>',
+      format: 'html',
+      force_black: false,
+      replace_body: true,
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      error: {
+        code: 'REPLY_DRAFT_BODY_IMMUTABLE',
+        recoverable: true,
+      },
+    });
+    expect(result.error!.message).toContain('Create a new draft');
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(provider.getDrafts().get(created.draftId!)!.bodyHtml).toBe(before.bodyHtml);
+  });
+
+  it('Scenario: Indeterminate reply status fails closed', async () => {
+    const created = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Unknown origin',
+      body: 'Original',
+    });
+    vi.spyOn(provider, 'getDraftReplyStatus').mockResolvedValueOnce('indeterminate');
+    const updateSpy = vi.spyOn(provider, 'updateDraft');
+
+    const result = await updateDraftAction.run(ctx, {
+      draft_id: created.draftId!,
+      body: 'Replacement',
+      replace_body: true,
+    });
+
+    expect(result.error?.code).toBe('REPLY_DRAFT_BODY_IMMUTABLE');
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(provider.getDrafts().get(created.draftId!)!.body).toBe('Original');
+  });
+
+  it('Scenario: Non-body fields remain editable on a reply draft', async () => {
+    await writeFile(join(testDir, 'reply-attachment.txt'), 'attachment');
+    provider.addMessage({
+      id: 'original-for-fields',
+      subject: 'Original',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+    const created = await createDraftAction.run(ctx, {
+      to: 'partner@allowed.com',
+      subject: 'Re: Original',
+      body: 'Reply body with quoted history',
+      reply_to: 'original-for-fields',
+    });
+
+    const result = await updateDraftAction.run(ctx, {
+      draft_id: created.draftId!,
+      subject: 'Superseded reply',
+      to: 'new-to@allowed.com',
+      cc: ['new-cc@allowed.com'],
+      attachments: [{ path: 'reply-attachment.txt' }],
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.warnings).toEqual([{
+      code: 'REPLY_SUBJECT_THREADING_WARNING',
+      message: expect.stringContaining('may break threading'),
+    }]);
+    const draft = provider.getDrafts().get(created.draftId!)!;
+    expect(draft.subject).toBe('Superseded reply');
+    expect(draft.to).toEqual([{ email: 'new-to@allowed.com', name: undefined }]);
+    expect(draft.cc).toEqual([{ email: 'new-cc@allowed.com', name: undefined }]);
+    expect(draft.attachments?.[0]?.filename).toBe('reply-attachment.txt');
+    expect(draft.body).toBe('Reply body with quoted history');
   });
 
   it('Scenario: Update draft recipients to blocked address succeeds (drafts bypass allowlist)', async () => {
@@ -280,6 +418,23 @@ describe('email-write/Update Draft', () => {
     const drafts = provider.getDrafts();
     const draft = drafts.get(draftResult.draftId!)!;
     expect(draft.to[0]!.email).toBe('hacker@evil.com');
+  });
+
+  it('update_draft permits subject changes on a non-reply draft without a warning', async () => {
+    const created = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Original',
+      body: 'Body',
+    });
+
+    const result = await updateDraftAction.run(ctx, {
+      draft_id: created.draftId!,
+      subject: 'Re: Retitled draft',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result).not.toHaveProperty('warnings');
+    expect(provider.getDrafts().get(created.draftId!)!.subject).toBe('Re: Retitled draft');
   });
 
   it('Scenario: Provider lacks updateDraft', async () => {
@@ -314,6 +469,7 @@ describe('email-write/Body Rendering', () => {
     const updated = await updateDraftAction.run(ctx, {
       draft_id: created.draftId!,
       body: '## Updated',
+      replace_body: true,
     });
 
     expect(updated.success).toBe(true);
@@ -633,6 +789,7 @@ describe('email-write/Authored-Only Reply Draft Preview', () => {
     const result = await updateDraftAction.run(ctx, {
       draft_id: created.draftId!,
       body: 'Updated reply',
+      replace_body: true,
     });
 
     expect(updateSpy).toHaveBeenCalledTimes(1);
@@ -877,6 +1034,7 @@ describe('email-write/Draft Preview (issue #75)', () => {
       draft_id: created.draftId!,
       subject: 'Updated',
       body: 'New body',
+      replace_body: true,
     });
 
     expect(result.success).toBe(true);
@@ -928,6 +1086,7 @@ describe('email-write/Draft Preview (issue #75)', () => {
     const result = await updateDraftAction.run(ctx, {
       draft_id: created.draftId!,
       body: 'Updated',
+      replace_body: true,
     });
 
     expect(result.success).toBe(true);

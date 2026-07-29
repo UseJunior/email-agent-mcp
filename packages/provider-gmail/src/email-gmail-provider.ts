@@ -12,6 +12,7 @@ import type {
   ReplyOptions,
   DownloadedAttachment,
   OutboundAttachment,
+  DraftReplyStatus,
 } from '@usejunior/email-core';
 import { AttachmentNotFoundError } from '@usejunior/email-core';
 
@@ -355,6 +356,12 @@ export class GmailEmailProvider {
         },
       };
     }
+  }
+
+  async getDraftReplyStatus(draftId: string): Promise<DraftReplyStatus> {
+    const draft = await this.getMessage(draftId);
+    if (draft.isDraft !== true) return 'indeterminate';
+    return draft.inReplyTo && draft.inReplyTo.trim().length > 0 ? 'reply' : 'non_reply';
   }
 
   // NemoClaw egress domains

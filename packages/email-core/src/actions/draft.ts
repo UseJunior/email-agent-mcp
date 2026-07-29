@@ -32,6 +32,10 @@ const DraftOutput = z.object({
   draftId: z.string().optional(),
   preview: DraftPreviewSchema.optional(),
   previewError: PreviewErrorSchema.optional(),
+  warnings: z.array(z.object({
+    code: z.string(),
+    message: z.string(),
+  })).optional(),
   error: z.object({
     code: z.string(),
     message: z.string(),
@@ -330,6 +334,8 @@ const UpdateDraftInput = z.object({
   subject: z.string().optional(),
   body: z.string().optional(),
   body_file: z.string().optional(),
+  replace_body: z.boolean().optional()
+    .describe('Required as true to replace the body of a non-reply draft wholesale. Reply draft bodies cannot be edited; create a new draft instead.'),
   include_quoted: z.boolean().optional().default(false)
     .describe('Include provider-assembled quoted history in preview.bodyHtml. This affects only the preview, never the stored or sent body.'),
   mailbox: z.string().optional(),
@@ -346,7 +352,7 @@ export const updateDraftAction: EmailAction<
   z.infer<typeof DraftOutput>
 > = {
   name: 'update_draft',
-  description: 'Update a draft email. Allowlist is enforced at send_draft time, not here.',
+  description: 'Update a draft email. Body edits are refused for reply drafts; non-reply body edits require replace_body=true and replace the body wholesale. Subject, recipients, and attachments remain editable. Allowlist is enforced at send_draft time, not here.',
   input: UpdateDraftInput,
   output: DraftOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -373,16 +379,46 @@ export const updateDraftAction: EmailAction<
 
     const { to, cc, subject, format, forceBlack } = fields;
     let { body } = fields;
+    const hasBodyEdit = input.body !== undefined || input.body_file !== undefined;
 
-    // Drafts bypass allowlist — enforcement happens at send_draft time
-
-    // Re: threading guardrail on subject if changed
-    if (subject) {
-      const threadingError = checkReplyThreading(subject);
-      if (threadingError) {
-        return { success: false, error: threadingError };
+    // Reply status is provider metadata, never inferred from body content. Only
+    // body and subject changes need it: recipient/attachment-only updates must
+    // remain editable even if metadata lookup is unavailable.
+    let isReplyDraft = false;
+    if (hasBodyEdit || subject !== undefined) {
+      try {
+        const status = await ctx.provider.getDraftReplyStatus?.(input.draft_id);
+        isReplyDraft = status !== 'non_reply';
+      } catch {
+        // Fail closed. An unavailable or failed determination must never make a
+        // destructive body replacement look safe.
+        isReplyDraft = true;
       }
     }
+
+    if (hasBodyEdit && isReplyDraft) {
+      return {
+        success: false,
+        error: {
+          code: 'REPLY_DRAFT_BODY_IMMUTABLE',
+          message: 'The body of a reply draft cannot be edited safely because its quoted history must be preserved. Create a new draft instead.',
+          recoverable: true,
+        },
+      };
+    }
+
+    if (hasBodyEdit && input.replace_body !== true) {
+      return {
+        success: false,
+        error: {
+          code: 'DRAFT_BODY_REPLACE_CONFIRMATION_REQUIRED',
+          message: 'Replacing a non-reply draft body is destructive. Pass replace_body: true to replace it wholesale.',
+          recoverable: true,
+        },
+      };
+    }
+
+    // Drafts bypass allowlist — enforcement happens at send_draft time
 
     // Build partial update — parse name-address strings only for fields the caller actually provided.
     const partial: Partial<import('../types.js').ComposeMessage> = {};
@@ -409,7 +445,7 @@ export const updateDraftAction: EmailAction<
       partial.attachments = attResult.files!;
     }
 
-    if (body) {
+    if (hasBodyEdit) {
       const rendered = renderEmailBody(body, { format, forceBlack });
       let outBody = rendered.body;
       let outBodyHtml = rendered.bodyHtml;
@@ -439,6 +475,12 @@ export const updateDraftAction: EmailAction<
         success: result.success,
         draftId: result.draftId,
         ...previewResult,
+        ...(result.success && subject !== undefined && isReplyDraft
+          ? { warnings: [{
+            code: 'REPLY_SUBJECT_THREADING_WARNING',
+            message: 'Changing a reply draft subject may break threading in clients that group messages by subject.',
+          }] }
+          : {}),
         error: result.error ? { code: result.error.code, message: result.error.message, recoverable: result.error.recoverable } : undefined,
       };
     } catch (err) {

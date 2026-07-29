@@ -24,6 +24,7 @@ import type {
   ScheduledSend,
   ScheduledSendResult,
   EmailScheduledSender,
+  DraftReplyStatus,
 } from '@usejunior/email-core';
 import { AttachmentNotSupportedError, AttachmentNotFoundError, ProviderError } from '@usejunior/email-core';
 
@@ -1084,34 +1085,36 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
     return draft.id;
   }
 
+  async getDraftReplyStatus(draftId: string): Promise<DraftReplyStatus> {
+    const metadata = await this.client.get(
+      `${this.basePath}/messages/${encodeGraphPathId(draftId)}?$select=isDraft,conversationId,internetMessageHeaders`,
+    ) as unknown as GraphMessage;
+
+    if (
+      metadata.isDraft !== true
+      || typeof metadata.conversationId !== 'string'
+      || metadata.conversationId.trim().length === 0
+      || !Array.isArray(metadata.internetMessageHeaders)
+    ) {
+      return 'indeterminate';
+    }
+
+    const inReplyTo = metadata.internetMessageHeaders.find(
+      header => typeof header.name === 'string'
+        && header.name.toLowerCase() === 'in-reply-to',
+    );
+    if (!inReplyTo) return 'non_reply';
+    if (typeof inReplyTo.value !== 'string') return 'indeterminate';
+    return inReplyTo.value.trim().length > 0 ? 'reply' : 'indeterminate';
+  }
+
   async updateDraft(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult> {
     const patch: Record<string, unknown> = {};
     if (msg.body !== undefined || msg.bodyHtml !== undefined) {
-      // For reply drafts, GET the existing body so we can preserve Graph's auto-quoted
-      // thread (divider + From/Sent/To/Subject + prior message). Replacing the body
-      // wholesale via PATCH would drop the quoted history that prepareReplyDraft set up.
-      // For non-reply drafts (no quoted-thread anatomy), this falls through to the
-      // normal buildGraphBody path so behavior is unchanged.
-      // $select=body narrows the response — we only need the body field here.
-      const current = await this.client.get(
-        `${this.basePath}/messages/${encodeGraphPathId(draftId)}?$select=body`,
-      );
-      const currentBody = current.body as { contentType?: string; content?: string } | undefined;
-      const currentContent = typeof currentBody?.content === 'string' ? currentBody.content : '';
-      const currentIsHtml = currentBody?.contentType?.toLowerCase() === 'html';
-      const region = currentIsHtml ? findGraphQuotedReplyRegion(currentContent) : null;
-
-      if (region) {
-        const callerFragment = msg.bodyHtml !== undefined
-          ? stripHtmlBodyWrappers(msg.bodyHtml)
-          : wrapPlainTextAsHtml(msg.body ?? '');
-        const merged = currentContent.slice(0, region.bodyOpenEnd)
-          + callerFragment
-          + currentContent.slice(region.dividerStart);
-        patch.body = { contentType: 'HTML', content: truncateBody(merged) };
-      } else {
-        patch.body = buildGraphBody(msg.bodyHtml, msg.body ?? '');
-      }
+      // update_draft admits body writes only for provider-confirmed non-reply
+      // drafts with explicit caller opt-in. Graph PATCH replaces that body
+      // wholesale; no quoted-history boundary inspection belongs here.
+      patch.body = buildGraphBody(msg.bodyHtml, msg.body ?? '');
     }
     if (msg.subject !== undefined) patch.subject = msg.subject.slice(0, SUBJECT_MAX_LENGTH);
     // An omitted list leaves the draft's existing recipients untouched (Graph

@@ -26,8 +26,11 @@ export interface EmailSender {
   createDraft(msg: ComposeMessage): Promise<DraftResult>;
   sendDraft(draftId: string): Promise<SendResult>;
   createReplyDraft?(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult>;
+  getDraftReplyStatus?(draftId: string): Promise<DraftReplyStatus>;
   updateDraft?(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult>;
 }
+
+export type DraftReplyStatus = 'reply' | 'non_reply' | 'indeterminate';
 
 export interface EmailScheduledSender {
   scheduleMessage(msg: ComposeMessage, scheduledSendAt: string): Promise<ScheduledSendResult>;
