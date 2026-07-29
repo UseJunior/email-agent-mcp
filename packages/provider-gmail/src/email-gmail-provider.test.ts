@@ -1208,6 +1208,45 @@ describe('provider-gmail/Update Draft', () => {
       .resolves.toBe('indeterminate');
   });
 
+  it('Scenario: conflicting duplicate origin headers are indeterminate', async () => {
+    // Codex round 3: a forged non_reply stamp alongside a genuine reply header
+    // must not be resolvable by header order.
+    const backingMessage = draftMessageMock();
+    backingMessage.payload.headers = [
+      ...backingMessage.payload.headers,
+      { name: 'X-Agent-Draft-Origin', value: 'non_reply' },
+      { name: 'X-Agent-Draft-Origin', value: 'reply' },
+    ];
+    const client = createMockGmailClient({
+      getDraft: vi.fn().mockResolvedValue({
+        id: 'draft-resource-conflicted',
+        message: backingMessage,
+      }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('draft-resource-conflicted'))
+      .resolves.toBe('indeterminate');
+  });
+
+  it('Scenario: unrecognised origin header value is indeterminate', async () => {
+    const backingMessage = draftMessageMock();
+    backingMessage.payload.headers = [
+      ...backingMessage.payload.headers.filter(header => header.name !== 'In-Reply-To'),
+      { name: 'X-Agent-Draft-Origin', value: 'whatever' },
+    ];
+    const client = createMockGmailClient({
+      getDraft: vi.fn().mockResolvedValue({
+        id: 'draft-resource-bogus',
+        message: backingMessage,
+      }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('draft-resource-bogus'))
+      .resolves.toBe('indeterminate');
+  });
+
   it('Scenario: stamped fresh draft is non-reply', async () => {
     const backingMessage = draftMessageMock();
     backingMessage.payload.headers = [

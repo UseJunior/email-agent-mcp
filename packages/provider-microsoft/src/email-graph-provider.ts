@@ -1103,12 +1103,18 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
 
     if (metadata.isDraft !== true) return 'indeterminate';
 
-    const originStamp = metadata.singleValueExtendedProperties?.find(
+    // Duplicate stamps are ambiguous: taking the first match would make the
+    // answer depend on the order Graph returns the collection. Only a single,
+    // unanimous stamp is authoritative.
+    const originStamps = (metadata.singleValueExtendedProperties ?? []).filter(
       property => property.id.toLowerCase() === DRAFT_ORIGIN_PROPERTY.toLowerCase(),
     );
-    if (originStamp) {
-      if (originStamp.value === 'reply') return 'reply';
-      if (originStamp.value === 'non_reply') return 'non_reply';
+    if (originStamps.length > 0) {
+      const values = originStamps.map(property => property.value);
+      const unanimous = values.every(value => value === values[0]);
+      if (!unanimous) return 'indeterminate';
+      if (values[0] === 'reply') return 'reply';
+      if (values[0] === 'non_reply') return 'non_reply';
       return 'indeterminate';
     }
 

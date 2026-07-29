@@ -1246,6 +1246,40 @@ describe('provider-microsoft/Graph Scheduled Send Inspection and Cancellation', 
 describe('provider-microsoft/update_draft Reply Metadata', () => {
   const draftOriginProperty = 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailDraftOrigin';
 
+  it('Scenario: conflicting duplicate origin stamps are indeterminate', async () => {
+    // A forged or colliding second stamp must not be resolvable by read order.
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValueOnce({
+        id: 'double-stamped',
+        isDraft: true,
+        conversationIndex: Buffer.alloc(27).toString('base64'),
+        singleValueExtendedProperties: [
+          { id: draftOriginProperty, value: 'non_reply' },
+          { id: draftOriginProperty, value: 'reply' },
+        ],
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('double-stamped')).resolves.toBe('indeterminate');
+  });
+
+  it('Scenario: duplicate but unanimous origin stamps still resolve', async () => {
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValueOnce({
+        id: 'twice-stamped',
+        isDraft: true,
+        singleValueExtendedProperties: [
+          { id: draftOriginProperty, value: 'non_reply' },
+          { id: draftOriginProperty, value: 'non_reply' },
+        ],
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('twice-stamped')).resolves.toBe('non_reply');
+  });
+
   it('Scenario: update_draft preserves Graph auto-quoted thread', async () => {
     const client = createMockClient({
       get: vi.fn().mockResolvedValueOnce({

@@ -26,3 +26,13 @@ This is deliberately asymmetric with the body rule. A subject change is visible 
 
 - **Detection false-negatives.** If a reply draft is not recognised as one, `replace_body: true` would permit a wholesale replace that destroys quoted history. Detection must fail *closed*: when the reply status cannot be determined, treat the draft as a reply and refuse the body edit.
 - **Breaking existing callers.** Any caller currently passing `body` to `update_draft` on a reply draft will now get an error. This is intended; both previous outcomes were silent corruption.
+
+## Accepted risk: the origin stamp proves a value, not authorship
+
+Peer review observed that neither stamp is cryptographically bound to this application. Any client with draft-write access to the mailbox can set the Gmail `X-Agent-Draft-Origin` header or the Graph extended property, so a forged `non_reply` on a genuine reply draft would permit a destructive replacement.
+
+This is accepted rather than mitigated. An actor able to write that stamp already holds write access to the draft and can replace or delete its body directly; routing the same damage through this tool grants no additional capability, so there is no privilege escalation to defend against. The alternative — an authenticated, draft-bound stamp — introduces secret management, rotation, and cross-installation key distribution to defend against an adversary who already has the power in question.
+
+The realistic failure is collision rather than attack: another benign tool using the same marker name. A namespaced property identifier and a vendor-prefixed header make that unlikely, and a conflicting or duplicated stamp resolves to `indeterminate` rather than to whichever value happens to be read first.
+
+Revisit if the threat model changes — specifically if drafts ever become writable by a principal that is not already trusted with the mailbox.

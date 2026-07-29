@@ -377,9 +377,16 @@ export class GmailEmailProvider {
     const draft = mapGmailMessage(draftResource.message);
     if (draft.isDraft !== true) return 'indeterminate';
 
-    const originStamp = getHeader(draftResource.message, DRAFT_ORIGIN_HEADER);
-    if (originStamp !== undefined) {
-      return getRecognizedDraftOrigin(originStamp) ?? 'indeterminate';
+    // Duplicate stamps are ambiguous: a draft carrying two conflicting origin
+    // headers gives no basis to pick one, and taking the first match would make
+    // the answer depend on header ordering. Only a single, unanimous stamp is
+    // authoritative; anything else falls through to indeterminate, which
+    // refuses the edit.
+    const originStamps = getHeaders(draftResource.message, DRAFT_ORIGIN_HEADER);
+    if (originStamps.length > 0) {
+      const recognized = originStamps.map(getRecognizedDraftOrigin);
+      const unanimous = recognized.every(value => value !== undefined && value === recognized[0]);
+      return unanimous ? recognized[0]! : 'indeterminate';
     }
 
     return draft.inReplyTo && draft.inReplyTo.trim().length > 0 ? 'reply' : 'indeterminate';
@@ -393,6 +400,12 @@ export class GmailEmailProvider {
 
 function getHeader(msg: GmailMessage, name: string): string | undefined {
   return msg.payload?.headers?.find(h => h.name.toLowerCase() === name.toLowerCase())?.value;
+}
+
+function getHeaders(msg: GmailMessage, name: string): string[] {
+  return (msg.payload?.headers ?? [])
+    .filter(h => h.name.toLowerCase() === name.toLowerCase())
+    .map(h => h.value);
 }
 
 function getRecognizedDraftOrigin(value: string | undefined): DraftOrigin | undefined {
