@@ -215,6 +215,12 @@ white-on-white.
 instead of `body`. A `.md` body file may
 open with a YAML frontmatter block:
 
+For `update_draft`, `body` and `body_file` are permitted only on a non-reply
+draft and require `replace_body: true`; the stored body is then replaced
+wholesale. Reply draft bodies cannot be edited safely because they include
+provider-assembled quoted history, so create a new draft instead. Subject,
+recipient, and attachment updates remain available on reply drafts.
+
 ```md
 ---
 to: alex@example.com

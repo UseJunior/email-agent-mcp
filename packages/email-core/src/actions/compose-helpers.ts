@@ -9,7 +9,7 @@ import { resolveAttachmentFile } from '../content/attachment-loader.js';
 import type { BodyFormat } from '../content/body-renderer.js';
 import { parseAddressList } from '../utils/address.js';
 import { validateAttachment, sanitizeFilename } from './attachments.js';
-import type { EmailAddress, OutboundAttachment } from '../types.js';
+import type { EmailAddress, EmailMessage, OutboundAttachment } from '../types.js';
 
 // --- Error shape used by all actions ---
 
@@ -387,22 +387,21 @@ function toPreviewError(err: unknown): PreviewError {
  * successful by the caller. A single short retry handles transient
  * read-after-write windows; non-recoverable ProviderErrors skip the retry.
  *
- * Note on cost: Gmail's updateDraft already does an internal getMessage to
- * merge partial updates (see GmailEmailProvider.updateDraft), so wiring this
- * helper after updateDraft on Gmail incurs a second redundant GET. Provider
- * interface changes to surface the persisted draft directly are out of scope
- * for v1; documented here so future optimizations have a starting point.
+ * Providers may expose a draft-specific read path when their API uses distinct
+ * identifiers for draft resources and their backing messages (as Gmail does).
  */
 export async function buildDraftPreview(
-  provider: Pick<EmailReader, 'getMessage'>,
+  provider: Pick<EmailReader, 'getMessage' | 'getDraft'>,
   draftId: string,
   opts?: { retryDelayMs?: number; authoredOnly?: boolean },
 ): Promise<BuildDraftPreviewResult> {
   const retryDelay = opts?.retryDelayMs ?? PREVIEW_RETRY_DELAY_MS;
+  const readDraft = (): Promise<EmailMessage> => provider.getDraft?.(draftId)
+    ?? provider.getMessage(draftId);
 
   let persisted;
   try {
-    persisted = await provider.getMessage(draftId);
+    persisted = await readDraft();
   } catch (firstErr) {
     // Skip retry on definitively-permanent failures (e.g. invalid draft id).
     if (firstErr instanceof ProviderError && !firstErr.recoverable) {
@@ -412,7 +411,7 @@ export async function buildDraftPreview(
       await new Promise(resolve => setTimeout(resolve, retryDelay));
     }
     try {
-      persisted = await provider.getMessage(draftId);
+      persisted = await readDraft();
     } catch (secondErr) {
       return { previewError: toPreviewError(secondErr) };
     }

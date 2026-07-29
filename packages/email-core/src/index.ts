@@ -31,6 +31,7 @@ export type {
   DownloadedAttachment,
   EmailProvider,
   AuthManager,
+  DraftReplyStatus,
 } from './providers/provider.js';
 export { ProviderError, AttachmentNotSupportedError, AttachmentNotFoundError } from './providers/provider.js';
 export {

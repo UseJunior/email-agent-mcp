@@ -27,6 +27,22 @@ function createMockGmailClient(overrides: Partial<GmailApiClient> = {}): GmailAp
       },
       internalDate: String(new Date('2024-03-15T10:00:00Z').getTime()),
     }),
+    getDraft: vi.fn().mockResolvedValue({
+      id: 'draft-abc',
+      message: {
+        id: 'msg-draft',
+        threadId: 'thread-draft',
+        labelIds: ['DRAFT'],
+        payload: {
+          headers: [
+            { name: 'From', value: 'me@corp.com' },
+            { name: 'To', value: 'bob@corp.com' },
+            { name: 'Subject', value: 'Draft' },
+          ],
+          body: { data: Buffer.from('Draft body').toString('base64url') },
+        },
+      },
+    }),
     getAttachment: vi.fn().mockResolvedValue({
       data: Buffer.from('attachment bytes').toString('base64url'),
       size: 16,
@@ -336,6 +352,8 @@ describe('provider-gmail/Draft Operations', () => {
     expect(result.draftId).toBe('draft-abc');
     // Interface now accepts optional threadId; absent here because ComposeMessage.threadId is unset.
     expect(client.createDraft).toHaveBeenCalledWith(expect.any(String), undefined);
+    const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
+    expect(raw).toContain('X-Agent-Draft-Origin: non_reply');
   });
 
   it('Scenario: sendDraft calls Gmail API with draft ID', async () => {
@@ -815,6 +833,7 @@ describe('provider-gmail/Reply Drafts', () => {
     expect(raw).toContain('To: "Alice" <alice@corp.com>');
     expect(raw).toMatch(/Cc: .*bob@corp\.com.*carol@corp\.com/);
     expect(raw).toContain('Subject: Re: Original thread');
+    expect(raw).toContain('X-Agent-Draft-Origin: reply');
     expect(raw).toContain('In-Reply-To: <msg-a@corp.com>');
     // References appends the original's Message-ID to its existing list.
     expect(raw).toContain('References: <msg-r1@corp.com> <msg-a@corp.com>');
@@ -989,7 +1008,7 @@ describe('provider-gmail/Reply Threading on Send', () => {
 describe('provider-gmail/Update Draft', () => {
   function draftMessageMock() {
     return {
-      id: 'draft-existing',
+      id: 'msg-backing-existing',
       threadId: 'thread-draft',
       labelIds: ['DRAFT'],
       payload: {
@@ -1009,14 +1028,24 @@ describe('provider-gmail/Update Draft', () => {
   }
 
   it('Scenario: updateDraft merges partial over current draft and preserves threading', async () => {
+    const stampedReplyDraft = draftMessageMock();
+    stampedReplyDraft.payload.headers.push({
+      name: 'X-Agent-Draft-Origin',
+      value: 'reply',
+    });
     const client = createMockGmailClient({
-      getMessage: vi.fn().mockResolvedValue(draftMessageMock()),
+      getDraft: vi.fn().mockResolvedValue({
+        id: 'draft-existing',
+        message: stampedReplyDraft,
+      }),
     });
     const provider = new GmailEmailProvider(client);
 
     const result = await provider.updateDraft('draft-existing', { subject: 'New subject' });
 
     expect(result.success).toBe(true);
+    expect(client.getDraft).toHaveBeenCalledWith('draft-existing');
+    expect(client.getMessage).not.toHaveBeenCalled();
     expect(client.updateDraft).toHaveBeenCalledWith('draft-existing', expect.any(String), 'thread-draft');
 
     // updateDraft signature is (draftId, raw, threadId) — raw is at index 1.
@@ -1027,6 +1056,7 @@ describe('provider-gmail/Update Draft', () => {
     // New subject applied
     expect(raw).toContain('Subject: New subject');
     // Threading preserved across the replace
+    expect(raw).toContain('X-Agent-Draft-Origin: reply');
     expect(raw).toContain('In-Reply-To: <parent@corp.com>');
     expect(raw).toContain('References: <root@corp.com> <parent@corp.com>');
   });
@@ -1048,7 +1078,10 @@ describe('provider-gmail/Update Draft', () => {
 
   it('Scenario: updateDraft returns structured UPDATE_DRAFT_FAILED on error', async () => {
     const client = createMockGmailClient({
-      getMessage: vi.fn().mockResolvedValue(draftMessageMock()),
+      getDraft: vi.fn().mockResolvedValue({
+        id: 'draft-existing',
+        message: draftMessageMock(),
+      }),
       updateDraft: vi.fn().mockRejectedValue(new Error('draft not found')),
     });
     const provider = new GmailEmailProvider(client);
@@ -1086,6 +1119,10 @@ describe('provider-gmail/Update Draft', () => {
       size: attachmentBytes.length,
     });
     const client = createMockGmailClient({
+      getDraft: vi.fn().mockResolvedValue({
+        id: 'draft-existing',
+        message: draftWithAttachment,
+      }),
       getMessage: vi.fn().mockResolvedValue(draftWithAttachment),
       getAttachment,
     });
@@ -1126,7 +1163,10 @@ describe('provider-gmail/Update Draft', () => {
       internalDate: String(Date.now()),
     };
     const client = createMockGmailClient({
-      getMessage: vi.fn().mockResolvedValue(draftWithInline),
+      getDraft: vi.fn().mockResolvedValue({
+        id: 'draft-existing',
+        message: draftWithInline,
+      }),
     });
     const provider = new GmailEmailProvider(client);
 
@@ -1135,6 +1175,96 @@ describe('provider-gmail/Update Draft', () => {
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe('INLINE_ATTACHMENTS_UNSUPPORTED');
   });
+
+  it('Scenario: reply status reads the nested draft message by draft resource id', async () => {
+    const backingMessage = draftMessageMock();
+    const client = createMockGmailClient({
+      getDraft: vi.fn().mockResolvedValue({
+        id: 'draft-resource-1',
+        message: backingMessage,
+      }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('draft-resource-1')).resolves.toBe('reply');
+    expect(client.getDraft).toHaveBeenCalledWith('draft-resource-1');
+    expect(client.getMessage).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: unstamped draft without In-Reply-To is indeterminate', async () => {
+    const backingMessage = draftMessageMock();
+    backingMessage.payload.headers = backingMessage.payload.headers.filter(
+      header => header.name !== 'In-Reply-To',
+    );
+    const client = createMockGmailClient({
+      getDraft: vi.fn().mockResolvedValue({
+        id: 'draft-resource-unstamped',
+        message: backingMessage,
+      }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('draft-resource-unstamped'))
+      .resolves.toBe('indeterminate');
+  });
+
+  it('Scenario: conflicting duplicate origin headers are indeterminate', async () => {
+    // Codex round 3: a forged non_reply stamp alongside a genuine reply header
+    // must not be resolvable by header order.
+    const backingMessage = draftMessageMock();
+    backingMessage.payload.headers = [
+      ...backingMessage.payload.headers,
+      { name: 'X-Agent-Draft-Origin', value: 'non_reply' },
+      { name: 'X-Agent-Draft-Origin', value: 'reply' },
+    ];
+    const client = createMockGmailClient({
+      getDraft: vi.fn().mockResolvedValue({
+        id: 'draft-resource-conflicted',
+        message: backingMessage,
+      }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('draft-resource-conflicted'))
+      .resolves.toBe('indeterminate');
+  });
+
+  it('Scenario: unrecognised origin header value is indeterminate', async () => {
+    const backingMessage = draftMessageMock();
+    backingMessage.payload.headers = [
+      ...backingMessage.payload.headers.filter(header => header.name !== 'In-Reply-To'),
+      { name: 'X-Agent-Draft-Origin', value: 'whatever' },
+    ];
+    const client = createMockGmailClient({
+      getDraft: vi.fn().mockResolvedValue({
+        id: 'draft-resource-bogus',
+        message: backingMessage,
+      }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('draft-resource-bogus'))
+      .resolves.toBe('indeterminate');
+  });
+
+  it('Scenario: stamped fresh draft is non-reply', async () => {
+    const backingMessage = draftMessageMock();
+    backingMessage.payload.headers = [
+      ...backingMessage.payload.headers.filter(header => header.name !== 'In-Reply-To'),
+      { name: 'X-Agent-Draft-Origin', value: 'non_reply' },
+    ];
+    const client = createMockGmailClient({
+      getDraft: vi.fn().mockResolvedValue({
+        id: 'draft-resource-fresh',
+        message: backingMessage,
+      }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('draft-resource-fresh'))
+      .resolves.toBe('non_reply');
+  });
+
 });
 
 describe('provider-gmail/buildRawMessage attachments', () => {

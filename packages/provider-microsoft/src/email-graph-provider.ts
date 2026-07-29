@@ -24,6 +24,7 @@ import type {
   ScheduledSend,
   ScheduledSendResult,
   EmailScheduledSender,
+  DraftReplyStatus,
 } from '@usejunior/email-core';
 import { AttachmentNotSupportedError, AttachmentNotFoundError, ProviderError } from '@usejunior/email-core';
 
@@ -112,6 +113,7 @@ class GraphAttachmentError extends Error {
 
 // Sent message tracking via custom extended property
 const TRACKING_PROPERTY = 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailTrackingId';
+const DRAFT_ORIGIN_PROPERTY = 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailDraftOrigin';
 const DEFERRED_SEND_PROPERTY = 'SystemTime 0x3FEF';
 
 const WELL_KNOWN_FOLDER_ALIASES: Record<string, string> = {
@@ -833,6 +835,9 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       toRecipients: toGraphRecipients(msg.to),
       ccRecipients: toGraphRecipients(msg.cc),
       bccRecipients: toGraphRecipients(msg.bcc),
+      singleValueExtendedProperties: [
+        { id: DRAFT_ORIGIN_PROPERTY, value: 'non_reply' },
+      ],
     };
     if (msg.attachments && msg.attachments.length > 0) {
       graphMsg.attachments = msg.attachments.map(toGraphFileAttachment);
@@ -861,6 +866,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       singleValueExtendedProperties: [
         { id: TRACKING_PROPERTY, value: trackingId },
         { id: DEFERRED_SEND_PROPERTY, value: scheduledSendAt },
+        { id: DRAFT_ORIGIN_PROPERTY, value: 'non_reply' },
       ],
     };
     if (msg.attachments && msg.attachments.length > 0) {
@@ -1053,6 +1059,9 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
 
     const patch: Record<string, unknown> = {
       body: { contentType: 'HTML', content: truncateBody(merged) },
+      singleValueExtendedProperties: [
+        { id: DRAFT_ORIGIN_PROPERTY, value: 'reply' },
+      ],
     };
 
     const ccMerged = mergeRecipients(draftCc, opts?.cc ?? []);
@@ -1084,34 +1093,43 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
     return draft.id;
   }
 
+  async getDraftReplyStatus(draftId: string): Promise<DraftReplyStatus> {
+    const propertyFilter = `$filter=id eq '${DRAFT_ORIGIN_PROPERTY}'`;
+    const metadata = await this.client.get(
+      `${this.basePath}/messages/${encodeGraphPathId(draftId)}`
+      + `?$select=isDraft,conversationIndex`
+      + `&$expand=singleValueExtendedProperties(${propertyFilter})`,
+    ) as unknown as GraphMessage;
+
+    if (metadata.isDraft !== true) return 'indeterminate';
+
+    // Duplicate stamps are ambiguous: taking the first match would make the
+    // answer depend on the order Graph returns the collection. Only a single,
+    // unanimous stamp is authoritative.
+    const originStamps = (metadata.singleValueExtendedProperties ?? []).filter(
+      property => property.id.toLowerCase() === DRAFT_ORIGIN_PROPERTY.toLowerCase(),
+    );
+    if (originStamps.length > 0) {
+      const values = originStamps.map(property => property.value);
+      const unanimous = values.every(value => value === values[0]);
+      if (!unanimous) return 'indeterminate';
+      if (values[0] === 'reply') return 'reply';
+      if (values[0] === 'non_reply') return 'non_reply';
+      return 'indeterminate';
+    }
+
+    const conversationIndexBytes = decodeConversationIndex(metadata.conversationIndex);
+    if (conversationIndexBytes === undefined) return 'indeterminate';
+    return conversationIndexBytes > 22 ? 'reply' : 'indeterminate';
+  }
+
   async updateDraft(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult> {
     const patch: Record<string, unknown> = {};
     if (msg.body !== undefined || msg.bodyHtml !== undefined) {
-      // For reply drafts, GET the existing body so we can preserve Graph's auto-quoted
-      // thread (divider + From/Sent/To/Subject + prior message). Replacing the body
-      // wholesale via PATCH would drop the quoted history that prepareReplyDraft set up.
-      // For non-reply drafts (no quoted-thread anatomy), this falls through to the
-      // normal buildGraphBody path so behavior is unchanged.
-      // $select=body narrows the response — we only need the body field here.
-      const current = await this.client.get(
-        `${this.basePath}/messages/${encodeGraphPathId(draftId)}?$select=body`,
-      );
-      const currentBody = current.body as { contentType?: string; content?: string } | undefined;
-      const currentContent = typeof currentBody?.content === 'string' ? currentBody.content : '';
-      const currentIsHtml = currentBody?.contentType?.toLowerCase() === 'html';
-      const region = currentIsHtml ? findGraphQuotedReplyRegion(currentContent) : null;
-
-      if (region) {
-        const callerFragment = msg.bodyHtml !== undefined
-          ? stripHtmlBodyWrappers(msg.bodyHtml)
-          : wrapPlainTextAsHtml(msg.body ?? '');
-        const merged = currentContent.slice(0, region.bodyOpenEnd)
-          + callerFragment
-          + currentContent.slice(region.dividerStart);
-        patch.body = { contentType: 'HTML', content: truncateBody(merged) };
-      } else {
-        patch.body = buildGraphBody(msg.bodyHtml, msg.body ?? '');
-      }
+      // update_draft admits body writes only for provider-confirmed non-reply
+      // drafts with explicit caller opt-in. Graph PATCH replaces that body
+      // wholesale; no quoted-history boundary inspection belongs here.
+      patch.body = buildGraphBody(msg.bodyHtml, msg.body ?? '');
     }
     if (msg.subject !== undefined) patch.subject = msg.subject.slice(0, SUBJECT_MAX_LENGTH);
     // An omitted list leaves the draft's existing recipients untouched (Graph
@@ -1508,6 +1526,25 @@ function findDeferredSendProperty(
   );
 }
 
+function decodeConversationIndex(value: unknown): number | undefined {
+  if (typeof value !== 'string' || value.length === 0 || value !== value.trim()) {
+    return undefined;
+  }
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(value)) return undefined;
+
+  const firstPadding = value.indexOf('=');
+  if (firstPadding >= 0 && value.length % 4 !== 0) return undefined;
+
+  const unpadded = value.replace(/=+$/, '');
+  if (unpadded.length % 4 === 1) return undefined;
+  const normalized = unpadded.replace(/-/g, '+').replace(/_/g, '/');
+
+  const decoded = Buffer.from(normalized, 'base64');
+  const canonical = decoded.toString('base64').replace(/=+$/, '');
+  if (canonical !== normalized) return undefined;
+  return decoded.length;
+}
+
 function scheduledDraftSendFailure(
   draftId: string,
   scheduledSendAt: string,
@@ -1563,6 +1600,7 @@ interface GraphMessage {
   uniqueBody?: { contentType: string; content: string };
   categories?: string[];
   conversationId?: string;
+  conversationIndex?: string;
   flag?: { flagStatus?: string };
   internetMessageId?: string;
   internetMessageHeaders?: Array<{ name: string; value: string }>;

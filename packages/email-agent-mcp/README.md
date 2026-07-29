@@ -125,6 +125,12 @@ passthrough — your markup is not sanitised or rewritten), or `text`, plus
 `force_black` (default true) which wraps rendered HTML in a force-black div so
 Outlook dark mode does not hide the text.
 
+For `update_draft`, changing `body` or `body_file` requires
+`replace_body: true` and is allowed only for non-reply drafts. Reply draft
+bodies retain provider-assembled quoted history and cannot be edited safely;
+create a new draft instead. Subject, recipient, and attachment updates remain
+available on reply drafts.
+
 `read_email` takes a `format` of `markdown` (default) or `html`. `html` returns
 the message's raw body HTML verbatim — reach for it when you need styling that
 markdown cannot carry (`color`, `background-color`, `text-decoration`, `<u>`),

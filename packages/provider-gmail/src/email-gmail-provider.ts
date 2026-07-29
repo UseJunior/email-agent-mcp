@@ -12,6 +12,7 @@ import type {
   ReplyOptions,
   DownloadedAttachment,
   OutboundAttachment,
+  DraftReplyStatus,
 } from '@usejunior/email-core';
 import { AttachmentNotFoundError } from '@usejunior/email-core';
 
@@ -29,10 +30,13 @@ const FOLDER_TO_LABEL: Record<string, string> = {
 
 // Matches Microsoft's SUBJECT_MAX_LENGTH — keeps cross-provider behaviour consistent.
 const SUBJECT_MAX_LENGTH = 255;
+const DRAFT_ORIGIN_HEADER = 'X-Agent-Draft-Origin';
+type DraftOrigin = 'reply' | 'non_reply';
 
 export interface GmailApiClient {
   listMessages(opts: { labelIds?: string[]; maxResults?: number; q?: string }): Promise<{ messages?: Array<{ id: string; threadId: string }>; resultSizeEstimate?: number }>;
   getMessage(id: string): Promise<GmailMessage>;
+  getDraft(draftId: string): Promise<{ id: string; message: GmailMessage }>;
   getAttachment(messageId: string, attachmentId: string): Promise<{ data?: string; size?: number }>;
   /**
    * Send a raw RFC 2822 message. Optional `threadId` routes the send into
@@ -110,6 +114,11 @@ export class GmailEmailProvider {
   async getMessage(id: string): Promise<EmailMessage> {
     const msg = await this.client.getMessage(id);
     return mapGmailMessage(msg);
+  }
+
+  async getDraft(draftId: string): Promise<EmailMessage> {
+    const draft = await this.client.getDraft(draftId);
+    return mapGmailMessage(draft.message);
   }
 
   async searchMessages(query: string, _folder?: string, limit?: number, offset?: number): Promise<EmailMessage[]> {
@@ -227,7 +236,7 @@ export class GmailEmailProvider {
   }
 
   async createDraft(msg: ComposeMessage): Promise<DraftResult> {
-    const raw = buildRawMessage(msg);
+    const raw = buildRawMessage(msg, { draftOrigin: 'non_reply' });
     const result = await this.client.createDraft(raw, msg.threadId);
     return { success: true, draftId: result.id };
   }
@@ -259,6 +268,7 @@ export class GmailEmailProvider {
         {
           inReplyTo: original.messageId,
           references,
+          draftOrigin: 'reply',
         },
       );
 
@@ -292,7 +302,11 @@ export class GmailEmailProvider {
       // current draft, merge the partial over it, and re-upload. Preserve
       // threading headers from the original draft so edits don't silently
       // lose thread association.
-      const current = await this.getMessage(draftId);
+      const draftResource = await this.client.getDraft(draftId);
+      const current = mapGmailMessage(draftResource.message);
+      const draftOrigin = getRecognizedDraftOrigin(
+        getHeader(draftResource.message, DRAFT_ORIGIN_HEADER),
+      );
 
       // Attachments: drafts.update is a full replacement, so an omitted
       // `attachments` field must be rehydrated from the existing draft or it
@@ -341,6 +355,7 @@ export class GmailEmailProvider {
       const raw = buildRawMessage(merged, {
         inReplyTo: current.inReplyTo,
         references: current.references,
+        draftOrigin,
       });
 
       const result = await this.client.updateDraft(draftId, raw, current.threadId);
@@ -357,6 +372,26 @@ export class GmailEmailProvider {
     }
   }
 
+  async getDraftReplyStatus(draftId: string): Promise<DraftReplyStatus> {
+    const draftResource = await this.client.getDraft(draftId);
+    const draft = mapGmailMessage(draftResource.message);
+    if (draft.isDraft !== true) return 'indeterminate';
+
+    // Duplicate stamps are ambiguous: a draft carrying two conflicting origin
+    // headers gives no basis to pick one, and taking the first match would make
+    // the answer depend on header ordering. Only a single, unanimous stamp is
+    // authoritative; anything else falls through to indeterminate, which
+    // refuses the edit.
+    const originStamps = getHeaders(draftResource.message, DRAFT_ORIGIN_HEADER);
+    if (originStamps.length > 0) {
+      const recognized = originStamps.map(getRecognizedDraftOrigin);
+      const unanimous = recognized.every(value => value !== undefined && value === recognized[0]);
+      return unanimous ? recognized[0]! : 'indeterminate';
+    }
+
+    return draft.inReplyTo && draft.inReplyTo.trim().length > 0 ? 'reply' : 'indeterminate';
+  }
+
   // NemoClaw egress domains
   static get egressDomains(): string[] {
     return ['gmail.googleapis.com', 'oauth2.googleapis.com', 'pubsub.googleapis.com'];
@@ -365,6 +400,17 @@ export class GmailEmailProvider {
 
 function getHeader(msg: GmailMessage, name: string): string | undefined {
   return msg.payload?.headers?.find(h => h.name.toLowerCase() === name.toLowerCase())?.value;
+}
+
+function getHeaders(msg: GmailMessage, name: string): string[] {
+  return (msg.payload?.headers ?? [])
+    .filter(h => h.name.toLowerCase() === name.toLowerCase())
+    .map(h => h.value);
+}
+
+function getRecognizedDraftOrigin(value: string | undefined): DraftOrigin | undefined {
+  if (value === 'reply' || value === 'non_reply') return value;
+  return undefined;
 }
 
 function getPartHeader(part: GmailMessagePart, name: string): string | undefined {
@@ -642,6 +688,7 @@ function generateBoundary(content: string): string {
 interface BuildRawOptions {
   inReplyTo?: string;
   references?: string[];
+  draftOrigin?: DraftOrigin;
 }
 
 const CRLF = '\r\n';
@@ -765,6 +812,7 @@ function buildRawMessage(msg: ComposeMessage, opts: BuildRawOptions = {}): strin
   if (msg.cc && msg.cc.length > 0) headers.push(`Cc: ${formatAddressList(msg.cc)}`);
   if (msg.bcc && msg.bcc.length > 0) headers.push(`Bcc: ${formatAddressList(msg.bcc)}`);
   headers.push(`Subject: ${escapeHeader(msg.subject)}`);
+  if (opts.draftOrigin) headers.push(`${DRAFT_ORIGIN_HEADER}: ${opts.draftOrigin}`);
   if (opts.inReplyTo) headers.push(`In-Reply-To: ${escapeHeader(opts.inReplyTo)}`);
   if (opts.references && opts.references.length > 0) {
     headers.push(`References: ${opts.references.map(r => r.replace(/[\r\n]+/g, '')).join(' ')}`);

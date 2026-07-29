@@ -951,11 +951,16 @@ describe('provider-microsoft/Draft-Then-Send via createReplyAll', () => {
     const patch = patchArgs[1] as {
       body: { content: string };
       ccRecipients: Array<{ emailAddress: { address: string } }>;
+      singleValueExtendedProperties: Array<{ id: string; value: string }>;
     };
     expect(patch.body.content).toContain('<p>rendered</p>');
     expect(patch.body.content).toContain('From:</b> Alice');
     const addresses = patch.ccRecipients.map(r => r.emailAddress.address.toLowerCase()).sort();
     expect(addresses).toEqual(['alice@corp.com', 'bob@corp.com']);
+    expect(patch.singleValueExtendedProperties).toContainEqual({
+      id: 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailDraftOrigin',
+      value: 'reply',
+    });
   });
 });
 
@@ -999,6 +1004,10 @@ describe('provider-microsoft/Deferred Delivery via Graph Extended Property', () 
       }],
       singleValueExtendedProperties: expect.arrayContaining([
         { id: 'SystemTime 0x3FEF', value: '2026-07-24T12:00:00.000Z' },
+        {
+          id: 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailDraftOrigin',
+          value: 'non_reply',
+        },
       ]),
     }));
     expect(post).toHaveBeenNthCalledWith(
@@ -1234,56 +1243,140 @@ describe('provider-microsoft/Graph Scheduled Send Inspection and Cancellation', 
   });
 });
 
-describe('provider-microsoft/update_draft Quote Preservation', () => {
-  // Compose the realistic "post-prepareReplyDraft" fixture by simulating the
-  // create-path: caller fragment inserted by the same merge logic the production
-  // code uses. Round-trips through the merge helper so the fixture stays in sync
-  // with the splice anatomy if either side changes.
-  function replyDraftWith(callerFragment: string): string {
-    const bodyOpenEnd = QUOTED_REPLY_BODY.match(/<body[^>]*>/i);
-    if (!bodyOpenEnd || bodyOpenEnd.index === undefined) {
-      throw new Error('QUOTED_REPLY_BODY fixture missing <body> tag');
-    }
-    const idx = bodyOpenEnd.index + bodyOpenEnd[0].length;
-    return QUOTED_REPLY_BODY.slice(0, idx) + callerFragment + QUOTED_REPLY_BODY.slice(idx);
-  }
+describe('provider-microsoft/update_draft Reply Metadata', () => {
+  const draftOriginProperty = 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailDraftOrigin';
 
-  it('Scenario: update_draft preserves Graph auto-quoted thread', async () => {
-    const replyDraftBody = replyDraftWith('<div>Old caller content</div>');
+  it('Scenario: conflicting duplicate origin stamps are indeterminate', async () => {
+    // A forged or colliding second stamp must not be resolvable by read order.
     const client = createMockClient({
       get: vi.fn().mockResolvedValueOnce({
-        id: 'draft-update-1',
-        body: { contentType: 'html', content: replyDraftBody },
+        id: 'double-stamped',
+        isDraft: true,
+        conversationIndex: Buffer.alloc(27).toString('base64'),
+        singleValueExtendedProperties: [
+          { id: draftOriginProperty, value: 'non_reply' },
+          { id: draftOriginProperty, value: 'reply' },
+        ],
       }),
-      patch: vi.fn().mockResolvedValueOnce({}),
     });
     const provider = new GraphEmailProvider(client);
 
-    const result = await provider.updateDraft('draft-update-1', { body: 'Updated reply text' });
-
-    expect(result.success).toBe(true);
-    // Narrowed GET — only the body field is fetched
-    expect(client.get).toHaveBeenCalledWith(expect.stringContaining('$select=body'));
-    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
-    const patchBody = (patchArgs[1] as { body: { contentType: string; content: string } }).body;
-    expect(patchBody.contentType).toBe('HTML');
-    expect(patchBody.content).toContain('Updated reply text');
-    expect(patchBody.content).not.toContain('Old caller content');
-    // Quoted thread preserved (divider, header block, prior message body)
-    expect(patchBody.content).toContain('divRplyFwdMsg');
-    expect(patchBody.content).toContain('From:</b> Alice');
-    expect(patchBody.content).toContain('Original message content');
+    await expect(provider.getDraftReplyStatus('double-stamped')).resolves.toBe('indeterminate');
   });
 
-  it('Scenario: update_draft does not mistake an authored horizontal rule for the Graph boundary', async () => {
-    const replyDraftBody = replyDraftWith(
-      '<div>Old authored start<hr><p>Old authored tail</p></div>',
-    );
+  it('Scenario: duplicate but unanimous origin stamps still resolve', async () => {
     const client = createMockClient({
       get: vi.fn().mockResolvedValueOnce({
-        id: 'draft-update-authored-hr',
-        body: { contentType: 'html', content: replyDraftBody },
+        id: 'twice-stamped',
+        isDraft: true,
+        singleValueExtendedProperties: [
+          { id: draftOriginProperty, value: 'non_reply' },
+          { id: draftOriginProperty, value: 'non_reply' },
+        ],
       }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('twice-stamped')).resolves.toBe('non_reply');
+  });
+
+  it('Scenario: update_draft preserves Graph auto-quoted thread', async () => {
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValueOnce({
+        id: 'reply-draft',
+        isDraft: true,
+        conversationIndex: Buffer.alloc(22).toString('base64'),
+        singleValueExtendedProperties: [
+          { id: draftOriginProperty, value: 'reply' },
+        ],
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('reply-draft')).resolves.toBe('reply');
+    expect(client.get).toHaveBeenCalledWith(expect.stringContaining(
+      '$select=isDraft,conversationIndex',
+    ));
+    expect(client.get).toHaveBeenCalledWith(expect.stringContaining(
+      `$expand=singleValueExtendedProperties($filter=id eq '${draftOriginProperty}')`,
+    ));
+    expect(client.patch).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: stamped non-reply draft is authoritative', async () => {
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValueOnce({
+        id: 'fresh-draft',
+        isDraft: true,
+        conversationIndex: Buffer.alloc(27).toString('base64'),
+        singleValueExtendedProperties: [
+          { id: draftOriginProperty, value: 'non_reply' },
+        ],
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('fresh-draft')).resolves.toBe('non_reply');
+  });
+
+  it('Scenario: unstamped valid root conversationIndex is indeterminate', async () => {
+    const rootConversationIndex = Buffer.alloc(22);
+    rootConversationIndex[0] = 0x01;
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValueOnce({
+        id: 'external-draft',
+        isDraft: true,
+        conversationIndex: rootConversationIndex.toString('base64'),
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('external-draft')).resolves.toBe('indeterminate');
+  });
+
+  it('Scenario: unstamped child conversationIndex is positive reply evidence', async () => {
+    const childConversationIndex = Buffer.alloc(27);
+    childConversationIndex[0] = 0x01;
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValueOnce({
+        id: 'external-reply-draft',
+        isDraft: true,
+        conversationIndex: childConversationIndex.toString('base64'),
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('external-reply-draft')).resolves.toBe('reply');
+  });
+
+  it.each([
+    {
+      isDraft: true,
+      conversationId: 'conversation-3',
+      internetMessageHeaders: [],
+    },
+    { isDraft: true },
+    { isDraft: true, conversationIndex: 'not base64!' },
+    { isDraft: true, conversationIndex: 42 },
+    { isDraft: true, conversationIndex: Buffer.alloc(21).toString('base64') },
+    {
+      isDraft: true,
+      singleValueExtendedProperties: [
+        { id: draftOriginProperty, value: 'unexpected' },
+      ],
+    },
+  ])('Scenario: absent or invalid reply evidence is indeterminate', async (metadata) => {
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValueOnce({ id: 'unknown-draft', ...metadata }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('unknown-draft')).resolves.toBe('indeterminate');
+  });
+
+  it('Scenario: update_draft on a fresh draft replaces body wholesale', async () => {
+    const client = createMockClient({
+      get: vi.fn(),
       patch: vi.fn().mockResolvedValueOnce({}),
     });
     const provider = new GraphEmailProvider(client);
@@ -1292,35 +1385,13 @@ describe('provider-microsoft/update_draft Quote Preservation', () => {
       bodyHtml: '<div>Replacement authored body<hr><p>Replacement tail</p></div>',
     });
 
-    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
-    const patchBody = (patchArgs[1] as { body: { content: string } }).body;
-    expect(patchBody.content).toContain('Replacement authored body');
-    expect(patchBody.content).toContain('Replacement tail');
-    expect(patchBody.content).not.toContain('Old authored start');
-    expect(patchBody.content).not.toContain('Old authored tail');
-    expect(patchBody.content).toContain('divRplyFwdMsg');
-    expect(patchBody.content).toContain('Original message content');
-  });
-
-  it('Scenario: update_draft on a fresh draft replaces body wholesale', async () => {
-    // No <hr> after <body> → no recognizable Graph reply anatomy → fall through to buildGraphBody
-    const FRESH_DRAFT_BODY = '<html><body><div>Old fresh content</div></body></html>';
-    const client = createMockClient({
-      get: vi.fn().mockResolvedValueOnce({
-        id: 'draft-update-2',
-        body: { contentType: 'html', content: FRESH_DRAFT_BODY },
-      }),
-      patch: vi.fn().mockResolvedValueOnce({}),
-    });
-    const provider = new GraphEmailProvider(client);
-
-    await provider.updateDraft('draft-update-2', { body: 'New body' });
-
+    expect(client.get).not.toHaveBeenCalled();
     const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
     const patchBody = (patchArgs[1] as { body: { contentType: string; content: string } }).body;
-    expect(patchBody.contentType).toBe('Text');
-    expect(patchBody.content).toBe('New body');
-    expect(patchBody.content).not.toContain('Old fresh content');
+    expect(patchBody).toEqual({
+      contentType: 'HTML',
+      content: '<div>Replacement authored body<hr><p>Replacement tail</p></div>',
+    });
   });
 });
 
@@ -2358,10 +2429,15 @@ describe('provider-microsoft/Outbound Recipients', () => {
       toRecipients: Array<{ emailAddress: { address: string } }>;
       ccRecipients?: Array<{ emailAddress: { address: string; name?: string } }>;
       bccRecipients?: Array<{ emailAddress: { address: string } }>;
+      singleValueExtendedProperties: Array<{ id: string; value: string }>;
     };
     expect(msg.toRecipients.map(r => r.emailAddress.address)).toEqual(['alice@corp.com']);
     expect(msg.ccRecipients).toEqual([{ emailAddress: { address: 'carol@corp.com', name: 'Carol' } }]);
     expect(msg.bccRecipients).toEqual([{ emailAddress: { address: 'dave@corp.com', name: undefined } }]);
+    expect(msg.singleValueExtendedProperties).toContainEqual({
+      id: 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailDraftOrigin',
+      value: 'non_reply',
+    });
   });
 
   // Asserted against the real wire body, not the provider-level payload: the

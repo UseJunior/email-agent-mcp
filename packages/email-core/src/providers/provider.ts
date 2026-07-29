@@ -16,6 +16,7 @@ import type {
 export interface EmailReader {
   listMessages(opts: ListOptions): Promise<EmailMessage[]>;
   getMessage(id: string): Promise<EmailMessage>;
+  getDraft?(draftId: string): Promise<EmailMessage>;
   searchMessages(query: string, folder?: string, limit?: number, offset?: number): Promise<EmailMessage[]>;
   getThread(messageId: string): Promise<EmailThread>;
 }
@@ -26,8 +27,11 @@ export interface EmailSender {
   createDraft(msg: ComposeMessage): Promise<DraftResult>;
   sendDraft(draftId: string): Promise<SendResult>;
   createReplyDraft?(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult>;
+  getDraftReplyStatus?(draftId: string): Promise<DraftReplyStatus>;
   updateDraft?(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult>;
 }
+
+export type DraftReplyStatus = 'reply' | 'non_reply' | 'indeterminate';
 
 export interface EmailScheduledSender {
   scheduleMessage(msg: ComposeMessage, scheduledSendAt: string): Promise<ScheduledSendResult>;
