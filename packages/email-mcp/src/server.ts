@@ -492,6 +492,10 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
         GmailAuthManager,
         GmailEmailProvider,
         GoogleapisGmailClient,
+        MatonGmailApiClient,
+        loadMatonGmailConnections,
+        parseMatonGmailAccounts,
+        resolveMatonGmailConnection,
         formatGmailAuthError,
       },
     ] = await Promise.all([
@@ -499,9 +503,41 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
       import('@usejunior/provider-gmail'),
     ]);
     const microsoftMailboxes = await listConfiguredMailboxesWithMetadata();
-    const gmailMailboxes = await listConfiguredGmailMailboxes();
+    const gmailTransport = process.env['EMAIL_AGENT_MCP_GMAIL_TRANSPORT'];
+    if (gmailTransport && gmailTransport !== 'oauth' && gmailTransport !== 'maton') {
+      throw new Error(`Unsupported Gmail transport: ${gmailTransport}`);
+    }
+    const gmailMatonMode = gmailTransport === 'maton';
+    const matonGmailAccounts = gmailMatonMode
+      ? parseMatonGmailAccounts(process.env['EMAIL_AGENT_MCP_MATON_GMAIL_ACCOUNTS'])
+      : [];
+    const gmailMailboxes = gmailMatonMode ? [] : await listConfiguredGmailMailboxes();
+    const matonConnectionsPath = process.env['EMAIL_AGENT_MCP_MATON_CONNECTIONS_PATH'];
+    const matonApiKey = process.env['MATON_API_KEY'];
+    let matonGmailConnections = null;
+    let matonGmailSetupError: Error | null = null;
+    if (gmailMatonMode) {
+      try {
+        if (!matonConnectionsPath) {
+          throw new Error('EMAIL_AGENT_MCP_MATON_CONNECTIONS_PATH is required for Maton transport');
+        }
+        if (!matonApiKey) {
+          throw new Error('MATON_API_KEY is required for Maton transport');
+        }
+        matonGmailConnections = await loadMatonGmailConnections(
+          matonConnectionsPath,
+          matonGmailAccounts,
+        );
+      } catch (err) {
+        matonGmailSetupError = err instanceof Error ? err : new Error(String(err));
+      }
+    }
 
-    if (microsoftMailboxes.length === 0 && gmailMailboxes.length === 0) {
+    if (
+      microsoftMailboxes.length === 0 &&
+      gmailMailboxes.length === 0 &&
+      matonGmailAccounts.length === 0
+    ) {
       state.isDemo = true;
       state.status = 'not_configured';
       state.mailboxes = [];
@@ -556,6 +592,43 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
         console.error(
           `[email-agent-mcp] Skipping mailbox "${displayName}": ${err instanceof Error ? err.message : err}`,
         );
+      }
+    }
+
+    for (const account of matonGmailAccounts) {
+      try {
+        if (matonGmailSetupError) throw matonGmailSetupError;
+        const connection = resolveMatonGmailConnection(matonGmailConnections!, account);
+        const client = new MatonGmailApiClient(matonApiKey!, connection.connectionId);
+        const provider = new GmailEmailProvider(client);
+        connectedMailboxes.push({
+          name: account,
+          emailAddress: account,
+          displayName: account,
+          providerType: 'gmail',
+          provider,
+          auth: {
+            getTokenHealthWarning: () => undefined,
+            tryReconnect: async () => false,
+          },
+          isDefault: false,
+          status: 'connected',
+        });
+        console.error(`[email-agent-mcp] Connected to Gmail mailbox "${account}" via Maton`);
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        failedMailboxes.push({
+          name: account,
+          emailAddress: account,
+          displayName: account,
+          providerType: 'gmail',
+          provider: null,
+          auth: null,
+          isDefault: false,
+          status: 'error',
+          error,
+        });
+        console.error(`[email-agent-mcp] Skipping Gmail mailbox "${account}": ${error}`);
       }
     }
 

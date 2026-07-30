@@ -51,7 +51,7 @@ export interface GmailApiClient {
    * the draft into an existing thread (used by reply-draft flows).
    */
   createDraft(raw: string, threadId?: string): Promise<{ id: string; message: { id: string; threadId: string } }>;
-  sendDraft(draftId: string): Promise<{ id: string; message: { id: string; threadId: string } }>;
+  sendDraft(draftId: string): Promise<{ id: string; threadId: string }>;
   /**
    * Update an existing draft by full replacement with a raw RFC 2822
    * message. Optional `threadId` preserves the draft's thread association
@@ -243,7 +243,7 @@ export class GmailEmailProvider {
 
   async sendDraft(draftId: string): Promise<SendResult> {
     const result = await this.client.sendDraft(draftId);
-    return { success: true, messageId: result.message.id };
+    return { success: true, messageId: result.id };
   }
 
   async createReplyDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {

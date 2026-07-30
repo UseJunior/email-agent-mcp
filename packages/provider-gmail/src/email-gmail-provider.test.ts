@@ -51,7 +51,7 @@ function createMockGmailClient(overrides: Partial<GmailApiClient> = {}): GmailAp
     modifyMessage: vi.fn().mockResolvedValue(undefined),
     getThread: vi.fn().mockResolvedValue({ id: 'thread-1', messages: [] }),
     createDraft: vi.fn().mockResolvedValue({ id: 'draft-abc', message: { id: 'msg-draft', threadId: 'thread-draft' } }),
-    sendDraft: vi.fn().mockResolvedValue({ id: 'draft-abc', message: { id: 'sent-draft-msg', threadId: 'thread-draft' } }),
+    sendDraft: vi.fn().mockResolvedValue({ id: 'sent-draft-msg', threadId: 'thread-draft' }),
     updateDraft: vi.fn().mockResolvedValue({ id: 'draft-abc', message: { id: 'msg-updated', threadId: 'thread-draft' } }),
     ...overrides,
   };

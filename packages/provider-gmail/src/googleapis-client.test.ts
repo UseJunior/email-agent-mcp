@@ -31,7 +31,7 @@ function createMockApi() {
       drafts: {
         create: vi.fn().mockResolvedValue({ data: { id: 'd-1', message: { id: 'm-draft', threadId: 't-draft' } } }),
         get: vi.fn().mockResolvedValue({ data: { id: 'd-1', message: message('m-draft', 't-draft') } }),
-        send: vi.fn().mockResolvedValue({ data: { id: 'd-1', message: { id: 'm-sent-draft', threadId: 't-draft' } } }),
+        send: vi.fn().mockResolvedValue({ data: { id: 'm-sent-draft', threadId: 't-draft' } }),
         update: vi.fn().mockResolvedValue({ data: { id: 'd-1', message: { id: 'm-updated-draft', threadId: 't-draft' } } }),
       },
       threads: {
@@ -280,8 +280,8 @@ describe('provider-gmail/GoogleapisGmailClient', () => {
       requestBody: { id: 'd-1' },
     });
     expect(result).toEqual({
-      id: 'd-1',
-      message: { id: 'm-sent-draft', threadId: 't-draft' },
+      id: 'm-sent-draft',
+      threadId: 't-draft',
     });
   });
 

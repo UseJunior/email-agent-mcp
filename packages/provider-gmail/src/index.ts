@@ -25,4 +25,11 @@ export {
 } from './config.js';
 export type { GmailMailboxMetadata, GmailAuthSource } from './config.js';
 export { GoogleapisGmailClient } from './googleapis-client.js';
+export {
+  MatonGmailApiClient,
+  loadMatonGmailConnections,
+  parseMatonGmailAccounts,
+  resolveMatonGmailConnection,
+} from './maton.js';
+export type { MatonGmailConnection } from './maton.js';
 export { registerWatch, needsRenewal, pollHistory } from './push.js';

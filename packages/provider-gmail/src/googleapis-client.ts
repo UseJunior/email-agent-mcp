@@ -55,7 +55,7 @@ interface GmailDraftsApi {
   send(args: {
     userId: string;
     requestBody: { id: string };
-  }): Promise<{ data?: GmailDraft }>;
+  }): Promise<{ data?: MessageSummary }>;
   update(args: {
     userId: string;
     id: string;
@@ -269,13 +269,13 @@ export class GoogleapisGmailClient implements GmailApiClient {
     return requireDraft(response.data, 'drafts.create');
   }
 
-  async sendDraft(draftId: string): Promise<{ id: string; message: { id: string; threadId: string } }> {
+  async sendDraft(draftId: string): Promise<{ id: string; threadId: string }> {
     const response = await this.api.users.drafts.send({
       userId: 'me',
       requestBody: { id: draftId },
     });
 
-    return requireDraft(response.data, 'drafts.send');
+    return requireMessageSummary(response.data, 'drafts.send');
   }
 
   async updateDraft(draftId: string, raw: string, threadId?: string): Promise<{ id: string; message: { id: string; threadId: string } }> {
