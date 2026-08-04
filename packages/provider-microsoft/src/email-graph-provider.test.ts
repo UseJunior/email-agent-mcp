@@ -1497,12 +1497,85 @@ describe('provider-microsoft/Reply-All Routing', () => {
     const provider = new GraphEmailProvider(client);
 
     await provider.createReplyDraft('msg-1', 'reply', {
+      replyAll: false,
       to: [{ email: 'first@corp.com' }, { email: 'second@corp.com' }],
     });
 
     const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
     const patch = patchArgs[1] as { toRecipients?: Array<{ emailAddress: { address: string } }> };
     expect(patch.toRecipients?.map(r => r.emailAddress.address)).toEqual(['first@corp.com', 'second@corp.com']);
+  });
+
+  it('Scenario: explicit to under reply-all demotes displaced participants to Cc (issue #164)', async () => {
+    // Graph's createReplyAll puts the parent's sender AND its other To
+    // participants on the draft's To. Replacing that list must not drop them —
+    // reply-all means the thread stays on the message.
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse({
+        toRecipients: [
+          { emailAddress: { address: 'alice@corp.com' } },
+          { emailAddress: { address: 'bob@corp.com' } },
+        ],
+        ccRecipients: [{ emailAddress: { address: 'carol@corp.com' } }],
+      })),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createReplyDraft('msg-1', 'reply', {
+      to: [{ email: 'recipient@corp.com' }],
+    });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const patch = patchArgs[1] as {
+      toRecipients?: Array<{ emailAddress: { address: string } }>;
+      ccRecipients?: Array<{ emailAddress: { address: string } }>;
+    };
+    expect(patch.toRecipients?.map(r => r.emailAddress.address)).toEqual(['recipient@corp.com']);
+    expect(patch.ccRecipients?.map(r => r.emailAddress.address))
+      .toEqual(['carol@corp.com', 'alice@corp.com', 'bob@corp.com']);
+  });
+
+  it('Scenario: a caller addressed on To is not also demoted to Cc (issue #164)', async () => {
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse({
+        toRecipients: [
+          { emailAddress: { address: 'Alice@Corp.com' } },
+          { emailAddress: { address: 'bob@corp.com' } },
+        ],
+        ccRecipients: [],
+      })),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createReplyDraft('msg-1', 'reply', {
+      to: [{ email: 'alice@corp.com' }],
+    });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const patch = patchArgs[1] as { ccRecipients?: Array<{ emailAddress: { address: string } }> };
+    // Case-insensitive: alice stays on To only; bob is the sole demoted address.
+    expect(patch.ccRecipients?.map(r => r.emailAddress.address)).toEqual(['bob@corp.com']);
+  });
+
+  it('Scenario: replyAll false does not demote the displaced sender to Cc (issue #164)', async () => {
+    // createReply's To is just the parent's sender. A narrowed redirect is
+    // meant to drop them, so nothing is demoted.
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse({
+        toRecipients: [{ emailAddress: { address: 'alice@corp.com' } }],
+        ccRecipients: [],
+      })),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createReplyDraft('msg-1', 'reply', {
+      replyAll: false,
+      to: [{ email: 'recipient@corp.com' }],
+    });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const patch = patchArgs[1] as Record<string, unknown>;
+    expect(patch).not.toHaveProperty('ccRecipients');
   });
 
   it('Scenario: omitted to leaves toRecipients out of the PATCH (issue #164 no-op guard)', async () => {

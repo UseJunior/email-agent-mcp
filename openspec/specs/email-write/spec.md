@@ -209,7 +209,9 @@ On `create_draft`, `reply_all` is meaningful only alongside `reply_to`; for a no
 
 `create_draft` requires `to` on every path, so on the reply path it SHALL forward those recipients to the provider rather than discarding them. `ReplyOptions` SHALL carry an optional `to` list for this purpose.
 
-An explicit `to` SHALL **replace** the provider-derived To rather than merge with it, unlike `cc`, which merges with the thread's. Replacing is what makes redirecting a thread to a different recipient expressible, and it matches what `to` means on every other compose surface. Other thread participants remain reachable through `reply_all` or an explicit `cc`.
+An explicit `to` SHALL **replace** the provider-derived To rather than merge with it, unlike `cc`, which merges with the thread's. Replacing is what makes redirecting a thread to a different recipient expressible, and it matches what `to` means on every other compose surface.
+
+Replacing the To line SHALL NOT drop recipients. Under reply-all, providers SHALL move participants displaced from the To line onto Cc, so the effective audience of a reply-all is never narrowed by supplying `to`; a recipient now addressed on To SHALL NOT also appear on Cc. Under `reply_all: false` nothing is preserved — narrowing to an explicit recipient set is the point.
 
 When `to` is absent or empty, providers SHALL leave their derived To untouched: Microsoft omits `toRecipients` from the follow-up PATCH so Graph's auto-populated recipients stand, and Gmail addresses the original sender. `reply_to_email` has no `to` input and therefore SHALL continue to use the provider-derived To on both its send and draft paths.
 

@@ -59,6 +59,8 @@ The system SHALL use `createReplyAll` for replies. `createReplyAll` preserves em
 
 Graph's `createReply` / `createReplyAll` auto-populate the draft's To from the parent message. When `ReplyOptions.to` is supplied and non-empty, the follow-up PATCH SHALL set `toRecipients` to exactly those addresses, replacing Graph's derived To. Unlike `ccRecipients` and `bccRecipients`, which merge with the thread's, `toRecipients` SHALL NOT merge — merging would leave the parent's sender addressed, which is the failure this replaces. When `to` is absent or empty, the PATCH SHALL omit `toRecipients` entirely so Graph's derived To stands.
 
+On the `createReplyAll` endpoint, Graph places both the parent's sender and the thread's other To participants on the draft's To. When an explicit `to` displaces them, those addresses SHALL be merged into `ccRecipients` with case-insensitive deduplication, so a reply-all's audience is never narrowed by supplying `to`. Addresses now on the caller's To SHALL be excluded from that demotion. On the `createReply` endpoint no demotion SHALL occur.
+
 #### Scenario: explicit to replaces Graph auto-populated recipients (issue #164)
 - **WHEN** a reply draft is created against a parent the mailbox owner sent, with `replyAll: false` and an explicit `to`
 - **THEN** the PATCH sets `toRecipients` to the caller's addresses, with display names preserved
@@ -67,6 +69,19 @@ Graph's `createReply` / `createReplyAll` auto-populate the draft's To from the p
 #### Scenario: explicit to with several addresses patches all of them (issue #164)
 - **WHEN** a reply draft is created with several `to` entries
 - **THEN** the PATCH carries every address in order
+
+#### Scenario: explicit to under reply-all demotes displaced participants to Cc (issue #164)
+- **WHEN** `createReplyAll` returns several auto-populated `toRecipients` and the caller supplies an explicit `to`
+- **THEN** the PATCH addresses only the caller's recipients on `toRecipients`
+- **AND** every displaced participant appears on `ccRecipients` alongside Graph's existing Cc
+
+#### Scenario: a caller addressed on To is not also demoted to Cc (issue #164)
+- **WHEN** one of Graph's auto-populated To recipients matches a caller `to` entry, differing only in case
+- **THEN** that address stays on To and is absent from `ccRecipients`
+
+#### Scenario: replyAll false does not demote the displaced sender to Cc (issue #164)
+- **WHEN** a reply draft is created with `replyAll: false` and an explicit `to`
+- **THEN** the PATCH has no `ccRecipients` property — the parent's sender is deliberately dropped
 
 #### Scenario: omitted to leaves toRecipients out of the PATCH (issue #164 no-op guard)
 - **WHEN** a reply draft is created with a `cc` but no `to`

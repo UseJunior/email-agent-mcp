@@ -49,7 +49,7 @@ const DraftOutput = z.object({
 
 const CreateDraftInput = z.object({
   to: z.string().or(z.array(z.string())).optional()
-    .describe('Recipient address(es). With reply_to set, this replaces the provider-derived To rather than adding to it, so the draft is addressed to exactly these recipients; other thread participants remain reachable via reply_all or an explicit cc.'),
+    .describe('Recipient address(es). With reply_to set, this replaces the provider-derived To rather than adding to it, so the draft is addressed to exactly these recipients. Under reply_all, thread participants displaced from the To line move to Cc rather than being dropped; pass reply_all=false to address the reply to these recipients alone.'),
   cc: z.array(z.string()).optional(),
   subject: z.string().optional(),
   body: z.string().optional(),

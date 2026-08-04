@@ -970,6 +970,42 @@ describe('provider-gmail/Reply Drafts', () => {
     expect(raw).not.toContain('alice@corp.com');
   });
 
+  it('Scenario: explicit to under reply-all moves the displaced sender to Cc (issue #164)', async () => {
+    // Parity with Microsoft: replacing the To line must not drop the parent's
+    // sender when the caller asked for reply-all.
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(originalMessageMock()),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.createReplyDraft('msg-original', 'reply', {
+      to: [{ email: 'recipient@corp.com' }],
+    });
+
+    const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
+    expect(raw).toMatch(/^To: .*recipient@corp\.com/m);
+    // alice (the parent's sender) survives on Cc alongside the thread.
+    expect(raw).toMatch(/^Cc: .*alice@corp\.com.*bob@corp\.com.*carol@corp\.com/m);
+  });
+
+  it('Scenario: a caller addressed on To is not also listed on Cc (issue #164)', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(originalMessageMock()),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.createReplyDraft('msg-original', 'reply', {
+      to: [{ email: 'BOB@corp.com' }],
+    });
+
+    const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
+    const ccLine = raw.split(/\r?\n/).find(l => l.startsWith('Cc: '))!;
+    // Case-insensitive: bob is addressed on To, so he is absent from Cc.
+    expect(ccLine.toLowerCase()).not.toContain('bob@corp.com');
+    expect(ccLine).toContain('alice@corp.com');
+    expect(ccLine).toContain('carol@corp.com');
+  });
+
   it('Scenario: omitted to keeps the original sender as To (issue #164 no-op guard)', async () => {
     const client = createMockGmailClient({
       getMessage: vi.fn().mockResolvedValue(originalMessageMock()),
