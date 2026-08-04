@@ -214,10 +214,14 @@ export class GmailEmailProvider {
       : mergeAddressLists(original.to, original.cc, opts?.cc);
     const subject = prefixReSubject(original.subject);
     const references = buildReferences(original.references, original.messageId);
+    // Explicit To replaces the original sender rather than merging (issue
+    // #164). No action-layer send path supplies opts.to today; if one ever
+    // does, its allowlist collection must cover these addresses.
+    const replyTo = opts?.to && opts.to.length > 0 ? opts.to : [original.from];
 
     const raw = buildRawMessage(
       {
-        to: [original.from],
+        to: replyTo,
         cc: replyCc.length > 0 ? replyCc : undefined,
         bcc: opts?.bcc,
         subject,
@@ -254,10 +258,14 @@ export class GmailEmailProvider {
         : mergeAddressLists(original.to, original.cc, opts?.cc);
       const subject = prefixReSubject(original.subject);
       const references = buildReferences(original.references, original.messageId);
+      // Explicit To replaces the original sender rather than merging (issue
+      // #164). Drafts stay allowlist-exempt; send_draft re-reads the stored
+      // draft's recipients and gates them there.
+      const replyTo = opts?.to && opts.to.length > 0 ? opts.to : [original.from];
 
       const raw = buildRawMessage(
         {
-          to: [original.from],
+          to: replyTo,
           cc: replyCc.length > 0 ? replyCc : undefined,
           bcc: opts?.bcc,
           subject,

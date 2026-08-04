@@ -1064,6 +1064,18 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       ],
     };
 
+    // `to` REPLACES Graph's auto-populated recipients; `cc`/`bcc` below MERGE
+    // with the thread's. The asymmetry is deliberate (issue #164): merging a
+    // caller-supplied To would leave the parent's sender on the To line, which
+    // is exactly the failure being fixed — a reply to your own sent message
+    // stays addressed to yourself. Absent `to`, the patch omits toRecipients
+    // entirely and Graph's derived To stands, unchanged from before.
+    // mergeRecipients([], …) is reused only for its EmailAddress →
+    // GraphRecipient conversion and case-insensitive dedupe.
+    if (opts?.to && opts.to.length > 0) {
+      patch.toRecipients = mergeRecipients([], opts.to);
+    }
+
     const ccMerged = mergeRecipients(draftCc, opts?.cc ?? []);
     if (ccMerged.length > 0) patch.ccRecipients = ccMerged;
 

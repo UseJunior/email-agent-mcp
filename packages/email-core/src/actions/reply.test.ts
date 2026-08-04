@@ -171,6 +171,21 @@ describe('email-write/Reply Draft', () => {
     expect(provider.getSentMessages()).toHaveLength(0);
   });
 
+  it('Scenario: reply_to_email draft keeps the provider-derived To (issue #164 no-op guard)', async () => {
+    // reply_to_email has no `to` input, so it passes no ReplyOptions.to and the
+    // provider default must stand exactly as it did before the #164 change.
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: VALID_MSG_ID,
+      body: 'Draft reply!',
+      draft: true,
+    });
+
+    expect(result.success).toBe(true);
+    const draft = provider.getDrafts().get(result.draftId!)!;
+    const original = await provider.getMessage(VALID_MSG_ID);
+    expect(draft.to.map(a => a.email)).toEqual([original.from.email]);
+  });
+
   it('Scenario: Reply draft to blocked recipient succeeds (drafts bypass allowlist)', async () => {
     const blockedMsgId = 'blocked_msg_1234567890ab';
     provider.addMessage({

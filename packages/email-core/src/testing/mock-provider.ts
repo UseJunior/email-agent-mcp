@@ -328,7 +328,9 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSchedul
     }
     const draftId = `draft-${this.nextId++}`;
     this.drafts.set(draftId, {
-      to: [original.from],
+      // Mirror both real providers: an explicit opts.to replaces the derived
+      // recipient; absent it, the reply is addressed to the original sender.
+      to: opts?.to && opts.to.length > 0 ? opts.to : [original.from],
       cc: opts?.cc,
       subject: `Re: ${original.subject}`,
       body,

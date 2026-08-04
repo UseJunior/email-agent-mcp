@@ -94,6 +94,93 @@ Body from file.`);
     expect(result.draftId).toBeDefined();
   });
 
+  it('Scenario: Reply draft to a self-sent message honors caller-supplied to (issue #164)', async () => {
+    // The reported failure: replying to a message the mailbox owner sent makes
+    // the provider derive To from the parent's sender — the owner. With
+    // reply_all false there is nobody else on the draft, so it ends up
+    // addressed to nobody but the mailbox owner and the intended recipient is
+    // silently absent.
+    provider.addMessage({
+      id: 'self-sent-msg',
+      subject: 'Self Sent',
+      from: { email: 'me@company.com' },
+      to: [{ email: 'me@company.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'recipient@allowed.com',
+      cc: ['someone-else@allowed.com'],
+      subject: 'Re: Self Sent',
+      body: 'Reply draft body',
+      reply_to: 'self-sent-msg',
+      reply_all: false,
+    });
+
+    expect(result.success).toBe(true);
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.to.map(a => a.email)).toEqual(['recipient@allowed.com']);
+    expect(draft.to.map(a => a.email)).not.toContain('me@company.com');
+    expect(draft.cc?.map(a => a.email)).toEqual(['someone-else@allowed.com']);
+  });
+
+  it('Scenario: Reply draft with multiple to recipients forwards all of them (issue #164)', async () => {
+    provider.addMessage({
+      id: 'multi-orig-msg',
+      subject: 'Multi',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+
+    const result = await createDraftAction.run(ctx, {
+      to: ['First Recipient <first@allowed.com>', 'second@allowed.com'],
+      subject: 'Re: Multi',
+      body: 'Reply draft body',
+      reply_to: 'multi-orig-msg',
+    });
+
+    expect(result.success).toBe(true);
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.to.map(a => a.email)).toEqual(['first@allowed.com', 'second@allowed.com']);
+    expect(draft.to[0]!.name).toBe('First Recipient');
+  });
+
+  it('Scenario: Reply draft to blocked recipient is still gated at send_draft time (issue #164)', async () => {
+    // create_draft bypasses the allowlist by design. Letting the caller set To
+    // on a reply draft must not smuggle a recipient past enforcement: send_draft
+    // re-reads the stored draft's own recipients, so the explicit To is gated
+    // exactly like a To on a non-reply draft.
+    provider.addMessage({
+      id: 'gate-orig-msg',
+      subject: 'Gate',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+
+    const draftResult = await createDraftAction.run(ctx, {
+      to: 'hacker@evil.com',
+      subject: 'Re: Gate',
+      body: 'Body',
+      reply_to: 'gate-orig-msg',
+      reply_all: false,
+    });
+    expect(draftResult.success).toBe(true);
+
+    const sendResult = await sendDraftAction.run(ctx, { draft_id: draftResult.draftId! });
+
+    expect(sendResult.success).toBe(false);
+    expect(sendResult.error!.code).toBe('ALLOWLIST_BLOCKED');
+    expect(provider.getSentMessages()).toHaveLength(0);
+  });
+
   it('Scenario: Create reply draft when provider lacks createReplyDraft', async () => {
     // Remove createReplyDraft from provider
     (provider as Record<string, unknown>).createReplyDraft = undefined;

@@ -48,7 +48,8 @@ const DraftOutput = z.object({
 // --- create_draft ---
 
 const CreateDraftInput = z.object({
-  to: z.string().or(z.array(z.string())).optional(),
+  to: z.string().or(z.array(z.string())).optional()
+    .describe('Recipient address(es). With reply_to set, this replaces the provider-derived To rather than adding to it, so the draft is addressed to exactly these recipients; other thread participants remain reachable via reply_all or an explicit cc.'),
   cc: z.array(z.string()).optional(),
   subject: z.string().optional(),
   body: z.string().optional(),
@@ -144,6 +145,10 @@ export const createDraftAction: EmailAction<
       }
       try {
         const result = await ctx.provider.createReplyDraft(replyTo, body, {
+          // `to` is a required input on this action, so forward it rather than
+          // letting the provider derive the To from the parent (issue #164).
+          // Providers treat an explicit `to` as a replacement, not a merge.
+          to: parsed.to,
           cc: parsed.cc,
           bodyHtml: outBodyHtml,
           attachments: attachments.length > 0 ? attachments : undefined,

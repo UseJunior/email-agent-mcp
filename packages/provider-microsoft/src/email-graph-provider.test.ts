@@ -1467,6 +1467,72 @@ describe('provider-microsoft/Reply-All Routing', () => {
     const patch = patchArgs[1] as { ccRecipients?: Array<{ emailAddress: { address: string } }> };
     expect(patch.ccRecipients?.map(r => r.emailAddress.address)).toEqual(['manager@corp.com']);
   });
+
+  it('Scenario: explicit to replaces Graph auto-populated recipients (issue #164)', async () => {
+    // Self-sent parent: Graph's createReply addresses the draft back to the
+    // mailbox owner. An explicit To must replace that, not merge with it.
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse({
+        ccRecipients: [],
+        toRecipients: [{ emailAddress: { address: 'owner@corp.com' } }],
+      })),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createReplyDraft('msg-1', 'reply', {
+      replyAll: false,
+      to: [{ email: 'recipient@corp.com', name: 'Recipient' }],
+    });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const patch = patchArgs[1] as { toRecipients?: Array<{ emailAddress: { address: string; name?: string } }> };
+    expect(patch.toRecipients?.map(r => r.emailAddress.address)).toEqual(['recipient@corp.com']);
+    expect(patch.toRecipients?.[0]!.emailAddress.name).toBe('Recipient');
+  });
+
+  it('Scenario: explicit to with several addresses patches all of them (issue #164)', async () => {
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse()),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createReplyDraft('msg-1', 'reply', {
+      to: [{ email: 'first@corp.com' }, { email: 'second@corp.com' }],
+    });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const patch = patchArgs[1] as { toRecipients?: Array<{ emailAddress: { address: string } }> };
+    expect(patch.toRecipients?.map(r => r.emailAddress.address)).toEqual(['first@corp.com', 'second@corp.com']);
+  });
+
+  it('Scenario: omitted to leaves toRecipients out of the PATCH (issue #164 no-op guard)', async () => {
+    // Regression guard: without an explicit To the PATCH must not mention
+    // toRecipients at all, so Graph's derived To stands untouched.
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse()),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createReplyDraft('msg-1', 'reply', {
+      cc: [{ email: 'manager@corp.com' }],
+    });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const patch = patchArgs[1] as Record<string, unknown>;
+    expect(patch).not.toHaveProperty('toRecipients');
+  });
+
+  it('Scenario: empty to array leaves toRecipients out of the PATCH (issue #164)', async () => {
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse()),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createReplyDraft('msg-1', 'reply', { to: [] });
+
+    const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(patchArgs[1] as Record<string, unknown>).not.toHaveProperty('toRecipients');
+  });
 });
 
 describe('provider-microsoft/Size Limits', () => {

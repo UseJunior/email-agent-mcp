@@ -925,6 +925,74 @@ describe('provider-gmail/Reply Drafts', () => {
     const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
     expect(raw).toMatch(/Cc: .*bob@corp\.com.*carol@corp\.com/);
   });
+
+  it('Scenario: explicit to replaces the original sender on a self-sent parent (issue #164)', async () => {
+    // Parent sent by the mailbox owner, so original.from is the owner. Without
+    // an explicit To the draft comes back addressed to the owner alone.
+    const selfSent = {
+      ...originalMessageMock(),
+      payload: {
+        ...originalMessageMock().payload,
+        headers: [
+          ...originalMessageMock().payload.headers.filter(h => h.name !== 'From'),
+          { name: 'From', value: '"Owner" <owner@corp.com>' },
+        ],
+      },
+    };
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(selfSent),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.createReplyDraft('msg-original', 'reply', {
+      replyAll: false,
+      to: [{ email: 'recipient@corp.com', name: 'Recipient' }],
+    });
+
+    const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
+    expect(raw).toContain('To: "Recipient" <recipient@corp.com>');
+    expect(raw).not.toContain('owner@corp.com');
+  });
+
+  it('Scenario: explicit to with several addresses lands on the To header (issue #164)', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(originalMessageMock()),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.createReplyDraft('msg-original', 'reply', {
+      replyAll: false,
+      to: [{ email: 'first@corp.com' }, { email: 'second@corp.com' }],
+    });
+
+    const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
+    expect(raw).toMatch(/^To: .*first@corp\.com.*second@corp\.com/m);
+    expect(raw).not.toContain('alice@corp.com');
+  });
+
+  it('Scenario: omitted to keeps the original sender as To (issue #164 no-op guard)', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(originalMessageMock()),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.createReplyDraft('msg-original', 'reply', { replyAll: false });
+
+    const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
+    expect(raw).toContain('To: "Alice" <alice@corp.com>');
+  });
+
+  it('Scenario: empty to array keeps the original sender as To (issue #164)', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(originalMessageMock()),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.createReplyDraft('msg-original', 'reply', { replyAll: false, to: [] });
+
+    const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
+    expect(raw).toContain('To: "Alice" <alice@corp.com>');
+  });
 });
 
 describe('provider-gmail/Reply Threading on Send', () => {
@@ -975,6 +1043,37 @@ describe('provider-gmail/Reply Threading on Send', () => {
     expect(raw).toContain('In-Reply-To: <msg-xyz@corp.com>');
     expect(raw).toContain('References: <msg-xyz@corp.com>');
     expect(raw).toContain('Subject: Re: Urgent');
+  });
+
+  it('Scenario: replyToMessage honors explicit to (issue #164)', async () => {
+    // Parity with the draft path. No action-layer send path passes `to` today —
+    // reply_to_email has no such input — so this only fixes the provider
+    // contract; any future send caller must allowlist-check these addresses.
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(ccThreadMessageMock()),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.replyToMessage('msg-original', 'redirected', {
+      replyAll: false,
+      to: [{ email: 'recipient@corp.com' }],
+    });
+
+    const raw = lastRaw(client.sendMessage as ReturnType<typeof vi.fn>);
+    expect(raw).toMatch(/^To: .*recipient@corp\.com/m);
+    expect(raw).not.toContain('alice@corp.com');
+  });
+
+  it('Scenario: replyToMessage without to keeps the original sender (issue #164 no-op guard)', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(ccThreadMessageMock()),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.replyToMessage('msg-original', 'reply');
+
+    const raw = lastRaw(client.sendMessage as ReturnType<typeof vi.fn>);
+    expect(raw).toContain('To: "Alice" <alice@corp.com>');
   });
 
   it('Scenario: replyToMessage with replyAll: false omits thread participants from Cc', async () => {

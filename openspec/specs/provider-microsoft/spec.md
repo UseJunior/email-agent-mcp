@@ -55,6 +55,27 @@ The system SHALL use `createReplyAll` for replies. `createReplyAll` preserves em
 - **WHEN** `update_draft` is called on a draft with no quoted-thread marker
 - **THEN** the body is PATCHed wholesale via `buildGraphBody` (existing behavior unchanged)
 
+### Requirement: Reply To Recipients
+
+Graph's `createReply` / `createReplyAll` auto-populate the draft's To from the parent message. When `ReplyOptions.to` is supplied and non-empty, the follow-up PATCH SHALL set `toRecipients` to exactly those addresses, replacing Graph's derived To. Unlike `ccRecipients` and `bccRecipients`, which merge with the thread's, `toRecipients` SHALL NOT merge — merging would leave the parent's sender addressed, which is the failure this replaces. When `to` is absent or empty, the PATCH SHALL omit `toRecipients` entirely so Graph's derived To stands.
+
+#### Scenario: explicit to replaces Graph auto-populated recipients (issue #164)
+- **WHEN** a reply draft is created against a parent the mailbox owner sent, with `replyAll: false` and an explicit `to`
+- **THEN** the PATCH sets `toRecipients` to the caller's addresses, with display names preserved
+- **AND** the mailbox owner's auto-populated address is not among them
+
+#### Scenario: explicit to with several addresses patches all of them (issue #164)
+- **WHEN** a reply draft is created with several `to` entries
+- **THEN** the PATCH carries every address in order
+
+#### Scenario: omitted to leaves toRecipients out of the PATCH (issue #164 no-op guard)
+- **WHEN** a reply draft is created with a `cc` but no `to`
+- **THEN** the PATCH body has no `toRecipients` property at all
+
+#### Scenario: empty to array leaves toRecipients out of the PATCH (issue #164)
+- **WHEN** a reply draft is created with `to: []`
+- **THEN** the PATCH body has no `toRecipients` property at all
+
 ### Requirement: Validation Token Handling
 
 The system SHALL respond to Graph validation requests on BOTH GET and POST methods. The `validationToken` query parameter SHALL be HTML-escaped and returned as `200 OK` plaintext.
