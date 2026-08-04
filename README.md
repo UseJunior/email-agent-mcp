@@ -142,7 +142,36 @@ If your mailbox status name is not an email address, pass `--reply-sender <email
 
 ## Tool Reference
 
-Agent Email exposes 26 MCP tools:
+### Scope profiles
+
+Set `EMAIL_AGENT_MCP_SCOPE_PROFILE` before configuring and starting the server to
+choose the permissions exposed to an agent. The default is `full` for backward
+compatibility.
+
+| Profile | Microsoft delegated scopes | Exposed tools |
+|---------|-----------------------------|---------------|
+| `observe` | `Mail.Read`, `MailboxSettings.Read`, `User.Read`, `offline_access` | Read-only email tools plus local mailbox configuration/authentication tools |
+| `full` (default) | `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `MailboxSettings.ReadWrite`, `User.Read`, `offline_access` | All tools |
+
+For an observation-only deployment, set the profile for both configuration and
+runtime so the OAuth consent and MCP tool list agree:
+
+```bash
+export EMAIL_AGENT_MCP_SCOPE_PROFILE=observe
+npx email-agent-mcp configure
+npx email-agent-mcp serve
+```
+
+Changing profiles changes the Microsoft OAuth scope set. MSAL caches tokens by
+scope, so restart the server and run `email-agent-mcp configure` again to grant
+the new scopes. In particular, switching from `observe` to `full` requires a new
+interactive consent before write tools can be used. An invalid profile value
+stops startup instead of silently granting broader access.
+
+### Tools
+
+The `full` profile exposes 26 MCP tools; `observe` omits every tool whose action
+is marked as mailbox-mutating:
 
 | Tool | Description | Type |
 |------|-------------|------|

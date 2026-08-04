@@ -6,6 +6,9 @@ import {
   EmailThreadFieldsSchema,
   getEmailDraftStatus,
   getEmailThreadFields,
+  filterActionsForProfile,
+  getEmailScopeProfile,
+  profileBlockedActionError,
 } from '@usejunior/email-core';
 import { z } from 'zod';
 
@@ -99,6 +102,8 @@ export interface EmailActionDef {
   annotations: { readOnlyHint: boolean; destructiveHint: boolean };
   run: (ctx: unknown, input: unknown) => Promise<unknown>;
 }
+
+type ProfiledActionList = EmailActionDef[] & { profileBlockedActionNames?: ReadonlySet<string> };
 
 /**
  * Generate MCP tool list from action registry.
@@ -240,6 +245,9 @@ export async function executeTool(
 ): Promise<{ result: unknown; input: unknown }> {
   const action = actions.find(a => a.name === toolName);
   if (!action) {
+    if ((actions as ProfiledActionList).profileBlockedActionNames?.has(toolName)) {
+      throw profileBlockedActionError(toolName);
+    }
     throw new Error(`Unknown tool: ${toolName}`);
   }
 
@@ -764,7 +772,7 @@ export async function buildLazyActions(
     isDraft: false,
   });
 
-  return [
+  const actions: EmailActionDef[] = [
     {
       name: 'list_emails',
       description: 'List recent emails with filtering by unread status, folder, sender, and limit. Use offset for pagination. A row with `isDraft: true` is an unsent draft — it has NOT been sent, and its `receivedAt` is provider-supplied metadata, not evidence of delivery. Never describe such a row as a sent, delivered, or received email.',
@@ -1069,6 +1077,17 @@ export async function buildLazyActions(
     wrapAction(createInboxRuleAction),
     wrapAction(deleteInboxRuleAction),
   ];
+
+  const profile = getEmailScopeProfile();
+  const filtered = filterActionsForProfile(actions, profile) as ProfiledActionList;
+  if (profile === 'observe') {
+    const exposedNames = new Set(filtered.map(action => action.name));
+    Object.defineProperty(filtered, 'profileBlockedActionNames', {
+      value: new Set(actions.filter(action => !exposedNames.has(action.name)).map(action => action.name)),
+      enumerable: false,
+    });
+  }
+  return filtered;
 }
 
 /**
@@ -1105,6 +1124,7 @@ export async function runServer(): Promise<void> {
   // Build tool registry with lazy provider state (no auth yet).
   const state = createLazyProviderState();
   const actions = await buildLazyActions(state, getSendAllowlist, getDeletePolicy);
+  const scopeProfile = getEmailScopeProfile();
 
   const server = new Server(
     { name: 'email-agent-mcp', version: PACKAGE_VERSION },
@@ -1129,7 +1149,7 @@ export async function runServer(): Promise<void> {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`[email-agent-mcp] MCP server started on stdio (${tools.length} tools) — provider init deferred`);
+  console.error(`[email-agent-mcp] MCP server started on stdio (${tools.length} tools, ${scopeProfile} scope profile) — provider init deferred`);
 
   // Fire-and-forget: warm up the provider in the background so most first tool
   // calls hit a ready provider. initProvider is safe to call without awaiting

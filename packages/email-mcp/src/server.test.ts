@@ -342,6 +342,26 @@ describe('mcp-transport/Lazy Provider State', () => {
     ]));
   });
 
+  it('Scenario: observe profile exposes only read-only tools', async () => {
+    const previous = process.env['EMAIL_AGENT_MCP_SCOPE_PROFILE'];
+    process.env['EMAIL_AGENT_MCP_SCOPE_PROFILE'] = 'observe';
+    try {
+      const state = createLazyProviderState();
+      const actions = await buildLazyActions(state, noAllowlist);
+
+      expect(actions.length).toBeGreaterThan(0);
+      expect(actions.every(action => action.annotations.readOnlyHint)).toBe(true);
+      expect(actions.map(action => action.name)).toContain('read_email');
+      expect(actions.map(action => action.name)).not.toContain('send_email');
+      await expect(executeTool(actions, {}, 'send_email', {})).rejects.toThrow(
+        'unavailable under the "observe" scope profile',
+      );
+    } finally {
+      if (previous === undefined) delete process.env['EMAIL_AGENT_MCP_SCOPE_PROFILE'];
+      else process.env['EMAIL_AGENT_MCP_SCOPE_PROFILE'] = previous;
+    }
+  });
+
   it('Scenario: get_mailbox_status is non-blocking during pending/connecting', async () => {
     const state = createLazyProviderState();
     const actions = await buildLazyActions(state, noAllowlist);
