@@ -1039,6 +1039,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
     if (!draft.id) throw new Error(`${endpoint} did not return a draft id`);
 
     let draftBody = draft.body as { contentType?: string; content?: string } | undefined;
+    let draftTo = (draft.toRecipients as GraphRecipient[] | undefined) ?? [];
     let draftCc = (draft.ccRecipients as GraphRecipient[] | undefined) ?? [];
     let draftBcc = (draft.bccRecipients as GraphRecipient[] | undefined) ?? [];
 
@@ -1047,6 +1048,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
     if (typeof draftBody?.content !== 'string' || draftBody.contentType?.toLowerCase() !== 'html') {
       const fetched = await this.client.get(`${this.basePath}/messages/${encodeGraphPathId(draft.id)}`);
       draftBody = fetched.body as { contentType?: string; content?: string } | undefined;
+      draftTo = (fetched.toRecipients as GraphRecipient[] | undefined) ?? [];
       draftCc = (fetched.ccRecipients as GraphRecipient[] | undefined) ?? [];
       draftBcc = (fetched.bccRecipients as GraphRecipient[] | undefined) ?? [];
     }
@@ -1064,7 +1066,36 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       ],
     };
 
-    const ccMerged = mergeRecipients(draftCc, opts?.cc ?? []);
+    // `to` REPLACES Graph's auto-populated recipients; `cc`/`bcc` below MERGE
+    // with the thread's. The asymmetry is deliberate (issue #164): merging a
+    // caller-supplied To would leave the parent's sender on the To line, which
+    // is exactly the failure being fixed — a reply to your own sent message
+    // stays addressed to yourself. Absent `to`, the patch omits toRecipients
+    // entirely and Graph's derived To stands, unchanged from before.
+    // mergeRecipients([], …) is reused only for its EmailAddress →
+    // GraphRecipient conversion and case-insensitive dedupe.
+    const hasExplicitTo = Boolean(opts?.to && opts.to.length > 0);
+    if (hasExplicitTo) {
+      patch.toRecipients = mergeRecipients([], opts!.to!);
+    }
+
+    // Replacing the To line must not silently drop anyone. On the reply-all
+    // endpoint Graph puts the parent's sender AND its other To participants on
+    // the draft's To; an explicit `to` displaces all of them, so demote the
+    // displaced ones to Cc — reply-all means the thread stays on the message,
+    // and `to` only decides who it is addressed to. This also brings Microsoft
+    // in line with Gmail, which already carries the thread's participants on Cc
+    // under reply-all. On the sender-only endpoint there is nothing to preserve:
+    // Graph's To is just the parent's sender, and replacing that is the point of
+    // a narrowed redirect.
+    const displacedTo = hasExplicitTo && opts?.replyAll !== false
+      ? draftTo.filter(r => {
+        const address = r.emailAddress?.address?.toLowerCase();
+        return address ? !opts!.to!.some(a => a.email.toLowerCase() === address) : false;
+      })
+      : [];
+
+    const ccMerged = mergeRecipients([...draftCc, ...displacedTo], opts?.cc ?? []);
     if (ccMerged.length > 0) patch.ccRecipients = ccMerged;
 
     const bccMerged = mergeRecipients(draftBcc, opts?.bcc ?? []);

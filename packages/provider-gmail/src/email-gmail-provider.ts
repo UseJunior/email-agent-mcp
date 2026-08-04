@@ -209,15 +209,15 @@ export class GmailEmailProvider {
     // either way. No self-exclusion — an agent that replies to its own sent
     // mail may cc itself; documented caveat.
     const original = await this.getMessage(messageId);
-    const replyCc = opts?.replyAll === false
-      ? (opts?.cc ?? [])
-      : mergeAddressLists(original.to, original.cc, opts?.cc);
+    // No action-layer send path supplies opts.to today; if one ever does, its
+    // allowlist collection must cover those addresses (issue #164).
+    const { to: replyTo, cc: replyCc } = resolveReplyRecipients(original, opts);
     const subject = prefixReSubject(original.subject);
     const references = buildReferences(original.references, original.messageId);
 
     const raw = buildRawMessage(
       {
-        to: [original.from],
+        to: replyTo,
         cc: replyCc.length > 0 ? replyCc : undefined,
         bcc: opts?.bcc,
         subject,
@@ -249,15 +249,15 @@ export class GmailEmailProvider {
   async createReplyDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {
     try {
       const original = await this.getMessage(messageId);
-      const replyCc = opts?.replyAll === false
-        ? (opts?.cc ?? [])
-        : mergeAddressLists(original.to, original.cc, opts?.cc);
+      // Drafts stay allowlist-exempt; send_draft re-reads the stored draft's
+      // recipients and gates them there (issue #164).
+      const { to: replyTo, cc: replyCc } = resolveReplyRecipients(original, opts);
       const subject = prefixReSubject(original.subject);
       const references = buildReferences(original.references, original.messageId);
 
       const raw = buildRawMessage(
         {
-          to: [original.from],
+          to: replyTo,
           cc: replyCc.length > 0 ? replyCc : undefined,
           bcc: opts?.bcc,
           subject,
@@ -855,6 +855,46 @@ function buildRawMessage(msg: ComposeMessage, opts: BuildRawOptions = {}): strin
  * reply-all, preserving order and de-duplicating by email address. Returns
  * a new array; inputs are not mutated.
  */
+/**
+ * Resolve a reply's To and Cc from the parent message plus caller options.
+ * Shared by `replyToMessage` and `createReplyDraft` so the send and draft paths
+ * cannot drift apart.
+ *
+ * Default reply-all: cc every other thread participant (matches Microsoft's
+ * createReplyAll semantics). When `replyAll` is explicitly false, reply only to
+ * the original sender. Caller-supplied cc layers on top either way. No
+ * self-exclusion — an agent that replies to its own sent mail may cc itself;
+ * documented caveat.
+ *
+ * An explicit `to` replaces the original sender on the To line rather than
+ * merging with it (issue #164). Under reply-all the displaced sender is moved
+ * to Cc so nobody silently falls off the thread, and anyone now addressed on To
+ * is dropped from Cc so they are not listed twice. Under `replyAll: false`
+ * there is nothing to preserve — narrowing to an explicit recipient set is the
+ * point. With `to` absent or empty, both the To and the Cc are computed exactly
+ * as they were before the option existed.
+ */
+function resolveReplyRecipients(
+  original: EmailMessage,
+  opts?: ReplyOptions,
+): { to: EmailAddress[]; cc: EmailAddress[] } {
+  const hasExplicitTo = Boolean(opts?.to && opts.to.length > 0);
+  const to = hasExplicitTo ? opts!.to! : [original.from];
+
+  if (opts?.replyAll === false) {
+    return { to, cc: opts?.cc ?? [] };
+  }
+
+  if (!hasExplicitTo) {
+    return { to, cc: mergeAddressLists(original.to, original.cc, opts?.cc) };
+  }
+
+  const addressed = new Set(to.map(a => a.email.toLowerCase()));
+  const cc = mergeAddressLists([original.from], original.to, original.cc, opts?.cc)
+    .filter(a => !addressed.has(a.email.toLowerCase()));
+  return { to, cc };
+}
+
 function mergeAddressLists(
   ...lists: Array<EmailAddress[] | undefined>
 ): EmailAddress[] {

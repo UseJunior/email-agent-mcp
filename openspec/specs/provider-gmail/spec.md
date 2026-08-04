@@ -65,6 +65,46 @@ The system SHALL map Gmail message format to the common `EmailMessage` type, inc
 - **WHEN** a Gmail message is fetched
 - **THEN** it is mapped to `EmailMessage` with `threadId`, labels, and standard fields
 
+### Requirement: Reply To Recipients
+
+Gmail composes replies itself rather than delegating to a provider-side reply endpoint, so it derives the To from the parent's sender. When `ReplyOptions.to` is supplied and non-empty, `replyToMessage` and `createReplyDraft` SHALL address the message to exactly those recipients instead, replacing the derived sender rather than merging with it. When `to` is absent or empty, both SHALL continue to address the original sender with Cc computed exactly as before, unchanged.
+
+Under reply-all, an explicit `to` displaces the parent's sender from the To line; that sender SHALL be carried onto Cc so the thread's audience is never narrowed, and any address now on To SHALL be excluded from Cc so nobody is listed twice. Under `replyAll: false` no such preservation applies. Both reply methods SHALL resolve recipients through one shared helper so the send and draft paths cannot drift apart.
+
+#### Scenario: explicit to replaces the original sender on a self-sent parent (issue #164)
+- **WHEN** `createReplyDraft` is called with `replyAll: false` and an explicit `to`, against a parent whose sender is the mailbox owner
+- **THEN** the raw message's To header carries the caller's recipient with its display name
+- **AND** the mailbox owner's address does not appear in the message
+
+#### Scenario: explicit to with several addresses lands on the To header (issue #164)
+- **WHEN** `createReplyDraft` is called with several `to` entries
+- **THEN** the To header carries all of them and the original sender is absent
+
+#### Scenario: explicit to under reply-all moves the displaced sender to Cc (issue #164)
+- **WHEN** `createReplyDraft` is called with an explicit `to` and reply-all left at its default
+- **THEN** the To header carries the caller's recipient
+- **AND** the parent's sender appears on Cc alongside the thread's other participants
+
+#### Scenario: a caller addressed on To is not also listed on Cc (issue #164)
+- **WHEN** a caller `to` entry matches a thread participant, differing only in case
+- **THEN** that address appears on To and is absent from the Cc header
+
+#### Scenario: omitted to keeps the original sender as To (issue #164 no-op guard)
+- **WHEN** `createReplyDraft` is called with no `to`
+- **THEN** the To header is the original sender, unchanged
+
+#### Scenario: empty to array keeps the original sender as To (issue #164)
+- **WHEN** `createReplyDraft` is called with `to: []`
+- **THEN** the To header is the original sender, unchanged
+
+#### Scenario: replyToMessage honors explicit to (issue #164)
+- **WHEN** `replyToMessage` is called with an explicit `to`
+- **THEN** the sent raw message is addressed to those recipients rather than the original sender
+
+#### Scenario: replyToMessage without to keeps the original sender (issue #164 no-op guard)
+- **WHEN** `replyToMessage` is called with no `to`
+- **THEN** the sent raw message is addressed to the original sender, unchanged
+
 ### Requirement: Dual Watch Mode
 
 The system SHALL support Pub/Sub push notifications (requires Google Cloud project, auto-renewal every 7 days) and `history.list` polling as a fallback for local/NAT environments.

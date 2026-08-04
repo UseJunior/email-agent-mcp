@@ -139,6 +139,21 @@ export interface ListOptions {
 }
 
 export interface ReplyOptions {
+  /**
+   * Explicit To recipients for the reply. When set, this **replaces** the
+   * provider-derived To (Graph's auto-populated recipients on Microsoft, the
+   * original sender on Gmail) rather than merging into it — unlike `cc`, which
+   * merges with the thread's. Replacing is deliberate: it is what makes
+   * redirecting a thread to a different recipient expressible, and it matches
+   * what `to` means on every other compose surface in this API. When unset,
+   * providers keep their existing derived-recipient behavior byte-for-byte.
+   *
+   * Security note: action-layer *send* paths must include these addresses in
+   * their allowlist collection before passing them through. Today only the
+   * draft path supplies `to`, and drafts are gated at `send_draft` time by
+   * re-reading the stored draft's own recipients.
+   */
+  to?: EmailAddress[];
   cc?: EmailAddress[];
   bcc?: EmailAddress[];
   attachments?: OutboundAttachment[];
