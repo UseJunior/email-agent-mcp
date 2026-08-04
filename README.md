@@ -150,7 +150,7 @@ compatibility.
 
 | Profile | Microsoft delegated scopes | Exposed tools |
 |---------|-----------------------------|---------------|
-| `observe` | `Mail.Read`, `User.Read`, `offline_access` | Read-only email tools plus local mailbox configuration/authentication tools |
+| `observe` | `Mail.Read`, `MailboxSettings.Read`, `User.Read`, `offline_access` | Read-only email tools plus local mailbox configuration/authentication tools |
 | `full` (default) | `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `MailboxSettings.ReadWrite`, `User.Read`, `offline_access` | All tools |
 
 For an observation-only deployment, set the profile for both configuration and

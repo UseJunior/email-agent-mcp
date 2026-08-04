@@ -22,15 +22,20 @@ export const GRAPH_SCOPES_FULL = [
   'offline_access',
 ];
 
+// MailboxSettings.Read is the read-only half of the full profile's
+// MailboxSettings.ReadWrite. list_inbox_rules is a read-only tool that stays
+// exposed under observe, and Graph gates /mailFolders/inbox/messageRules behind
+// MailboxSettings — without it that tool is guaranteed to 403.
 export const GRAPH_SCOPES_BY_PROFILE: Record<EmailScopeProfile, string[]> = {
   full: GRAPH_SCOPES,
-  observe: ['Mail.Read', 'User.Read', 'offline_access'],
+  observe: ['Mail.Read', 'MailboxSettings.Read', 'User.Read', 'offline_access'],
 };
 
 export const GRAPH_SCOPES_FULL_BY_PROFILE: Record<EmailScopeProfile, string[]> = {
   full: GRAPH_SCOPES_FULL,
   observe: [
     'https://graph.microsoft.com/Mail.Read',
+    'https://graph.microsoft.com/MailboxSettings.Read',
     'https://graph.microsoft.com/User.Read',
     'offline_access',
   ],

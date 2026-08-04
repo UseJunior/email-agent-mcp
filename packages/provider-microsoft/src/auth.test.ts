@@ -72,12 +72,16 @@ describe('provider-interface/Microsoft Mailbox Settings Consent', () => {
   });
 
   it('Scenario: Observe profile requests only read and identity scopes', () => {
-    expect(GRAPH_SCOPES_BY_PROFILE.observe).toEqual(['Mail.Read', 'User.Read', 'offline_access']);
+    expect(GRAPH_SCOPES_BY_PROFILE.observe).toEqual(['Mail.Read', 'MailboxSettings.Read', 'User.Read', 'offline_access']);
     expect(GRAPH_SCOPES_FULL_BY_PROFILE.observe).toEqual([
       'https://graph.microsoft.com/Mail.Read',
+      'https://graph.microsoft.com/MailboxSettings.Read',
       'https://graph.microsoft.com/User.Read',
       'offline_access',
     ]);
+    // Observe must never request a write-capable scope.
+    expect(GRAPH_SCOPES_BY_PROFILE.observe.some(scope => /ReadWrite|\.Send/.test(scope))).toBe(false);
+    expect(GRAPH_SCOPES_FULL_BY_PROFILE.observe.some(scope => /ReadWrite|\.Send/.test(scope))).toBe(false);
     expect(GRAPH_SCOPES_BY_PROFILE.full).toBe(GRAPH_SCOPES);
     expect(GRAPH_SCOPES_FULL_BY_PROFILE.full).toBe(GRAPH_SCOPES_FULL);
   });
