@@ -1,5 +1,5 @@
 // Microsoft Graph authentication — real MSAL device code flow + cache persistence
-import type { AuthManager } from '@usejunior/email-core';
+import { getEmailScopeProfile, type AuthManager, type EmailScopeProfile } from '@usejunior/email-core';
 import { DeviceCodeCredential, ClientSecretCredential, useIdentityPlugin, type DeviceCodeInfo, type AuthenticationRecord } from '@azure/identity';
 import { cachePersistencePlugin } from '@azure/identity-cache-persistence';
 import { randomUUID } from 'node:crypto';
@@ -22,6 +22,20 @@ export const GRAPH_SCOPES_FULL = [
   'offline_access',
 ];
 
+export const GRAPH_SCOPES_BY_PROFILE: Record<EmailScopeProfile, string[]> = {
+  full: GRAPH_SCOPES,
+  observe: ['Mail.Read', 'User.Read', 'offline_access'],
+};
+
+export const GRAPH_SCOPES_FULL_BY_PROFILE: Record<EmailScopeProfile, string[]> = {
+  full: GRAPH_SCOPES_FULL,
+  observe: [
+    'https://graph.microsoft.com/Mail.Read',
+    'https://graph.microsoft.com/User.Read',
+    'offline_access',
+  ],
+};
+
 const TOKEN_EXPIRY_BUFFER_MS = 10 * 60 * 1000; // 10 minutes
 /**
  * Resolve the config directory for token storage.
@@ -37,6 +51,7 @@ export interface MicrosoftAuthConfig {
   clientId: string;
   clientSecret?: string;
   tenantId?: string;
+  scopeProfile?: EmailScopeProfile;
 }
 
 export interface MailboxMetadata {
@@ -75,6 +90,7 @@ export class DelegatedAuthManager implements AuthManager {
   private cacheName: string | null = null;
   private readonly config: MicrosoftAuthConfig;
   private readonly mailboxName: string;
+  private readonly scopes: string[];
   private _needsReauth = false;
   private _lastInteractiveAuthAt: string | null = null;
   private _emailAddress: string | null = null;
@@ -84,6 +100,7 @@ export class DelegatedAuthManager implements AuthManager {
   constructor(config: MicrosoftAuthConfig, mailboxName = 'default') {
     this.config = config;
     this.mailboxName = mailboxName;
+    this.scopes = GRAPH_SCOPES_FULL_BY_PROFILE[config.scopeProfile ?? getEmailScopeProfile()];
   }
 
   /** Set the email address for this mailbox (called after profile fetch during configure). */
@@ -126,7 +143,7 @@ export class DelegatedAuthManager implements AuthManager {
       },
     });
 
-    this.authRecord = (await this.credential.authenticate(GRAPH_SCOPES_FULL)) ?? null;
+    this.authRecord = (await this.credential.authenticate(this.scopes)) ?? null;
     if (!this.authRecord) throw new Error('Authentication failed — no record received');
     this._lastInteractiveAuthAt = new Date().toISOString();
     this._needsReauth = false;
@@ -157,7 +174,7 @@ export class DelegatedAuthManager implements AuthManager {
 
     // Verify the token still works
     try {
-      const token = await this.credential.getToken(GRAPH_SCOPES_FULL);
+      const token = await this.credential.getToken(this.scopes);
       this._tokenExpiresAt = token.expiresOnTimestamp;
       this._needsReauth = false;
     } catch (err) {
@@ -178,7 +195,7 @@ export class DelegatedAuthManager implements AuthManager {
       throw new Error('Not connected. Call connect() or reconnect() first.');
     }
     try {
-      const token = await this.credential.getToken(GRAPH_SCOPES_FULL);
+      const token = await this.credential.getToken(this.scopes);
       if (!token) throw new Error('Failed to acquire token');
       this._tokenExpiresAt = token.expiresOnTimestamp;
       return token.token;

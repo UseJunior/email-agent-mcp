@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DelegatedAuthManager, ClientCredentialsAuthManager, toFilesystemSafeKey, listConfiguredMailboxesWithMetadata, getConfigDir, GRAPH_SCOPES, GRAPH_SCOPES_FULL, isAuthError } from './auth.js';
+import { DelegatedAuthManager, ClientCredentialsAuthManager, toFilesystemSafeKey, listConfiguredMailboxesWithMetadata, getConfigDir, GRAPH_SCOPES, GRAPH_SCOPES_FULL, GRAPH_SCOPES_BY_PROFILE, GRAPH_SCOPES_FULL_BY_PROFILE, isAuthError } from './auth.js';
 import { GraphApiError } from './email-graph-provider.js';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +11,8 @@ const testHome = join(tmpdir(), `email-agent-mcp-auth-test-${Date.now()}-${Math.
 const mockDeviceCodeState = vi.hoisted(() => ({
   authenticateCalls: 0,
   getTokenCalls: 0,
+  authenticateScopes: [] as string[][],
+  getTokenScopes: [] as string[][],
   constructorOptions: [] as Record<string, unknown>[],
 }));
 
@@ -26,13 +28,15 @@ vi.mock('@azure/identity', () => {
       mockDeviceCodeState.constructorOptions.push(options);
     }
 
-    async getToken() {
+    async getToken(scopes: string[]) {
       mockDeviceCodeState.getTokenCalls++;
+      mockDeviceCodeState.getTokenScopes.push(scopes);
       return { token: 'mock-access-token', expiresOnTimestamp: Date.now() + 3600000 };
     }
 
-    async authenticate() {
+    async authenticate(scopes: string[]) {
       mockDeviceCodeState.authenticateCalls++;
+      mockDeviceCodeState.authenticateScopes.push(scopes);
       return { authority: 'https://login.microsoftonline.com', homeAccountId: 'test', clientId: 'test', tenantId: 'test' };
     }
   }
@@ -66,6 +70,17 @@ describe('provider-interface/Microsoft Mailbox Settings Consent', () => {
     expect(GRAPH_SCOPES).toContain('MailboxSettings.ReadWrite');
     expect(GRAPH_SCOPES_FULL).toContain('https://graph.microsoft.com/MailboxSettings.ReadWrite');
   });
+
+  it('Scenario: Observe profile requests only read and identity scopes', () => {
+    expect(GRAPH_SCOPES_BY_PROFILE.observe).toEqual(['Mail.Read', 'User.Read', 'offline_access']);
+    expect(GRAPH_SCOPES_FULL_BY_PROFILE.observe).toEqual([
+      'https://graph.microsoft.com/Mail.Read',
+      'https://graph.microsoft.com/User.Read',
+      'offline_access',
+    ]);
+    expect(GRAPH_SCOPES_BY_PROFILE.full).toBe(GRAPH_SCOPES);
+    expect(GRAPH_SCOPES_FULL_BY_PROFILE.full).toBe(GRAPH_SCOPES_FULL);
+  });
 });
 
 describe('provider-microsoft/Delegated OAuth Authentication', () => {
@@ -76,6 +91,8 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
     process.env['EMAIL_AGENT_MCP_HOME'] = testHome;
     mockDeviceCodeState.authenticateCalls = 0;
     mockDeviceCodeState.getTokenCalls = 0;
+    mockDeviceCodeState.authenticateScopes.length = 0;
+    mockDeviceCodeState.getTokenScopes.length = 0;
     mockDeviceCodeState.constructorOptions.length = 0;
   });
 
@@ -112,6 +129,19 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
     expect(mockDeviceCodeState.getTokenCalls).toBe(1);
     expect(auth.isTokenExpired()).toBe(false);
     expect(auth.needsReauth).toBe(false);
+  });
+
+  it('Scenario: Observe authentication uses the profile-specific scope set', async () => {
+    const auth = new DelegatedAuthManager(
+      { mode: 'delegated', clientId: 'test-client-id', scopeProfile: 'observe' },
+      'observe-mailbox',
+    );
+
+    await auth.connect({});
+    await auth.getAccessToken();
+
+    expect(mockDeviceCodeState.authenticateScopes).toEqual([GRAPH_SCOPES_FULL_BY_PROFILE.observe]);
+    expect(mockDeviceCodeState.getTokenScopes).toEqual([GRAPH_SCOPES_FULL_BY_PROFILE.observe]);
   });
 
   it('Scenario: Silent reconnect uses persisted cache name', async () => {

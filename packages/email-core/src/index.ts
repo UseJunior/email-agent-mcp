@@ -1,6 +1,15 @@
 // @usejunior/email-core — Actions, content engine, security, and provider interfaces
 export { EMAIL_ACTIONS } from './actions/registry.js';
 export type { EmailAction, AllowlistConfig } from './actions/registry.js';
+export {
+  EMAIL_SCOPE_PROFILES,
+  EMAIL_SCOPE_PROFILE_ENV,
+  filterActionsForProfile,
+  getEmailScopeProfile,
+  isActionAllowedForProfile,
+  profileBlockedActionError,
+} from './scope-profile.js';
+export type { EmailScopeProfile } from './scope-profile.js';
 export type {
   EmailAddress,
   EmailMessage,
