@@ -150,7 +150,7 @@ compatibility.
 
 | Profile | Microsoft delegated scopes | Exposed tools |
 |---------|-----------------------------|---------------|
-| `observe` | `Mail.Read`, `MailboxSettings.Read`, `User.Read`, `offline_access` | Read-only email tools plus local mailbox configuration/authentication tools |
+| `observe` | `Mail.Read`, `User.Read`, `offline_access` | Read-only email tools, minus `list_inbox_rules` (see below) |
 | `full` (default) | `Mail.Read`, `Mail.ReadWrite`, `Mail.Send`, `MailboxSettings.ReadWrite`, `User.Read`, `offline_access` | All tools |
 
 For an observation-only deployment, set the profile for both configuration and
@@ -162,11 +162,42 @@ npx email-agent-mcp configure
 npx email-agent-mcp serve
 ```
 
-Changing profiles changes the Microsoft OAuth scope set. MSAL caches tokens by
-scope, so restart the server and run `email-agent-mcp configure` again to grant
-the new scopes. In particular, switching from `observe` to `full` requires a new
-interactive consent before write tools can be used. An invalid profile value
-stops startup instead of silently granting broader access.
+`observe`'s scopes are a deliberate **strict subset** of `full`'s. That is what
+makes the profile adoptable: a tenant that has already consented to the full set
+grants `observe` silently, so switching `full` → `observe` needs no new consent.
+Switching `observe` → `full` does require a new interactive consent, because it
+asks for scopes that were never granted.
+
+For the same reason `observe` does **not** expose `list_inbox_rules`. Graph gates
+`/mailFolders/inbox/messageRules` behind `MailboxSettings`, and Entra treats
+`MailboxSettings.Read` as a distinct scope from `full`'s
+`MailboxSettings.ReadWrite` rather than implied by it. Requesting it would break
+the subset property and force a fresh consent on every `observe` deployment — an
+admin-approval request in tenants that restrict user consent. Use `full` if you
+need inbox-rule visibility.
+
+An invalid profile value stops startup instead of silently granting broader
+access. If cached credentials do not cover the profile's scopes, the server
+fails fast with an actionable error rather than blocking on an interactive
+sign-in.
+
+#### What `observe` does and does not guarantee
+
+`observe` always removes the write tools from the MCP tool surface, so an agent
+cannot invoke them. That part holds everywhere.
+
+It only narrows the **OAuth token** on a mailbox that has not already consented
+to the write scopes. Entra issues an access token carrying every scope the user
+or tenant has already consented to for that application — not just the subset
+requested at token-acquisition time. So if you point `observe` at a mailbox
+previously configured as `full`, the underlying token still carries
+`Mail.ReadWrite` and `Mail.Send`; only the tool surface is reduced.
+
+For a genuine least-privilege token, consent to `observe` from a mailbox that
+has never been granted the write scopes — a fresh `configure` against an app
+registration whose delegated permissions stop at `Mail.Read`/`User.Read`. Treat
+the tool-surface reduction as defense in depth, not as an OAuth boundary, unless
+you control the grant.
 
 ### Tools
 

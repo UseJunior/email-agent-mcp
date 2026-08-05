@@ -24,12 +24,22 @@ export function getEmailScopeProfile(
   );
 }
 
+// Read-only actions that observe must still hide, because the Graph scopes the
+// observe profile requests cannot satisfy them. list_inbox_rules reads
+// /mailFolders/inbox/messageRules, which Graph gates behind MailboxSettings —
+// a scope observe deliberately does not request (see GRAPH_SCOPES_BY_PROFILE).
+// Exposing it anyway would advertise a tool that always 403s.
+const OBSERVE_EXCLUDED_ACTIONS = new Set([
+  'list_inbox_rules',
+]);
+
 export function isActionAllowedForProfile(
   action: Pick<EmailAction, 'name' | 'annotations'>,
   profile: EmailScopeProfile,
 ): boolean {
-  return profile === 'full'
-    || action.annotations.readOnlyHint
+  if (profile === 'full') return true;
+  if (OBSERVE_EXCLUDED_ACTIONS.has(action.name)) return false;
+  return action.annotations.readOnlyHint
     || OBSERVE_CONFIGURATION_ACTIONS.has(action.name);
 }
 
@@ -41,7 +51,14 @@ export function filterActionsForProfile<T extends Pick<EmailAction, 'name' | 'an
 }
 
 export function profileBlockedActionError(actionName: string): Error {
+  // Two different reasons a tool can be missing under observe, and telling an
+  // agent the wrong one sends it down the wrong recovery path. A read-only tool
+  // excluded for scope reasons is not "a write tool".
+  const reason = OBSERVE_EXCLUDED_ACTIONS.has(actionName)
+    ? 'because the "observe" profile does not request the Microsoft Graph scope it requires'
+    : 'because it can modify mailbox data';
   return new Error(
-    `Tool "${actionName}" is unavailable under the "observe" scope profile because it can modify mailbox data. Set ${EMAIL_SCOPE_PROFILE_ENV}=full and re-authenticate to enable write tools.`,
+    `Tool "${actionName}" is unavailable under the "observe" scope profile ${reason}. `
+    + `Set ${EMAIL_SCOPE_PROFILE_ENV}=full and re-authenticate to enable it.`,
   );
 }

@@ -22,20 +22,26 @@ export const GRAPH_SCOPES_FULL = [
   'offline_access',
 ];
 
-// MailboxSettings.Read is the read-only half of the full profile's
-// MailboxSettings.ReadWrite. list_inbox_rules is a read-only tool that stays
-// exposed under observe, and Graph gates /mailFolders/inbox/messageRules behind
-// MailboxSettings — without it that tool is guaranteed to 403.
+// Observe deliberately requests a STRICT SUBSET of the full profile's scopes.
+// That subset property is what makes the profile adoptable: a tenant that has
+// already consented to the full set (or admin-consented it once for everyone)
+// grants observe silently, so switching profiles needs no new consent.
+//
+// This is why MailboxSettings.Read is NOT here even though it would let
+// list_inbox_rules work. Entra treats it as a distinct scope from the full
+// profile's MailboxSettings.ReadWrite, not as implied by it, so adding it turns
+// every observe deployment into a fresh consent — and in a tenant that restricts
+// user consent, an admin-approval request. The tool surface is trimmed to match
+// these scopes instead; see OBSERVE_EXCLUDED_ACTIONS in email-core.
 export const GRAPH_SCOPES_BY_PROFILE: Record<EmailScopeProfile, string[]> = {
   full: GRAPH_SCOPES,
-  observe: ['Mail.Read', 'MailboxSettings.Read', 'User.Read', 'offline_access'],
+  observe: ['Mail.Read', 'User.Read', 'offline_access'],
 };
 
 export const GRAPH_SCOPES_FULL_BY_PROFILE: Record<EmailScopeProfile, string[]> = {
   full: GRAPH_SCOPES_FULL,
   observe: [
     'https://graph.microsoft.com/Mail.Read',
-    'https://graph.microsoft.com/MailboxSettings.Read',
     'https://graph.microsoft.com/User.Read',
     'offline_access',
   ],
@@ -175,6 +181,16 @@ export class DelegatedAuthManager implements AuthManager {
       tenantId: metadata.tenantId,
       authenticationRecord: this.authRecord,
       cacheName: this.cacheName,
+      // This is the `serve` path. Without this, a cache that does not cover the
+      // requested scopes makes DeviceCodeCredential silently start an interactive
+      // device flow: it blocks for the whole polling window while the server sits
+      // in `connecting`, and its default prompt callback writes to stdout — which
+      // on an stdio MCP server is the JSON-RPC channel. Fail fast instead.
+      disableAutomaticAuthentication: true,
+      // Belt-and-braces: if a device prompt is ever reached here, keep it off stdout.
+      userPromptCallback: (info: DeviceCodeInfo) => {
+        console.error(`[email-agent-mcp] Interactive sign-in required: ${info.verificationUri} code ${info.userCode}`);
+      },
     });
 
     // Verify the token still works
@@ -184,9 +200,19 @@ export class DelegatedAuthManager implements AuthManager {
       this._needsReauth = false;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (message.includes('interaction_required') || message.includes('invalid_grant')) {
+      const name = err instanceof Error ? err.name : '';
+      // AuthenticationRequiredError is what disableAutomaticAuthentication raises
+      // when the cached token cannot satisfy `this.scopes` — the normal signal for
+      // "this profile's scopes were never consented", not just an expired token.
+      if (name === 'AuthenticationRequiredError'
+        || message.includes('interaction_required')
+        || message.includes('invalid_grant')) {
         this._needsReauth = true;
-        throw new Error(`Token expired. Run: email-agent-mcp configure --mailbox ${this.mailboxName}`);
+        throw new Error(
+          `Cached credentials do not cover the scopes required by mailbox "${this.mailboxName}" `
+          + `(scope profile "${this.config.scopeProfile ?? getEmailScopeProfile()}"). `
+          + `Run: email-agent-mcp configure --mailbox ${this.mailboxName}`,
+        );
       }
       throw err;
     }

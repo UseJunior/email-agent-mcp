@@ -4,6 +4,7 @@ import {
   EMAIL_SCOPE_PROFILE_ENV,
   filterActionsForProfile,
   getEmailScopeProfile,
+  profileBlockedActionError,
 } from './scope-profile.js';
 
 const action = (name: string, readOnlyHint: boolean) => ({
@@ -37,6 +38,29 @@ describe('email scope profiles', () => {
       'configure_mailbox',
       'remove_mailbox',
     ]);
+  });
+
+  it('Scenario: observe hides read-only tools its scopes cannot satisfy', () => {
+    // list_inbox_rules is readOnlyHint, but Graph gates messageRules behind
+    // MailboxSettings, which observe does not request. Advertising it would
+    // hand an agent a tool that always 403s.
+    const actions = [action('read_email', true), action('list_inbox_rules', true)];
+
+    expect(filterActionsForProfile(actions, 'observe').map(item => item.name)).toEqual(['read_email']);
+    expect(filterActionsForProfile(actions, 'full').map(item => item.name)).toEqual([
+      'read_email',
+      'list_inbox_rules',
+    ]);
+  });
+
+  it('Scenario: blocked-tool errors name the right reason', () => {
+    // A read-only tool withheld for scope reasons must not be described as a
+    // write tool — that points an agent at the wrong recovery path.
+    expect(profileBlockedActionError('send_email').message).toContain('can modify mailbox data');
+    expect(profileBlockedActionError('list_inbox_rules').message)
+      .toContain('does not request the Microsoft Graph scope it requires');
+    expect(profileBlockedActionError('list_inbox_rules').message)
+      .not.toContain('can modify mailbox data');
   });
 
   it('Scenario: invalid profile fails closed with an actionable error', () => {
