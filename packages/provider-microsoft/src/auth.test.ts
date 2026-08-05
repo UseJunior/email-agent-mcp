@@ -72,10 +72,9 @@ describe('provider-interface/Microsoft Mailbox Settings Consent', () => {
   });
 
   it('Scenario: Observe profile requests only read and identity scopes', () => {
-    expect(GRAPH_SCOPES_BY_PROFILE.observe).toEqual(['Mail.Read', 'MailboxSettings.Read', 'User.Read', 'offline_access']);
+    expect(GRAPH_SCOPES_BY_PROFILE.observe).toEqual(['Mail.Read', 'User.Read', 'offline_access']);
     expect(GRAPH_SCOPES_FULL_BY_PROFILE.observe).toEqual([
       'https://graph.microsoft.com/Mail.Read',
-      'https://graph.microsoft.com/MailboxSettings.Read',
       'https://graph.microsoft.com/User.Read',
       'offline_access',
     ]);
@@ -84,6 +83,19 @@ describe('provider-interface/Microsoft Mailbox Settings Consent', () => {
     expect(GRAPH_SCOPES_FULL_BY_PROFILE.observe.some(scope => /ReadWrite|\.Send/.test(scope))).toBe(false);
     expect(GRAPH_SCOPES_BY_PROFILE.full).toBe(GRAPH_SCOPES);
     expect(GRAPH_SCOPES_FULL_BY_PROFILE.full).toBe(GRAPH_SCOPES_FULL);
+  });
+
+  it('Scenario: Observe scopes are a strict subset of full, so no new consent is needed', () => {
+    // The subset property is the whole adoption story: a tenant that already
+    // consented to (or admin-consented) the full set grants observe silently.
+    // Adding any scope outside the full set turns every observe deployment into
+    // a fresh consent, and an admin-approval request in a restricted tenant.
+    for (const scope of GRAPH_SCOPES_BY_PROFILE.observe) {
+      expect(GRAPH_SCOPES).toContain(scope);
+    }
+    for (const scope of GRAPH_SCOPES_FULL_BY_PROFILE.observe) {
+      expect(GRAPH_SCOPES_FULL).toContain(scope);
+    }
   });
 });
 
@@ -176,8 +188,12 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
 
     const [credentialOptions] = mockDeviceCodeState.constructorOptions;
     const persistenceOptions = credentialOptions?.tokenCachePersistenceOptions as { enabled?: boolean; name?: string } | undefined;
-    // reconnect uses disableAutomaticAuthentication: false to allow silent token refresh via MSAL cache
-    expect(credentialOptions?.disableAutomaticAuthentication).toBe(false);
+    // reconnect must set disableAutomaticAuthentication: true. The flag only gates the
+    // *interactive* fallback — MSAL's silent path (cache hit and refresh-token redemption)
+    // still works. Left false, a cache that cannot satisfy the requested scopes makes
+    // getToken start a device flow that blocks for the whole polling window and writes its
+    // prompt to stdout, which is the JSON-RPC channel on an stdio MCP server.
+    expect(credentialOptions?.disableAutomaticAuthentication).toBe(true);
     expect(persistenceOptions?.name).toBe('email-agent-mcp-work-cache-id');
     expect(auth.needsReauth).toBe(false);
   });
