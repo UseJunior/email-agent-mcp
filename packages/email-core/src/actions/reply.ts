@@ -4,7 +4,6 @@ import type { ActionContext, EmailAction } from './registry.js';
 import type { EmailAddress, EmailMessage } from '../types.js';
 import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { isPlausibleMessageId } from '../security/reply-validation.js';
-import { withRetry } from '../providers/provider.js';
 import { renderEmailBody } from '../content/body-renderer.js';
 import {
   checkMailboxRequired,
@@ -223,15 +222,16 @@ export const replyToEmailAction: EmailAction<
     }
 
     try {
-      const result = await withRetry(
-        () => ctx.provider.replyToMessage(input.message_id, bodyPlain, {
-          cc: parsed.cc,
-          bodyHtml,
-          replyAll: input.reply_all,
-          attachments,
-        }),
-        { maxRetries: 3, baseDelay: 1000 },
-      );
+      // Exactly one provider attempt — replies deliver mail through
+      // non-idempotent provider endpoints with no idempotency key, so an
+      // automatic retry after an ambiguous failure (timeout/5xx post-
+      // acceptance) could deliver duplicates. Fail fast instead.
+      const result = await ctx.provider.replyToMessage(input.message_id, bodyPlain, {
+        cc: parsed.cc,
+        bodyHtml,
+        replyAll: input.reply_all,
+        attachments,
+      });
 
       if (ctx.rateLimiter) {
         ctx.rateLimiter.recordUsage('reply_to_email');

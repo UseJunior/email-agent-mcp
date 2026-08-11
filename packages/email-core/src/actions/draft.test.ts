@@ -253,6 +253,30 @@ describe('email-write/Send Draft', () => {
     expect(provider.getSentMessages()).toHaveLength(1);
   });
 
+  it('Scenario: send_draft failure is not retried (single dispatch attempt)', async () => {
+    // Sending a draft delivers mail through a non-idempotent provider
+    // endpoint — an ambiguous failure must not trigger an automatic retry.
+    const draftResult = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Draft to Fail',
+      body: 'Body',
+    });
+
+    let callCount = 0;
+    provider.sendDraft = async () => {
+      callCount++;
+      throw new ProviderError('SERVICE_UNAVAILABLE', 'Service temporarily unavailable', 'test', true);
+    };
+
+    const result = await sendDraftAction.run(ctx, {
+      draft_id: draftResult.draftId!,
+    });
+
+    expect(callCount).toBe(1);
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('SERVICE_UNAVAILABLE');
+  });
+
   it('Scenario: Send non-existent draft', async () => {
     const result = await sendDraftAction.run(ctx, {
       draft_id: 'nonexistent',
