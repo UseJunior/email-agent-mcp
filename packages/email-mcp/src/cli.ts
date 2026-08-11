@@ -683,11 +683,14 @@ export async function runCall(opts: CliOptions): Promise<number> {
     args['mailbox'] = opts.mailbox;
   }
 
-  // `get_mailbox_status` is intentionally non-blocking: it inspects state.status
-  // (pending/connecting/not_configured/error) and reports it as the result. Skip
-  // the eager-init gate for this tool so it can serve as a diagnostic even when
-  // the provider isn't ready.
-  if (opts.callTool !== 'get_mailbox_status') {
+  // `get_mailbox_status` and `list_mailboxes` are diagnostics: they report
+  // state (including "nothing connected" / per-mailbox auth failures) as their
+  // RESULT rather than requiring a connected provider. Skip the eager-init gate
+  // for them so a broken setup can still be diagnosed from the one-shot CLI —
+  // gating them behind ensureProvider would make them exit 3 in exactly the
+  // misconfigured case they exist to explain.
+  const DIAGNOSTIC_TOOLS = new Set(['get_mailbox_status', 'list_mailboxes']);
+  if (!DIAGNOSTIC_TOOLS.has(opts.callTool)) {
     // Eagerly initialize the provider — no demo-mode fallback for one-shot CLI.
     // ensureProvider() awaits init internally, so no separate waitForInit() needed.
     try {

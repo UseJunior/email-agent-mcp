@@ -1501,6 +1501,50 @@ describe('cli/Call Subcommand Diagnostic Tools', () => {
       vi.doUnmock('./server.js');
     }
   });
+
+  it('Scenario: call list_mailboxes diagnoses an all-failed setup instead of exiting 3', async () => {
+    // Issue #176: list_mailboxes is a diagnostic like get_mailbox_status — it
+    // reports per-mailbox auth failures as its RESULT. Gating it behind the
+    // eager ensureProvider gate made the one-shot CLI exit 3 in exactly the
+    // broken-setup case the tool exists to explain.
+    const { z } = await import('zod');
+    let ranWithoutInit = false;
+    const listAction = {
+      name: 'list_mailboxes',
+      description: 'diagnostic stub',
+      input: z.object({}),
+      output: z.object({ mailboxes: z.array(z.object({})) }),
+      annotations: {},
+      run: async () => {
+        ranWithoutInit = true;
+        return { mailboxes: [{ name: 'work', emailAddress: null, provider: 'microsoft', isDefault: false, status: 'error', error: 'auth failed' }] };
+      },
+    };
+    const errorState = { status: 'error', error: 'all mailboxes failed', mailboxes: [] };
+
+    vi.doMock('./server.js', async () => {
+      const actual = await vi.importActual<typeof import('./server.js')>('./server.js');
+      return {
+        ...actual,
+        createLazyProviderState: () => errorState,
+        buildLazyActions: async () => [listAction],
+        // ensureProvider would normally throw here — verify we never call it
+        ensureProvider: async () => { throw new Error('should not be called for list_mailboxes'); },
+      };
+    });
+    try {
+      const { runCall } = await import('./cli.js');
+      const exitCode = await runCall({
+        command: 'call',
+        callTool: 'list_mailboxes',
+        callArgs: '{}',
+      });
+      expect(ranWithoutInit).toBe(true);
+      expect(exitCode).toBe(0);
+    } finally {
+      vi.doUnmock('./server.js');
+    }
+  });
 });
 
 describe('cli/Call Subcommand Output Formatting', () => {
