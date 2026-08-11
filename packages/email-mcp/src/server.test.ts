@@ -322,7 +322,7 @@ describe('mcp-transport/Lazy Provider State', () => {
     expect(actions.length).toBe(26);
     expect(state.status).toBe('pending');
     expect(state.initPromise).toBeNull();
-    expect(state.provider).toBeNull();
+    expect(state.mailboxes).toEqual([]);
 
     const tools = actionsToMcpTools(actions);
     expect(tools.map(t => t.name)).toContain('list_emails');
@@ -384,7 +384,18 @@ describe('mcp-transport/Lazy Provider State', () => {
     state.initPromise = new Promise<void>(resolve => {
       resolveInit = () => {
         initRuns++;
-        state.provider = {} as never; // pretend we connected
+        // Pretend we connected — install a complete mailbox entry, the same
+        // shape initProvider produces (mailboxes is the single source of truth).
+        state.mailboxes = [{
+          name: 'work',
+          emailAddress: 'work@example.com',
+          displayName: 'work@example.com',
+          providerType: 'microsoft',
+          provider: {} as never,
+          auth: null,
+          isDefault: true,
+          status: 'connected',
+        }];
         state.status = 'connected';
         resolve();
       };
@@ -560,9 +571,16 @@ describe('mcp-transport/Lazy Provider State', () => {
   it('Scenario: get_mailbox_status reports the connected Gmail provider', async () => {
     const state = createLazyProviderState();
     state.status = 'connected';
-    state.provider = {} as never;
-    state.connectedMailbox = 'steven.obiajulu@gmail.com';
-    state.connectedProvider = 'gmail';
+    state.mailboxes = [{
+      name: 'gmail',
+      emailAddress: 'steven.obiajulu@gmail.com',
+      displayName: 'steven.obiajulu@gmail.com',
+      providerType: 'gmail',
+      provider: {} as never,
+      auth: null,
+      isDefault: true,
+      status: 'connected',
+    }];
     state.initPromise = Promise.resolve();
 
     const actions = await buildLazyActions(state, noAllowlist);
@@ -604,9 +622,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = provider;
-    state.connectedMailbox = 'work@example.com';
-    state.connectedProvider = 'microsoft';
     state.mailboxes = [
       {
         name: 'work',
@@ -675,9 +690,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { searchMessages: workSearch } as never;
-    state.connectedMailbox = 'work@example.com';
-    state.connectedProvider = 'microsoft';
     state.mailboxes = [
       {
         name: 'work',
@@ -751,9 +763,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { searchMessages: workSearch } as never;
-    state.connectedMailbox = 'work@example.com';
-    state.connectedProvider = 'microsoft';
     state.mailboxes = [
       {
         name: 'work',
@@ -833,9 +842,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { getMessage } as never;
-    state.connectedMailbox = 'personal@example.com';
-    state.connectedProvider = 'gmail';
     state.mailboxes = [
       {
         name: 'personal',
@@ -887,8 +893,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { getMessage } as never;
-    state.connectedMailbox = 'alice@corp.com';
     state.mailboxes = [
       {
         name: 'alice',
@@ -930,8 +934,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { getMessage } as never;
-    state.connectedMailbox = 'alice@corp.com';
     state.mailboxes = [
       {
         name: 'alice',
@@ -957,8 +959,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { getMessage: vi.fn() } as never;
-    state.connectedMailbox = 'work@example.com';
     state.mailboxes = [];
 
     const actions = await buildLazyActions(state, noAllowlist);
@@ -976,8 +976,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { getMessage: vi.fn() } as never;
-    state.connectedMailbox = 'work@example.com';
     state.mailboxes = [];
 
     const actions = await buildLazyActions(state, noAllowlist);
@@ -1016,8 +1014,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { getMessage } as never;
-    state.connectedMailbox = 'alice@corp.com';
     state.mailboxes = [
       {
         name: 'alice',
@@ -1077,8 +1073,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { getMessage } as never;
-    state.connectedMailbox = 'alice@corp.com';
     state.mailboxes = [
       {
         name: 'alice',
@@ -1121,8 +1115,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { getMessage } as never;
-    state.connectedMailbox = 'alice@corp.com';
     state.mailboxes = [
       {
         name: 'alice',
@@ -1168,8 +1160,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { getMessage } as never;
-    state.connectedMailbox = 'alice@corp.com';
     state.mailboxes = [{
       name: 'alice',
       emailAddress: 'alice@corp.com',
@@ -1218,8 +1208,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { getMessage } as never;
-    state.connectedMailbox = 'alice@corp.com';
     state.mailboxes = [{
       name: 'alice',
       emailAddress: 'alice@corp.com',
@@ -1262,9 +1250,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = {} as never;
-    state.connectedMailbox = 'work@example.com';
-    state.connectedProvider = 'microsoft';
     state.mailboxes = [
       {
         name: 'work',
@@ -1307,9 +1292,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = {} as never;
-    state.connectedMailbox = 'work@example.com';
-    state.connectedProvider = 'microsoft';
     state.mailboxes = [
       {
         name: 'work',
@@ -1363,9 +1345,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { listMessages: workList } as never;
-    state.connectedMailbox = 'work@example.com';
-    state.connectedProvider = 'microsoft';
     state.mailboxes = [
       {
         name: 'work',
@@ -1416,6 +1395,48 @@ describe('mcp-transport/Lazy Provider State', () => {
     ]);
   });
 
+  it('Scenario: canonical email address outranks another mailbox\'s colliding alias', async () => {
+    // mailbox-config/Mailbox Canonical Identity: the email address is the
+    // canonical ID. Here mailbox "b"'s logical alias equals mailbox "a"'s
+    // email address. The selector must resolve to the address's owner —
+    // never silently by array order (issue #176 follow-through).
+    const aliasOwnerList = vi.fn().mockResolvedValue([]);
+    const addressOwnerList = vi.fn().mockResolvedValue([]);
+
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.mailboxes = [
+      {
+        name: 'shared@corp.com', // alias that collides with the OTHER mailbox's address
+        emailAddress: 'personal@example.com',
+        displayName: 'personal@example.com',
+        providerType: 'gmail',
+        provider: { listMessages: aliasOwnerList } as never,
+        auth: null,
+        isDefault: true,
+        status: 'connected',
+      },
+      {
+        name: 'work',
+        emailAddress: 'shared@corp.com',
+        displayName: 'shared@corp.com',
+        providerType: 'microsoft',
+        provider: { listMessages: addressOwnerList } as never,
+        auth: null,
+        isDefault: false,
+        status: 'connected',
+      },
+    ];
+
+    const actions = await buildLazyActions(state, noAllowlist);
+    const listEmails = actions.find(a => a.name === 'list_emails')!;
+    await listEmails.run({}, { mailbox: 'shared@corp.com' });
+
+    expect(addressOwnerList).toHaveBeenCalledTimes(1);
+    expect(aliasOwnerList).not.toHaveBeenCalled();
+  });
+
   it('scheduled-send actions route to the requested mailbox provider', async () => {
     const workListScheduled = vi.fn().mockResolvedValue([]);
     const personalListScheduled = vi.fn().mockResolvedValue([{
@@ -1429,12 +1450,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = {
-      listScheduledSends: workListScheduled,
-      cancelScheduledSend: workCancel,
-    } as never;
-    state.connectedMailbox = 'work@example.com';
-    state.connectedProvider = 'microsoft';
     state.mailboxes = [
       {
         name: 'work',
@@ -1499,9 +1514,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { listMessages: workList } as never;
-    state.connectedMailbox = 'work@example.com';
-    state.connectedProvider = 'microsoft';
     state.mailboxes = [{
       name: 'work',
       emailAddress: 'work@example.com',
@@ -1539,9 +1551,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { createReplyDraft } as never;
-    state.connectedMailbox = 'work@example.com';
-    state.connectedProvider = 'microsoft';
     state.mailboxes = [
       {
         name: 'work',
@@ -1606,9 +1615,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { createDraft: workCreateDraft } as never;
-    state.connectedMailbox = 'work@example.com';
-    state.connectedProvider = 'microsoft';
     state.mailboxes = [
       {
         name: 'work',
@@ -1665,9 +1671,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { getMessage: workGetMessage } as never;
-    state.connectedMailbox = 'work@example.com';
-    state.connectedProvider = 'microsoft';
     state.mailboxes = [
       {
         name: 'work',
@@ -1730,9 +1733,6 @@ describe('mcp-transport/Lazy Provider State', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { listAttachments: workListAttachments, downloadAttachment: workDownloadAttachment } as never;
-    state.connectedMailbox = 'work@example.com';
-    state.connectedProvider = 'microsoft';
     state.mailboxes = [
       {
         name: 'work',
@@ -1805,10 +1805,10 @@ describe('mcp-transport/Lazy Provider State', () => {
   });
 });
 
-// Issue #93: list_mailboxes is a bespoke tool that enumerates state.mailboxes
-// directly. These tests drive the SHIPPED path (buildLazyActions → executeTool),
-// not the core listMailboxesAction, whose in-memory mailboxStore this server
-// never populates.
+// Issue #93: list_mailboxes is a bespoke tool that enumerates state.mailboxes —
+// the single source of truth for which mailboxes exist (#176; the unreachable
+// core listMailboxesAction is tracked separately in #175). These tests drive
+// the SHIPPED path (buildLazyActions → executeTool).
 describe('mcp-transport/List Mailboxes Tool', () => {
   const noAllowlist = () => undefined;
 
@@ -1930,9 +1930,9 @@ describe('mcp-transport/List Mailboxes Tool', () => {
 
 // The SHIPPED list_mailboxes path (buildLazyActions → executeTool) is the
 // canonical implementation of the mailbox-config/List Mailboxes requirement —
-// the core listMailboxesAction reads an in-memory store this server never fills
-// and is dead code (tracked for follow-up removal/reconciliation). This block is
-// the spec-traceable proof that the shipped output matches the canonical shape:
+// the core listMailboxesAction reads an in-memory store this server never
+// populates (removal/reconciliation tracked in #175). This block is the
+// spec-traceable proof that the shipped output matches the canonical shape:
 // distinct `name` + `emailAddress`, provider, isDefault, status.
 describe('mailbox-config/List Mailboxes', () => {
   it('Scenario: List all mailboxes', async () => {
@@ -1959,6 +1959,60 @@ describe('mailbox-config/List Mailboxes', () => {
       isDefault: true,
       status: 'connected',
     }]);
+  });
+});
+
+describe('mailbox-config/Default Mailbox', () => {
+  it('Scenario: Single mailbox auto-default', async () => {
+    // WHEN only one mailbox ("personal") is connected — even if nothing marked
+    // it default — THEN it is automatically the default for all actions
+    // (getDefaultMailbox falls back to the only connected member).
+    const personalList = vi.fn().mockResolvedValue([]);
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.mailboxes = [{
+      name: 'personal',
+      emailAddress: 'personal@example.com',
+      displayName: 'personal@example.com',
+      providerType: 'gmail',
+      provider: { listMessages: personalList } as never,
+      auth: null,
+      isDefault: false,
+      status: 'connected',
+    }];
+
+    const actions = await buildLazyActions(state, () => undefined);
+    const listEmails = actions.find(a => a.name === 'list_emails')!;
+    await listEmails.run({}, {}); // no mailbox arg — must route to "personal"
+    expect(personalList).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('mailbox-config/Mailbox Status', () => {
+  it('Scenario: Status with warning', async () => {
+    // WHEN get_mailbox_status is called and no send allowlist is configured
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.mailboxes = [{
+      name: 'work',
+      emailAddress: 'test-user@example.com',
+      displayName: 'test-user@example.com',
+      providerType: 'microsoft',
+      provider: {} as never,
+      auth: null,
+      isDefault: true,
+      status: 'connected',
+    }];
+
+    const actions = await buildLazyActions(state, () => undefined);
+    const status = actions.find(a => a.name === 'get_mailbox_status')!;
+    const result = await status.run({}, {}) as { status: string; warnings: string[] };
+
+    // THEN the result reports the connected mailbox with an outbound-disabled warning
+    expect(result.status).toBe('connected');
+    expect(result.warnings.some(w => /send allowlist/i.test(w))).toBe(true);
   });
 });
 
@@ -2181,9 +2235,6 @@ describe('mcp-transport/Delete policy wiring', () => {
     state.status = 'connected';
     state.initPromise = Promise.resolve();
     const provider = { deleteMessage } as never;
-    state.provider = provider;
-    state.connectedMailbox = 'work@example.com';
-    state.connectedProvider = 'microsoft';
     state.mailboxes = [
       {
         name: 'work',
@@ -2281,9 +2332,6 @@ describe('mcp-transport/Recoverable Mailbox-Required Error End-to-End', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = {} as never;
-    state.connectedMailbox = 'work@example.com';
-    state.connectedProvider = 'microsoft';
     state.mailboxes = [
       {
         name: 'work',
@@ -2345,9 +2393,6 @@ describe('mailbox-config/Mailbox Names Are Round-Trippable Selectors', () => {
     const state = createLazyProviderState();
     state.status = 'connected';
     state.initPromise = Promise.resolve();
-    state.provider = { createDraft: workCreate } as never;
-    state.connectedMailbox = 'work@example.com';
-    state.connectedProvider = 'microsoft';
     state.mailboxes = [
       {
         name: 'personal',

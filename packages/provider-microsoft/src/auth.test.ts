@@ -332,6 +332,58 @@ describe('mailbox-config/Mailbox Canonical Identity', () => {
   });
 });
 
+describe('provider-microsoft/Mailbox Metadata Discovery', () => {
+  let savedAgentEmailHome: string | undefined;
+  let configDir: string;
+
+  beforeEach(async () => {
+    savedAgentEmailHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    const tempDir = join(tmpdir(), `email-agent-mcp-configure-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    process.env['EMAIL_AGENT_MCP_HOME'] = tempDir;
+    configDir = join(tempDir, 'tokens');
+    await mkdir(configDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    const tempDir = process.env['EMAIL_AGENT_MCP_HOME']!;
+    if (savedAgentEmailHome === undefined) {
+      delete process.env['EMAIL_AGENT_MCP_HOME'];
+    } else {
+      process.env['EMAIL_AGENT_MCP_HOME'] = savedAgentEmailHome;
+    }
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  // NOT the mailbox-config "Add work mailbox" scenario — that canonical
+  // configure-flow scenario is covered by email-core's configure.test.ts.
+  // This test covers the discovery half the MCP server's initProvider relies
+  // on: metadata persisted in the shape the configure wizard writes must
+  // round-trip through listConfiguredMailboxesWithMetadata with its
+  // emailAddress intact (groundwork for #175, where the dead configure
+  // action's disposition is decided).
+  it('round-trips persisted mailbox metadata with emailAddress through startup discovery', async () => {
+    // GIVEN metadata on disk in the shape the configure workflow persists
+    // (fetched emailAddress included)
+    const metadata = {
+      authenticationRecord: { authority: 'test', homeAccountId: 'test', clientId: 'test', tenantId: 'test' },
+      lastInteractiveAuthAt: new Date().toISOString(),
+      clientId: 'test-client-id',
+      mailboxName: 'work',
+      emailAddress: 'test-user@example.com',
+    };
+    const safeKey = toFilesystemSafeKey('test-user@example.com');
+    await writeFile(join(configDir, `${safeKey}.json`), JSON.stringify(metadata), 'utf-8');
+
+    // THEN the stored metadata round-trips with `emailAddress`, and the
+    // discovery path the server's initProvider uses surfaces the mailbox
+    const { listConfiguredMailboxesWithMetadata } = await import('./auth.js');
+    const mailboxes = await listConfiguredMailboxesWithMetadata();
+    expect(mailboxes).toHaveLength(1);
+    expect(mailboxes[0]!.mailboxName).toBe('work');
+    expect(mailboxes[0]!.emailAddress).toBe('test-user@example.com');
+  });
+});
+
 describe('mailbox-config/Filesystem-Safe Storage Key', () => {
   it('Scenario: Derived filename from email', () => {
     // WHEN a mailbox is configured for test-user@example.com

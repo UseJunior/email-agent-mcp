@@ -6,6 +6,7 @@ import {
   withRetry,
   withAutoRefresh,
   discoverProviders,
+  createProvider,
   type AuthManager,
   type EmailProvider,
 } from './provider.js';
@@ -99,6 +100,16 @@ describe('provider-interface/Provider Registration', () => {
     const providers = await discoverProviders();
     expect(Array.isArray(providers)).toBe(true);
     // In test env, provider packages aren't installed as separate deps
+  });
+});
+
+describe('mailbox-config/Provider Discovery', () => {
+  it('Scenario: Provider not installed', async () => {
+    // WHEN a provider is requested that is not registered/installed
+    // THEN the error names the missing package and how to install it
+    await expect(createProvider('gmail')).rejects.toThrow(
+      "Provider 'gmail' not available. Install: npm install @usejunior/provider-gmail",
+    );
   });
 });
 

@@ -38,31 +38,29 @@ interface ConnectedLazyMailboxState extends LazyMailboxState {
   status: 'connected';
 }
 
+/**
+ * Lazy provider state. `mailboxes` is the SINGLE source of truth for which
+ * mailboxes exist: every configured mailbox is a member carrying its own
+ * `status` ('connected' | 'error'), and a failed mailbox is a member with an
+ * error — never an absence patched elsewhere. Init lifecycle is tracked
+ * separately via `status` / `initPromise` / `error` / `isDemo`.
+ */
 export interface LazyProviderState {
-  provider: EmailProvider | null;
-  auth: LazyProviderAuth | null;
   initPromise: Promise<void> | null;
   error: string | null;
   /** True when no mailboxes are configured OR all auth attempts failed. */
   isDemo: boolean;
   status: 'pending' | 'connecting' | 'connected' | 'not_configured' | 'error';
-  /** Human-readable display name of the connected mailbox, if any. */
-  connectedMailbox: string | null;
-  connectedProvider: 'microsoft' | 'gmail' | null;
   mailboxes: LazyMailboxState[];
 }
 
 /** Create a fresh lazy state. */
 export function createLazyProviderState(): LazyProviderState {
   return {
-    provider: null,
-    auth: null,
     initPromise: null,
     error: null,
     isDemo: false,
     status: 'pending',
-    connectedMailbox: null,
-    connectedProvider: null,
     mailboxes: [],
   };
 }
@@ -403,32 +401,12 @@ function normalizeMailboxKey(value: string): string {
   return value.trim().toLowerCase();
 }
 
-function fallbackConnectedMailbox(state: LazyProviderState): LazyMailboxState[] {
-  if (!state.provider) return [];
-  return [
-    {
-      name: state.connectedMailbox ?? 'default',
-      emailAddress: state.connectedMailbox ?? undefined,
-      displayName: state.connectedMailbox ?? 'default',
-      providerType: state.connectedProvider ?? 'microsoft',
-      provider: state.provider,
-      auth: state.auth,
-      isDefault: true,
-      status: 'connected',
-    },
-  ];
-}
-
-function getKnownMailboxes(state: LazyProviderState): LazyMailboxState[] {
-  return state.mailboxes.length > 0 ? state.mailboxes : fallbackConnectedMailbox(state);
-}
-
 function isConnectedMailbox(mailbox: LazyMailboxState): mailbox is ConnectedLazyMailboxState {
   return mailbox.status === 'connected' && mailbox.provider !== null;
 }
 
 function getConnectedMailboxes(state: LazyProviderState): ConnectedLazyMailboxState[] {
-  return getKnownMailboxes(state).filter(isConnectedMailbox);
+  return state.mailboxes.filter(isConnectedMailbox);
 }
 
 function getDefaultMailbox(state: LazyProviderState): ConnectedLazyMailboxState | null {
@@ -436,19 +414,31 @@ function getDefaultMailbox(state: LazyProviderState): ConnectedLazyMailboxState 
   return connected.find(mailbox => mailbox.isDefault) ?? connected[0] ?? null;
 }
 
+/**
+ * Resolve a caller-supplied mailbox selector against `state.mailboxes`.
+ *
+ * Canonical email address takes precedence over the logical config name
+ * (per the mailbox-config Mailbox Canonical Identity requirement), so one
+ * mailbox's alias colliding with another mailbox's email address resolves to
+ * the address's owner — never silently by array order. Multiple matches
+ * within the same tier (a misconfiguration) resolve to nothing rather than
+ * to an arbitrary winner; the caller then reports the available mailboxes.
+ * `displayName` is not matched: it is derived as `emailAddress ?? name`, so
+ * both tiers already cover it.
+ */
 function findKnownMailbox(state: LazyProviderState, mailboxName: string): LazyMailboxState | null {
   const target = normalizeMailboxKey(mailboxName);
-  return (
-    getKnownMailboxes(state).find(mailbox =>
-      normalizeMailboxKey(mailbox.name) === target ||
-      normalizeMailboxKey(mailbox.displayName) === target ||
-      (mailbox.emailAddress ? normalizeMailboxKey(mailbox.emailAddress) === target : false),
-    ) ?? null
+  const byEmail = state.mailboxes.filter(
+    mailbox => mailbox.emailAddress !== undefined && normalizeMailboxKey(mailbox.emailAddress) === target,
   );
+  if (byEmail.length === 1) return byEmail[0]!;
+  if (byEmail.length > 1) return null;
+  const byName = state.mailboxes.filter(mailbox => normalizeMailboxKey(mailbox.name) === target);
+  return byName.length === 1 ? byName[0]! : null;
 }
 
 function describeConfiguredMailboxes(state: LazyProviderState): string {
-  const names = getKnownMailboxes(state).map(mailbox => mailbox.emailAddress ?? mailbox.name);
+  const names = state.mailboxes.map(mailbox => mailbox.emailAddress ?? mailbox.name);
   return names.length > 0 ? names.join(', ') : 'none';
 }
 
@@ -633,10 +623,6 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
     if (connectedMailboxes.length > 0) {
       connectedMailboxes[0]!.isDefault = true;
       state.mailboxes = [...connectedMailboxes, ...failedMailboxes];
-      state.provider = connectedMailboxes[0]!.provider;
-      state.auth = connectedMailboxes[0]!.auth;
-      state.connectedMailbox = connectedMailboxes[0]!.displayName;
-      state.connectedProvider = connectedMailboxes[0]!.providerType;
       state.isDemo = false;
       state.status = 'connected';
       return;
@@ -1031,20 +1017,21 @@ export async function buildLazyActions(
         ),
       }),
       annotations: { readOnlyHint: true, destructiveHint: false },
-      // Enumerates state.mailboxes directly — NOT via the generic action wrapper
-      // and NOT via the core listMailboxesAction, whose in-memory mailboxStore is
-      // never populated by this server (it loads mailboxes from disk metadata into
-      // state.mailboxes). Uses waitForInit rather than ensureProvider: ensureProvider
-      // throws when zero mailboxes are connected, which is exactly the misconfigured
-      // case an agent would call this tool to diagnose. waitForInit resolves once
-      // init settles (populating both connected and error mailboxes) without
-      // throwing on an all-failed state — it is provider-optional, not a latency
-      // guarantee (a never-settling auth promise would still block, as it does for
-      // every other tool that awaits init).
+      // Enumerates state.mailboxes — the single source of truth for which
+      // mailboxes exist — rather than going through the generic action wrapper
+      // or the core listMailboxesAction, whose in-memory mailboxStore this
+      // server never populates (reconciliation tracked in #175).
+      // Uses waitForInit rather than ensureProvider: ensureProvider throws when
+      // zero mailboxes are connected, which is exactly the misconfigured case an
+      // agent would call this tool to diagnose. waitForInit resolves once init
+      // settles (populating both connected and error mailboxes) without throwing
+      // on an all-failed state — it is provider-optional, not a latency guarantee
+      // (a never-settling auth promise would still block, as it does for every
+      // other tool that awaits init).
       run: async () => {
         await waitForInit(state);
         return {
-          mailboxes: getKnownMailboxes(state).map(mailbox => ({
+          mailboxes: state.mailboxes.map(mailbox => ({
             name: mailbox.name,
             emailAddress: mailbox.emailAddress ?? null,
             provider: mailbox.providerType,
