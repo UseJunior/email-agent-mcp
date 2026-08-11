@@ -3,7 +3,6 @@ import { z } from 'zod';
 import type { EmailAction } from './registry.js';
 import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { checkReplyThreading } from '../security/reply-validation.js';
-import { withRetry } from '../providers/provider.js';
 import { truncateBody, BODY_SIZE_LIMIT } from '../content/body-loader.js';
 import { renderEmailBody } from '../content/body-renderer.js';
 import {
@@ -310,10 +309,12 @@ export const sendDraftAction: EmailAction<
         };
       }
 
-      const result = await withRetry(
-        () => ctx.provider.sendDraft(input.draft_id),
-        { maxRetries: 3, baseDelay: 1000 },
-      );
+      // Exactly one provider attempt — sending a draft delivers mail through
+      // a non-idempotent provider endpoint. Whether a provider rejects a
+      // second send of an already-consumed draft is undocumented, so do not
+      // rely on it: an automatic retry after an ambiguous failure could
+      // deliver duplicates. Fail fast instead.
+      const result = await ctx.provider.sendDraft(input.draft_id);
 
       if (ctx.rateLimiter) {
         ctx.rateLimiter.recordUsage('send_draft');

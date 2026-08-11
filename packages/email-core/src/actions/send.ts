@@ -3,7 +3,6 @@ import { z } from 'zod';
 import type { EmailAction } from './registry.js';
 import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { checkReplyThreading } from '../security/reply-validation.js';
-import { withRetry } from '../providers/provider.js';
 import { truncateBody, BODY_SIZE_LIMIT } from '../content/body-loader.js';
 import { renderEmailBody } from '../content/body-renderer.js';
 import {
@@ -226,12 +225,14 @@ export const sendEmailAction: EmailAction<
       }
     }
 
-    // Immediate send with retry on transient errors
+    // Immediate send — exactly one provider attempt. Graph /sendMail (and
+    // Gmail messages.send) are non-idempotent POSTs with no idempotency key:
+    // a timeout or 5xx after the provider accepted the message is
+    // indistinguishable from a pre-acceptance failure, so an automatic retry
+    // can silently deliver duplicates. Fail fast and surface the structured
+    // error instead (mirrors the scheduled-send branch above).
     try {
-      const result = await withRetry(
-        () => ctx.provider.sendMessage(composeMessage),
-        { maxRetries: 3, baseDelay: 1000 },
-      );
+      const result = await ctx.provider.sendMessage(composeMessage);
 
       if (ctx.rateLimiter) {
         ctx.rateLimiter.recordUsage('send_email');

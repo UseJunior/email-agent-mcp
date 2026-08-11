@@ -296,25 +296,74 @@ describe('email-write/Draft Workflow', () => {
 });
 
 describe('email-write/Delivery Failure Handling', () => {
-  it('Scenario: Transient error retry', async () => {
+  it('Scenario: Transient delivery failure is not retried', async () => {
+    // Send is a non-idempotent operation: a "transient" failure may have
+    // occurred after the provider accepted the message, so retrying could
+    // deliver duplicates. Exactly one provider attempt is allowed.
     let callCount = 0;
-    const originalSend = provider.sendMessage.bind(provider);
-    provider.sendMessage = async (msg) => {
+    provider.sendMessage = async () => {
       callCount++;
-      if (callCount <= 2) {
-        throw new ProviderError('SERVICE_UNAVAILABLE', 'Service temporarily unavailable', 'test', true);
-      }
-      return originalSend(msg);
+      throw new ProviderError('SERVICE_UNAVAILABLE', 'Service temporarily unavailable', 'test', true);
     };
 
     const result = await sendEmailAction.run(ctx, {
       to: 'alice@allowed.com',
       subject: 'Retry Test',
-      body: 'Will retry',
+      body: 'Must not retry',
     });
 
-    expect(result.success).toBe(true);
-    expect(callCount).toBe(3); // 2 failures + 1 success
+    expect(callCount).toBe(1);
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('SERVICE_UNAVAILABLE');
+    expect(result.error!.recoverable).toBe(true);
+  });
+
+  it('Scenario: Deterministic delivery failure fails fast', async () => {
+    // GraphApiError extends Error, not ProviderError — it must not be
+    // retried, and must surface as a structured error immediately.
+    class GraphApiErrorLike extends Error {
+      constructor(public status: number, body: string) {
+        super(`Graph API error ${status}: ${body}`);
+        this.name = 'GraphApiError';
+      }
+    }
+    let callCount = 0;
+    provider.sendMessage = async () => {
+      callCount++;
+      throw new GraphApiErrorLike(400, '{"error":{"code":"ErrorInvalidRecipients"}}');
+    };
+
+    const start = Date.now();
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Fail Fast Test',
+      body: 'Deterministic failure',
+    });
+
+    expect(callCount).toBe(1);
+    expect(Date.now() - start).toBeLessThan(500); // no backoff stall
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('SEND_FAILED');
+    expect(result.error!.message).toContain('ErrorInvalidRecipients');
+    expect(result.error!.recoverable).toBe(false);
+  });
+
+  it('Scenario: Plain thrown Error is not retried', async () => {
+    let callCount = 0;
+    provider.sendMessage = async () => {
+      callCount++;
+      throw new Error('socket hang up');
+    };
+
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Ambiguous Failure',
+      body: 'Body',
+    });
+
+    expect(callCount).toBe(1);
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('SEND_FAILED');
   });
 
   it('Scenario: Permanent failure notification', async () => {

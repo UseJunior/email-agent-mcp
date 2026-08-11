@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MockEmailProvider } from '../testing/mock-provider.js';
 import { replyToEmailAction } from './reply.js';
+import { ProviderError } from '../providers/provider.js';
 import type { ActionContext } from './registry.js';
 import type { EmailMessage } from '../types.js';
 
@@ -547,5 +548,45 @@ describe('email-write/Reply Draft Preview (issue #75)', () => {
     expect(result.success).toBe(true);
     expect(result.messageId).toBeDefined();
     expect(result.preview).toBeUndefined();
+  });
+});
+
+describe('email-write/Delivery Failure Handling', () => {
+  it('Scenario: reply failure is not retried (single dispatch attempt)', async () => {
+    // Replies deliver mail through non-idempotent provider endpoints — an
+    // ambiguous failure must not trigger an automatic retry (possible
+    // duplicate delivery). Exactly one provider attempt is allowed.
+    let callCount = 0;
+    provider.replyToMessage = async () => {
+      callCount++;
+      throw new ProviderError('SERVICE_UNAVAILABLE', 'Service temporarily unavailable', 'test', true);
+    };
+
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: VALID_MSG_ID,
+      body: 'Reply body',
+    });
+
+    expect(callCount).toBe(1);
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('SERVICE_UNAVAILABLE');
+    expect(result.error!.recoverable).toBe(true);
+  });
+
+  it('Scenario: plain thrown Error from reply is not retried', async () => {
+    let callCount = 0;
+    provider.replyToMessage = async () => {
+      callCount++;
+      throw new Error('socket hang up');
+    };
+
+    const result = await replyToEmailAction.run(ctx, {
+      message_id: VALID_MSG_ID,
+      body: 'Reply body',
+    });
+
+    expect(callCount).toBe(1);
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('REPLY_FAILED');
   });
 });
