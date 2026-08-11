@@ -73,12 +73,22 @@ If the original message cannot be found, tell the user rather than silently crea
 
 **MCP**: `reply_to_email` handles threading automatically.
 
-## Structure: One Ask Per Email
+## Structure: How Many Asks?
 
-Every email should have exactly one clear action item. If you need multiple things, either:
+**Cold outbound to a prospect: exactly one.** You have no relationship, and every additional ask lowers the reply rate. If you need more than one thing, either:
 
 - Pick the most important one and save the rest for a follow-up
 - Use a numbered list where the first item is the ask and the rest are context
+
+**Replies to clients, customers, and anyone in an ongoing relationship: as many as earn their place.** The one-ask rule is a cold-outreach heuristic, not a general law, and applying it to relationship mail causes a worse failure — it pushes a material question into a follow-up, or down into supporting detail, where the recipient skims past the one thing that needed an answer.
+
+An ask earns its place when all three hold:
+
+- money, obligation, or meaning moves on the answer
+- the recipient can answer in a word or a sentence, not a drafting exercise
+- you have already worked out both alternatives, so their reply *selects* rather than *commissions*
+
+Anything that fails those tests is not a question. It is an assumption you state and invite them to correct, or work you do yourself. Brevity should fall out of that test, never be applied on top of it.
 
 **Structure template for action-needed replies:**
 

@@ -219,7 +219,7 @@ When drafting replies:
 
 - **Match the sender's tone** — if they wrote "Dear Steven," reply with "Dear [Name]," not "Hey!"
 - **State the outcome, not the journey** — "The document is ready for your review" beats "I processed the document through our pipeline and..."
-- **One clear ask per message** — don't bury the action item in paragraph three
+- **One clear ask per message on cold outbound** — don't bury the action item in paragraph three. On replies to clients and ongoing relationships, keep every ask that earns its place (see `email-drafting`)
 - **Check threading** — if the subject has "Re:" or "RE:", find the original message and create a threaded reply, not a standalone draft
 
 **Formatting gotchas** agents get wrong:
