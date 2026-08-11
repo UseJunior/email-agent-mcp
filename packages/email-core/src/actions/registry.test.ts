@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 // Spec: openspec/specs/mcp-transport/spec.md — "Action to Tool Mapping"
 // EMAIL_ACTIONS is the canonical registry consumed by adapters; it must be
 // non-empty, duplicate-free, and complete (issue #174: a previous mutable
@@ -61,6 +62,44 @@ describe('EMAIL_ACTIONS registry', () => {
     }
   });
 
+  it('matches an independent discovery of every action module export (no lockstep drift)', () => {
+    // EXPECTED_ACTION_NAMES above documents the published API, but it is
+    // manually maintained alongside the registry list — both could drift
+    // together. This test discovers action exports straight from the module
+    // files, so a new `*Action` export that is missing from EMAIL_ACTIONS
+    // fails here even if both manual lists were forgotten.
+    const modules = import.meta.glob(['./*.ts', '!./*.test.ts', '!./registry.ts'], {
+      eager: true,
+    }) as Record<string, Record<string, unknown>>;
+    const discovered: { source: string; action: { name: string } }[] = [];
+    for (const [file, mod] of Object.entries(modules)) {
+      for (const [exportName, value] of Object.entries(mod)) {
+        if (!exportName.endsWith('Action')) continue;
+        if (
+          typeof value !== 'object' ||
+          value === null ||
+          typeof (value as { name?: unknown }).name !== 'string' ||
+          typeof (value as { run?: unknown }).run !== 'function'
+        ) {
+          continue;
+        }
+        discovered.push({ source: `${file}#${exportName}`, action: value as { name: string } });
+      }
+    }
+    expect(discovered.length).toBeGreaterThan(0);
+    // Every discovered action object appears in EMAIL_ACTIONS exactly once (by identity).
+    for (const { source, action } of discovered) {
+      const occurrences = EMAIL_ACTIONS.filter((a) => a === action).length;
+      expect(occurrences, `${source} (${action.name}) must be registered exactly once`).toBe(1);
+    }
+    // Every registry entry corresponds to a discovered action export.
+    for (const entry of EMAIL_ACTIONS) {
+      const known = discovered.some(({ action }) => action === entry);
+      expect(known, `registry entry ${entry.name} must come from an action module`).toBe(true);
+    }
+    expect(EMAIL_ACTIONS.length).toBe(discovered.length);
+  });
+
   it('is exported (populated) from the package entry point', () => {
     expect(PUBLIC_EMAIL_ACTIONS).toBe(EMAIL_ACTIONS);
     expect(PUBLIC_EMAIL_ACTIONS.length).toBe(EXPECTED_ACTION_NAMES.length);
@@ -74,9 +113,10 @@ describe('EMAIL_ACTIONS registry', () => {
     let built: { EMAIL_ACTIONS: readonly { name: string }[] };
     try {
       built = await import('../../dist/index.js');
-    } catch {
+    } catch (err) {
       throw new Error(
         'dist/index.js not importable — run `npm run build -w @usejunior/email-core` before tests',
+        { cause: err },
       );
     }
     const names = built.EMAIL_ACTIONS.map((a) => a.name);
