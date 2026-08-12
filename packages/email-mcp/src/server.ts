@@ -79,6 +79,7 @@ export interface McpTool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  outputSchema: Record<string, unknown>;
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
 }
 
@@ -91,6 +92,8 @@ export type McpContent =
 
 export interface McpToolCallResult {
   content: McpContent[];
+  /** Machine-readable action output; opaque provider IDs remain exact here. */
+  structuredContent?: Record<string, unknown>;
 }
 
 export interface EmailActionDef {
@@ -118,6 +121,7 @@ export function actionsToMcpTools(actions: EmailActionDef[]): McpTool[] {
     name: action.name,
     description: action.description,
     inputSchema: zodToJsonSchema(action.input),
+    outputSchema: zodToJsonSchema(action.output, 'output'),
     annotations: {
       readOnlyHint: action.annotations.readOnlyHint,
       destructiveHint: action.annotations.destructiveHint,
@@ -307,13 +311,19 @@ export async function handleToolCall(
             },
           },
         ],
+        structuredContent: metadata,
       };
     }
   }
 
   return {
     content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+    ...(isStructuredResult(result) ? { structuredContent: result } : {}),
   };
+}
+
+function isStructuredResult(result: unknown): result is Record<string, unknown> {
+  return result !== null && typeof result === 'object' && !Array.isArray(result);
 }
 
 /**
@@ -327,11 +337,11 @@ export function getActionInputJsonSchema(action: EmailActionDef): Record<string,
 /**
  * Convert a Zod schema to JSON Schema for MCP `tools/list`.
  *
- * Uses Zod v4's first-party `z.toJSONSchema` with `io: 'input'`. Input mode
- * is the semantically correct one for tool input schemas: fields with
- * defaults are not marked required (because the client may omit them), and
- * the emitted shape describes what the client sends, not what the parser
- * produces.
+ * Uses Zod v4's first-party `z.toJSONSchema`. Input mode is the semantically
+ * correct default for tool arguments: fields with defaults are not marked
+ * required (because the client may omit them), and the emitted shape describes
+ * what the client sends, not what the parser produces. Tool result schemas use
+ * output mode so fields populated by defaults are described as present.
  *
  * Historical note: this used to feature-detect a misspelled `toJsonSchema`
  * (lowercase `s`), which never existed in Zod v4. The primary path
@@ -348,8 +358,8 @@ export function getActionInputJsonSchema(action: EmailActionDef): Record<string,
  * `$schema` marker so OpenClaw can compile the tool schema while we keep the
  * richer generated shape.
  */
-function zodToJsonSchema(schema: z.ZodType): Record<string, unknown> {
-  const jsonSchema = z.toJSONSchema(schema, { io: 'input' }) as Record<string, unknown>;
+function zodToJsonSchema(schema: z.ZodType, io: 'input' | 'output' = 'input'): Record<string, unknown> {
+  const jsonSchema = z.toJSONSchema(schema, { io }) as Record<string, unknown>;
   delete jsonSchema.$schema;
   return jsonSchema;
 }

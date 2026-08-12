@@ -38,6 +38,48 @@ const testActions: EmailActionDef[] = [
 ];
 
 describe('mcp-transport/executeTool primitive', () => {
+  it('Scenario: opaque IDs longer than display previews round-trip through structured MCP output', async () => {
+    const opaqueId = `opaque-${'A'.repeat(145)}`;
+    const actions: EmailActionDef[] = [
+      {
+        name: 'search_emails',
+        description: 'Search',
+        input: z.object({ query: z.string() }),
+        output: z.object({ emails: z.array(z.object({ id: z.string(), subject: z.string() })) }),
+        annotations: { readOnlyHint: true, destructiveHint: false },
+        run: async () => ({ emails: [{ id: opaqueId, subject: 'Synthetic result' }] }),
+      },
+      {
+        name: 'create_draft',
+        description: 'Create reply draft',
+        input: z.object({ reply_to: z.string() }),
+        output: z.object({ success: z.boolean(), draftId: z.string() }),
+        annotations: { readOnlyHint: false, destructiveHint: false },
+        run: async (_ctx, input) => ({
+          success: true,
+          draftId: (input as { reply_to: string }).reply_to,
+        }),
+      },
+    ];
+
+    const search = await handleToolCall(actions, {}, 'search_emails', { query: 'synthetic' });
+    const structuredSearch = search.structuredContent as { emails: Array<{ id: string }> };
+    expect(structuredSearch.emails[0]!.id).toBe(opaqueId);
+    expect(structuredSearch.emails[0]!.id).toHaveLength(152);
+    expect(JSON.parse((search.content[0] as { text: string }).text).emails[0].id).toBe(opaqueId);
+
+    const draft = await handleToolCall(actions, {}, 'create_draft', {
+      reply_to: structuredSearch.emails[0]!.id,
+    });
+    expect((draft.structuredContent as { draftId: string }).draftId).toBe(opaqueId);
+
+    const tools = actionsToMcpTools(actions);
+    expect(tools.find(tool => tool.name === 'search_emails')!.outputSchema).toMatchObject({
+      type: 'object',
+      properties: { emails: { type: 'array' } },
+    });
+  });
+
   it('Scenario: executeTool returns raw action result without MCP envelope', async () => {
     // Both `serve` (via handleToolCall) and `call` (via the CLI) dispatch through
     // executeTool. The raw shape MUST be free of MCP transport formatting so the
@@ -105,6 +147,7 @@ describe('mcp-transport/Action to Tool Mapping', () => {
     expect(tools).toHaveLength(2);
     expect(tools.map(t => t.name)).toContain('list_emails');
     expect(tools.map(t => t.name)).toContain('send_email');
+    expect(tools.every(tool => tool.outputSchema.type === 'object')).toBe(true);
   });
 });
 
@@ -164,6 +207,7 @@ describe('mcp-transport/stdio Transport', () => {
     expect(metadata).not.toHaveProperty('base64');
     expect(metadata.filename).toBe('note.pdf');
     expect(metadata.mimeType).toBe('application/pdf');
+    expect(result.structuredContent).toEqual(metadata);
 
     expect(result.content[1]!.type).toBe('resource');
     const resourceContent = result.content[1] as { resource: { uri: string; mimeType?: string; blob?: string } };
