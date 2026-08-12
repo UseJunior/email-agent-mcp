@@ -25,4 +25,5 @@ export {
 } from './config.js';
 export type { GmailMailboxMetadata, GmailAuthSource } from './config.js';
 export { GoogleapisGmailClient } from './googleapis-client.js';
+export { gmailProviderError, getErrorMessage, getErrorStatus } from './errors.js';
 export { registerWatch, needsRenewal, pollHistory } from './push.js';

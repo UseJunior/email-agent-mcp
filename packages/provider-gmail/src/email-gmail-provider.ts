@@ -15,6 +15,7 @@ import type {
   DraftReplyStatus,
 } from '@usejunior/email-core';
 import { AttachmentNotFoundError } from '@usejunior/email-core';
+import { gmailProviderError } from './errors.js';
 
 // Gmail label mapping
 const FOLDER_TO_LABEL: Record<string, string> = {
@@ -198,8 +199,12 @@ export class GmailEmailProvider {
 
   async sendMessage(msg: ComposeMessage): Promise<SendResult> {
     const raw = buildRawMessage(msg);
-    const result = await this.client.sendMessage(raw, msg.threadId);
-    return { success: true, messageId: result.id };
+    try {
+      const result = await this.client.sendMessage(raw, msg.threadId);
+      return { success: true, messageId: result.id };
+    } catch (err) {
+      throw gmailProviderError(err, 'delivery');
+    }
   }
 
   async replyToMessage(messageId: string, body: string, opts?: ReplyOptions): Promise<SendResult> {
@@ -208,31 +213,43 @@ export class GmailEmailProvider {
     // only to the original sender. Caller-supplied opts.cc/bcc layer on top
     // either way. No self-exclusion — an agent that replies to its own sent
     // mail may cc itself; documented caveat.
-    const original = await this.getMessage(messageId);
-    // No action-layer send path supplies opts.to today; if one ever does, its
-    // allowlist collection must cover those addresses (issue #164).
-    const { to: replyTo, cc: replyCc } = resolveReplyRecipients(original, opts);
-    const subject = prefixReSubject(original.subject);
-    const references = buildReferences(original.references, original.messageId);
+    let original: EmailMessage;
+    let raw: string;
+    try {
+      original = await this.getMessage(messageId);
+      // No action-layer send path supplies opts.to today; if one ever does, its
+      // allowlist collection must cover those addresses (issue #164).
+      const { to: replyTo, cc: replyCc } = resolveReplyRecipients(original, opts);
+      const subject = prefixReSubject(original.subject);
+      const references = buildReferences(original.references, original.messageId);
+      raw = buildRawMessage(
+        {
+          to: replyTo,
+          cc: replyCc.length > 0 ? replyCc : undefined,
+          bcc: opts?.bcc,
+          subject,
+          body,
+          bodyHtml: opts?.bodyHtml,
+          attachments: opts?.attachments,
+        },
+        {
+          inReplyTo: original.messageId,
+          references,
+        },
+      );
+    } catch (err) {
+      // Fetching the original and constructing MIME are pre-dispatch work.
+      // Preserve their terminal/read failure classification rather than
+      // claiming the reply might have been delivered.
+      throw gmailProviderError(err, 'idempotent-read');
+    }
 
-    const raw = buildRawMessage(
-      {
-        to: replyTo,
-        cc: replyCc.length > 0 ? replyCc : undefined,
-        bcc: opts?.bcc,
-        subject,
-        body,
-        bodyHtml: opts?.bodyHtml,
-        attachments: opts?.attachments,
-      },
-      {
-        inReplyTo: original.messageId,
-        references,
-      },
-    );
-
-    const result = await this.client.sendMessage(raw, original.threadId);
-    return { success: true, messageId: result.id };
+    try {
+      const result = await this.client.sendMessage(raw, original.threadId);
+      return { success: true, messageId: result.id };
+    } catch (err) {
+      throw gmailProviderError(err, 'delivery');
+    }
   }
 
   async createDraft(msg: ComposeMessage): Promise<DraftResult> {
@@ -242,8 +259,12 @@ export class GmailEmailProvider {
   }
 
   async sendDraft(draftId: string): Promise<SendResult> {
-    const result = await this.client.sendDraft(draftId);
-    return { success: true, messageId: result.message.id };
+    try {
+      const result = await this.client.sendDraft(draftId);
+      return { success: true, messageId: result.message.id };
+    } catch (err) {
+      throw gmailProviderError(err, 'delivery');
+    }
   }
 
   async createReplyDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {

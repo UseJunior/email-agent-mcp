@@ -2046,6 +2046,20 @@ describe('cli/Watcher Token Error Recovery', () => {
     expect(exitCode).toBe(0);
   }, 10_000);
 
+  it('Scenario: Watcher reconnects after residual Graph 401 following refresh', async () => {
+    // A GraphApiError remains after the client has already spent its one
+    // fetchWithAuthRetry refresh. Read paths must preserve it so isAuthError
+    // can trigger the watcher's interactive reconnect path.
+    const { GraphApiError } = await import('@usejunior/provider-microsoft');
+    watcherMockState.getNewMessagesResult = new GraphApiError(401, 'Unauthorized');
+
+    const { runWatch } = await import('./cli.js');
+    const exitCode = await runWatch({ command: 'watch', pollInterval: 2 });
+
+    expect(watcherMockState.auth.tryReconnectCalls).toBeGreaterThanOrEqual(1);
+    expect(exitCode).toBe(0);
+  }, 10_000);
+
   it('Scenario: Watcher logs warning when reconnect fails on auth error', async () => {
     // GIVEN a watcher is polling and the token becomes invalid (invalid_grant)
     // AND reconnect will fail

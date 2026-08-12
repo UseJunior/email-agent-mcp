@@ -1081,6 +1081,19 @@ describe('provider-gmail/Reply Threading on Send', () => {
     expect(raw).toContain('Subject: Re: Urgent');
   });
 
+  it('Scenario: reply preparation failure is terminal and does not dispatch', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockRejectedValue({ code: 404, message: 'missing' }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.replyToMessage('missing', 'on it')).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+      recoverable: false,
+    });
+    expect(client.sendMessage).not.toHaveBeenCalled();
+  });
+
   it('Scenario: replyToMessage honors explicit to (issue #164)', async () => {
     // Parity with the draft path. No action-layer send path passes `to` today —
     // reply_to_email has no such input — so this only fixes the provider

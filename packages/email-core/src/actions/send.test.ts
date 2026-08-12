@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { writeFile, mkdir, symlink, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -319,18 +319,10 @@ describe('email-write/Delivery Failure Handling', () => {
   });
 
   it('Scenario: Deterministic delivery failure fails fast', async () => {
-    // GraphApiError extends Error, not ProviderError — it must not be
-    // retried, and must surface as a structured error immediately.
-    class GraphApiErrorLike extends Error {
-      constructor(public status: number, body: string) {
-        super(`Graph API error ${status}: ${body}`);
-        this.name = 'GraphApiError';
-      }
-    }
     let callCount = 0;
     provider.sendMessage = async () => {
       callCount++;
-      throw new GraphApiErrorLike(400, '{"error":{"code":"ErrorInvalidRecipients"}}');
+      throw new ProviderError('INVALID_REQUEST', 'ErrorInvalidRecipients', 'microsoft', false);
     };
 
     const start = Date.now();
@@ -343,7 +335,7 @@ describe('email-write/Delivery Failure Handling', () => {
     expect(callCount).toBe(1);
     expect(Date.now() - start).toBeLessThan(500); // no backoff stall
     expect(result.success).toBe(false);
-    expect(result.error!.code).toBe('SEND_FAILED');
+    expect(result.error!.code).toBe('INVALID_REQUEST');
     expect(result.error!.message).toContain('ErrorInvalidRecipients');
     expect(result.error!.recoverable).toBe(false);
   });
@@ -363,7 +355,24 @@ describe('email-write/Delivery Failure Handling', () => {
 
     expect(callCount).toBe(1);
     expect(result.success).toBe(false);
-    expect(result.error!.code).toBe('SEND_FAILED');
+    expect(result.error!.code).toBe('SEND_STATUS_UNKNOWN');
+  });
+
+  it('charges quota and preserves retryAfter when a send outcome is unknown', async () => {
+    const recordUsage = vi.fn();
+    ctx.rateLimiter = { checkLimit: () => ({ allowed: true }), recordUsage };
+    provider.sendMessage = async () => {
+      throw new ProviderError('SEND_STATUS_UNKNOWN', 'response lost', 'test', false, 30);
+    };
+
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Unknown outcome',
+      body: 'Body',
+    });
+
+    expect(result.error).toMatchObject({ code: 'SEND_STATUS_UNKNOWN', retryAfter: 30 });
+    expect(recordUsage).toHaveBeenCalledWith('send_email');
   });
 
   it('Scenario: Permanent failure notification', async () => {

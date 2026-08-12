@@ -1,6 +1,7 @@
 import { gmail } from '@googleapis/gmail';
 import type { GmailAuthManager } from './auth.js';
 import type { GmailApiClient, GmailMessage } from './email-gmail-provider.js';
+import { getErrorMessage, getErrorStatus } from './errors.js';
 
 interface MessageSummary {
   id?: string | null;
@@ -102,25 +103,6 @@ function requireDraft(draft: GmailDraft | undefined, op: string): { id: string; 
       threadId: draft.message.threadId,
     },
   };
-}
-
-function getErrorStatus(err: unknown): number | undefined {
-  const record = err as { code?: unknown; response?: { status?: unknown } } | null;
-  if (!record || typeof record !== 'object') return undefined;
-  if (typeof record.code === 'number') return record.code;
-  if (typeof record.response?.status === 'number') return record.response.status;
-  return undefined;
-}
-
-function getErrorMessage(err: unknown): string | undefined {
-  const record = err as {
-    message?: unknown;
-    response?: { data?: { error?: { message?: unknown } } };
-  } | null;
-  if (!record || typeof record !== 'object') return undefined;
-  if (typeof record.response?.data?.error?.message === 'string') return record.response.data.error.message;
-  if (typeof record.message === 'string') return record.message;
-  return undefined;
 }
 
 function shouldFallbackToDraftLookup(err: unknown): boolean {

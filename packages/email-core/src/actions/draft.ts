@@ -5,6 +5,7 @@ import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { checkReplyThreading } from '../security/reply-validation.js';
 import { truncateBody, BODY_SIZE_LIMIT } from '../content/body-loader.js';
 import { renderEmailBody } from '../content/body-renderer.js';
+import { isProviderError, withRetry } from '../providers/provider.js';
 import {
   ScheduledSendAtSchema,
   scheduledSendNotSupportedError,
@@ -39,6 +40,7 @@ const DraftOutput = z.object({
     code: z.string(),
     message: z.string(),
     recoverable: z.boolean(),
+    retryAfter: z.number().optional(),
     availableMailboxes: z.array(z.string()).optional(),
     defaultMailbox: z.string().optional(),
   }).optional(),
@@ -212,6 +214,7 @@ const SendDraftOutput = z.object({
     code: z.string(),
     message: z.string(),
     recoverable: z.boolean(),
+    retryAfter: z.number().optional(),
     availableMailboxes: z.array(z.string()).optional(),
     defaultMailbox: z.string().optional(),
   }).optional(),
@@ -222,7 +225,7 @@ export const sendDraftAction: EmailAction<
   z.infer<typeof SendDraftOutput>
 > = {
   name: 'send_draft',
-  description: 'Send a previously created draft. Enforces send allowlist before sending. Rate-limited.',
+  description: 'Send a previously created draft. Enforces send allowlist before sending. Rate-limited. If a send fails with SEND_STATUS_UNKNOWN, the message may already have been delivered; do not resend without checking Sent Items.',
   input: SendDraftInput,
   output: SendDraftOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -246,14 +249,17 @@ export const sendDraftAction: EmailAction<
     // Fetch draft to check recipients against allowlist (fail closed)
     let draftMessage;
     try {
-      draftMessage = await ctx.provider.getMessage(input.draft_id);
+      draftMessage = await withRetry(
+        () => ctx.provider.getMessage(input.draft_id),
+        { operation: 'idempotent-read' },
+      );
     } catch (err) {
       return {
         success: false,
         error: {
           code: 'DRAFT_LOOKUP_FAILED',
           message: `Cannot verify draft recipients before sending: ${err instanceof Error ? err.message : String(err)}`,
-          recoverable: false,
+          recoverable: isProviderError(err) ? err.recoverable : false,
         },
       };
     }
@@ -305,6 +311,7 @@ export const sendDraftAction: EmailAction<
             code: result.error.code,
             message: result.error.message,
             recoverable: result.error.recoverable,
+            ...(typeof result.error.retryAfter === 'number' ? { retryAfter: result.error.retryAfter } : {}),
           } : undefined,
         };
       }
@@ -323,10 +330,19 @@ export const sendDraftAction: EmailAction<
       return {
         success: result.success,
         messageId: result.messageId,
-        error: result.error ? { code: result.error.code, message: result.error.message, recoverable: result.error.recoverable } : undefined,
+        error: result.error ? {
+          code: result.error.code,
+          message: result.error.message,
+          recoverable: result.error.recoverable,
+          ...(typeof result.error.retryAfter === 'number' ? { retryAfter: result.error.retryAfter } : {}),
+        } : undefined,
       };
     } catch (err) {
-      return handleProviderError(err, 'SEND_DRAFT_FAILED');
+      const handled = handleProviderError(err, 'SEND_STATUS_UNKNOWN');
+      if (ctx.rateLimiter && handled.error.code === 'SEND_STATUS_UNKNOWN') {
+        ctx.rateLimiter.recordUsage('send_draft');
+      }
+      return handled;
     }
   },
 };
