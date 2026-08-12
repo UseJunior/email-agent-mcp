@@ -15,6 +15,7 @@ import type {
   DraftReplyStatus,
 } from '@usejunior/email-core';
 import { AttachmentNotFoundError } from '@usejunior/email-core';
+import { gmailProviderError } from './errors.js';
 
 // Gmail label mapping
 const FOLDER_TO_LABEL: Record<string, string> = {
@@ -198,8 +199,12 @@ export class GmailEmailProvider {
 
   async sendMessage(msg: ComposeMessage): Promise<SendResult> {
     const raw = buildRawMessage(msg);
-    const result = await this.client.sendMessage(raw, msg.threadId);
-    return { success: true, messageId: result.id };
+    try {
+      const result = await this.client.sendMessage(raw, msg.threadId);
+      return { success: true, messageId: result.id };
+    } catch (err) {
+      throw gmailProviderError(err, 'delivery');
+    }
   }
 
   async replyToMessage(messageId: string, body: string, opts?: ReplyOptions): Promise<SendResult> {
@@ -231,8 +236,12 @@ export class GmailEmailProvider {
       },
     );
 
-    const result = await this.client.sendMessage(raw, original.threadId);
-    return { success: true, messageId: result.id };
+    try {
+      const result = await this.client.sendMessage(raw, original.threadId);
+      return { success: true, messageId: result.id };
+    } catch (err) {
+      throw gmailProviderError(err, 'delivery');
+    }
   }
 
   async createDraft(msg: ComposeMessage): Promise<DraftResult> {
@@ -242,8 +251,12 @@ export class GmailEmailProvider {
   }
 
   async sendDraft(draftId: string): Promise<SendResult> {
-    const result = await this.client.sendDraft(draftId);
-    return { success: true, messageId: result.message.id };
+    try {
+      const result = await this.client.sendDraft(draftId);
+      return { success: true, messageId: result.message.id };
+    } catch (err) {
+      throw gmailProviderError(err, 'delivery');
+    }
   }
 
   async createReplyDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {

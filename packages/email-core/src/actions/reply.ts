@@ -47,6 +47,7 @@ const ReplyToEmailOutput = z.object({
     recoverable: z.boolean(),
     availableMailboxes: z.array(z.string()).optional(),
     defaultMailbox: z.string().optional(),
+    retryAfter: z.number().optional(),
   }).optional(),
 });
 
@@ -115,7 +116,7 @@ export const replyToEmailAction: EmailAction<
   z.infer<typeof ReplyToEmailOutput>
 > = {
   name: 'reply_to_email',
-  description: 'Reply to an email within an existing thread. Default reply_all=true cc\'s the original thread; pass reply_all=false to reply only to the sender. Send path validates all effective recipients against the send allowlist; draft path bypasses.',
+  description: 'Reply to an email within an existing thread. Default reply_all=true cc\'s the original thread; pass reply_all=false to reply only to the sender. Send path validates all effective recipients against the send allowlist; draft path bypasses. If a send fails with SEND_STATUS_UNKNOWN, the message may already have been delivered; do not resend without checking Sent Items.',
   input: ReplyToEmailInput,
   output: ReplyToEmailOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -241,13 +242,18 @@ export const replyToEmailAction: EmailAction<
         success: result.success,
         messageId: result.messageId,
         error: result.error ? {
-          code: result.error.code,
-          message: result.error.message,
-          recoverable: result.error.recoverable,
+            code: result.error.code,
+            message: result.error.message,
+            recoverable: result.error.recoverable,
+            ...(typeof result.error.retryAfter === 'number' ? { retryAfter: result.error.retryAfter } : {}),
         } : undefined,
       };
     } catch (err) {
-      return handleProviderError(err, 'REPLY_FAILED');
+      const handled = handleProviderError(err, 'SEND_STATUS_UNKNOWN');
+      if (ctx.rateLimiter && handled.error.code === 'SEND_STATUS_UNKNOWN') {
+        ctx.rateLimiter.recordUsage('reply_to_email');
+      }
+      return handled;
     }
   },
 };
