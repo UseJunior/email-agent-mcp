@@ -2,7 +2,7 @@
 import { z } from 'zod';
 import { basename } from 'node:path';
 import type { RateLimiter, MailboxEntry } from './registry.js';
-import { ProviderError } from '../providers/provider.js';
+import { isProviderError } from '../providers/provider.js';
 import type { EmailReader } from '../providers/provider.js';
 import { resolveBodyFile } from '../content/body-loader.js';
 import { resolveAttachmentFile } from '../content/attachment-loader.js';
@@ -364,7 +364,7 @@ export function truncateForPreview(input: string, maxBytes: number): { text: str
 }
 
 function toPreviewError(err: unknown): PreviewError {
-  if (err instanceof ProviderError) {
+  if (isProviderError(err)) {
     return { code: err.code, message: err.message };
   }
   if (err instanceof Error) {
@@ -404,7 +404,11 @@ export async function buildDraftPreview(
     persisted = await readDraft();
   } catch (firstErr) {
     // Skip retry on definitively-permanent failures (e.g. invalid draft id).
-    if (firstErr instanceof ProviderError && !firstErr.recoverable) {
+    // Deliberately NOT switched to the operation-aware isRetryable policy: this
+    // is a read-after-write against a draft the provider has just persisted, so
+    // retrying an unclassified failure (a plain Error, a lost response) is the
+    // right behaviour here and is covered by draft.test.ts.
+    if (isProviderError(firstErr) && !firstErr.recoverable) {
       return { previewError: toPreviewError(firstErr) };
     }
     if (retryDelay > 0) {
@@ -445,11 +449,29 @@ export async function buildDraftPreview(
 
 // --- handleProviderError ---
 
+/**
+ * Convert a thrown provider error into an action result.
+ *
+ * `retryAfter` is preserved when the provider supplied one, so a throttled
+ * caller learns how long to wait. `provider` is deliberately NOT surfaced: the
+ * caller already chose the mailbox, so it adds a field to keep in sync across
+ * four output schemas in exchange for no decision.
+ *
+ * `fallbackCode` is used only for errors the provider did not classify. For
+ * delivery operations that fallback MUST be SEND_STATUS_UNKNOWN, not a terminal
+ * code — see the delivery actions. An unclassified failure on a send is exactly
+ * the case where we cannot prove the message was not delivered.
+ */
 export function handleProviderError(err: unknown, fallbackCode: string) {
-  if (err instanceof ProviderError) {
+  if (isProviderError(err)) {
     return {
       success: false as const,
-      error: { code: err.code, message: err.message, recoverable: err.recoverable },
+      error: {
+        code: err.code,
+        message: err.message,
+        recoverable: err.recoverable,
+        ...(typeof err.retryAfter === 'number' ? { retryAfter: err.retryAfter } : {}),
+      },
     };
   }
   return {
