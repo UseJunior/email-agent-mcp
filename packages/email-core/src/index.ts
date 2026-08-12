@@ -44,6 +44,17 @@ export type {
 } from './providers/provider.js';
 export { ProviderError, AttachmentNotSupportedError, AttachmentNotFoundError } from './providers/provider.js';
 export {
+  isProviderError,
+  normalizeProviderError,
+  classifyHttpStatus,
+  classifyTransportError,
+  parseRetryAfter,
+  isRetryable,
+  withRetry,
+  SEND_STATUS_UNKNOWN,
+} from './providers/provider.js';
+export type { OperationKind, DispatchStage, ClassifiedFailure } from './providers/provider.js';
+export {
   isAllowedSender,
   loadReceiveAllowlist,
   getReceiveAllowlistPath,
