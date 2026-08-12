@@ -102,7 +102,7 @@ export const createDraftAction: EmailAction<
     const attachments = attResult.files!;
 
     // Validate required fields
-    const requiredError = validateRequiredFields(to, subject);
+    const requiredError = validateRequiredFields(to, replyTo ? 'reply' : subject);
     if (requiredError) {
       return { success: false, error: requiredError };
     }
