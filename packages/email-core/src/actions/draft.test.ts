@@ -94,6 +94,27 @@ Body from file.`);
     expect(result.draftId).toBeDefined();
   });
 
+  it('Scenario: Reply draft derives its subject', async () => {
+    provider.addMessage({
+      id: 'subject-parent',
+      subject: 'Provider Derived Subject',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'partner@allowed.com',
+      body: 'Reply draft body',
+      reply_to: 'subject-parent',
+    });
+
+    expect(result.success).toBe(true);
+    expect([...provider.getDrafts().values()][0]!.subject).toBe('Re: Provider Derived Subject');
+  });
+
   it('Scenario: Reply draft to a self-sent message honors caller-supplied to (issue #164)', async () => {
     // The reported failure: replying to a message the mailbox owner sent makes
     // the provider derive To from the parent's sender — the owner. With
