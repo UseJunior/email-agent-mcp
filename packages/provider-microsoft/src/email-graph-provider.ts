@@ -26,7 +26,15 @@ import type {
   EmailScheduledSender,
   DraftReplyStatus,
 } from '@usejunior/email-core';
-import { AttachmentNotSupportedError, AttachmentNotFoundError, ProviderError } from '@usejunior/email-core';
+import {
+  AttachmentNotSupportedError,
+  AttachmentNotFoundError,
+  ProviderError,
+  classifyHttpStatus,
+  classifyTransportError,
+  parseRetryAfter,
+  SEND_STATUS_UNKNOWN,
+} from '@usejunior/email-core';
 
 const BODY_SIZE_LIMIT = 3.5 * 1024 * 1024; // 3.5MB
 const SUBJECT_MAX_LENGTH = 255;
@@ -264,6 +272,21 @@ export class RealGraphApiClient implements GraphApiClient {
     this.onAuthError = onAuthError;
   }
 
+  /**
+   * Build a GraphApiError from a failed response.
+   *
+   * Retry-After must be read here: the header lives on the Response, which is
+   * gone once the body has been consumed.
+   */
+  private async errorFrom(resp: Response): Promise<GraphApiError> {
+    // Defensive on `headers`: if this helper threw, the caller would catch a
+    // TypeError instead of a GraphApiError, losing the status — and a terminal
+    // 4xx would then be classified as an ambiguous delivery. Failing to read a
+    // header must never escalate into "the message may have been sent".
+    const retryAfter = parseRetryAfter(resp.headers?.get('retry-after'));
+    return new GraphApiError(resp.status, await resp.text(), retryAfter);
+  }
+
   /** Fetch with automatic retry on 401 if onAuthError callback is provided. */
   private async fetchWithAuthRetry(url: string, init: RequestInit): Promise<Response> {
     const resp = await fetch(url, init);
@@ -285,7 +308,7 @@ export class RealGraphApiClient implements GraphApiClient {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!resp.ok) {
-      throw new GraphApiError(resp.status, await resp.text());
+      throw await this.errorFrom(resp);
     }
     return resp.json() as Promise<{ value?: unknown[]; [key: string]: unknown }>;
   }
@@ -303,7 +326,7 @@ export class RealGraphApiClient implements GraphApiClient {
     // sendMail returns 202 with no body
     if (resp.status === 202) return {};
     if (!resp.ok) {
-      throw new GraphApiError(resp.status, await resp.text());
+      throw await this.errorFrom(resp);
     }
     const text = await resp.text();
     return text ? JSON.parse(text) as { id?: string; [key: string]: unknown } : {};
@@ -321,7 +344,7 @@ export class RealGraphApiClient implements GraphApiClient {
       body: JSON.stringify(body),
     });
     if (!resp.ok) {
-      throw new GraphApiError(resp.status, await resp.text());
+      throw await this.errorFrom(resp);
     }
   }
 
@@ -333,16 +356,78 @@ export class RealGraphApiClient implements GraphApiClient {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!resp.ok) {
-      throw new GraphApiError(resp.status, await resp.text());
+      throw await this.errorFrom(resp);
     }
   }
 }
 
 export class GraphApiError extends Error {
-  constructor(public status: number, public body: string) {
+  constructor(
+    public status: number,
+    public body: string,
+    /**
+     * Seconds from a Retry-After header, when Graph sent one. Captured at the
+     * client because the header lives on the Response, which is discarded as
+     * soon as the body is read.
+     */
+    public retryAfterSeconds?: number,
+  ) {
     super(`Graph API error ${status}: ${body.slice(0, 200)}`);
     this.name = 'GraphApiError';
   }
+}
+
+/**
+ * Classify a Graph failure on a DELIVERY operation (sendMail, reply send,
+ * draft send).
+ *
+ * `ambiguous` is the load-bearing bit: it means Graph may already have
+ * accepted the message, so a caller must not resend without checking. A 4xx
+ * proves Graph rejected the request, so nothing was delivered; a 5xx proves
+ * only that Graph received it. A transport failure is ambiguous unless we can
+ * prove no request bytes were written.
+ */
+function classifyGraphDelivery(err: unknown): {
+  code: string;
+  recoverable: boolean;
+  retryAfter?: number;
+  ambiguous: boolean;
+  detail: string;
+} {
+  const detail = err instanceof Error ? err.message : String(err);
+  if (err instanceof GraphApiError) {
+    const classified = classifyHttpStatus(err.status, 'delivery', {
+      retryAfter: err.retryAfterSeconds,
+    });
+    return { ...classified, ambiguous: classified.code === SEND_STATUS_UNKNOWN, detail };
+  }
+  if (classifyTransportError(err) === 'connect-failed') {
+    return { code: 'PROVIDER_UNREACHABLE', recoverable: false, ambiguous: false, detail };
+  }
+  return { code: SEND_STATUS_UNKNOWN, recoverable: false, ambiguous: true, detail };
+}
+
+/**
+ * Build the EmailError for a failed delivery.
+ *
+ * The message string carries the guidance, because it is the only channel that
+ * reaches an LLM caller — no outputSchema is published over MCP. So the
+ * ambiguous wording must name a concrete artifact the caller can go and
+ * inspect, and must say plainly not to resend. Wording mirrors the
+ * scheduled-send path so the two families read alike.
+ */
+function graphDeliveryError(
+  err: unknown,
+  guidance: { ambiguous: string; terminal: string },
+): EmailError {
+  const failure = classifyGraphDelivery(err);
+  return {
+    code: failure.code,
+    message: `${failure.ambiguous ? guidance.ambiguous : guidance.terminal} ${failure.detail}`,
+    provider: 'microsoft',
+    recoverable: failure.recoverable,
+    ...(failure.retryAfter !== undefined ? { retryAfter: failure.retryAfter } : {}),
+  };
 }
 
 export class GraphEmailProvider implements EmailReader, EmailSender, EmailScheduledSender, EmailCategorizer, EmailAttachmentHandler, EmailFolderManager, EmailRuleManager {
@@ -795,7 +880,20 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       graphMsg.attachments = msg.attachments.map(toGraphFileAttachment);
     }
 
-    await this.client.post(`${this.basePath}/sendMail`, { message: graphMsg });
+    // Only the dispatch itself is wrapped. Everything above is local payload
+    // construction — if that throws, nothing was submitted, so it must not be
+    // reported as a possible delivery.
+    try {
+      await this.client.post(`${this.basePath}/sendMail`, { message: graphMsg });
+    } catch (err) {
+      return {
+        success: false,
+        error: graphDeliveryError(err, {
+          ambiguous: `Microsoft Graph may have accepted this message for delivery. Do not resend automatically; check Sent Items for tracking id ${trackingId} first.`,
+          terminal: 'Microsoft Graph rejected this message; it was not delivered.',
+        }),
+      };
+    }
     // sendMail returns 202 with no body — use tracking ID for sent message lookup
     return { success: true, messageId: trackingId };
   }
@@ -803,10 +901,12 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
   async replyToMessage(messageId: string, body: string, opts?: ReplyOptions): Promise<SendResult> {
     // Routes to createReply or createReplyAll based on opts.replyAll. Both Graph
     // endpoints preserve embedded images, CID references, and the auto-quoted thread.
+    // Split deliberately. Preparing the draft is pre-dispatch: nothing has been
+    // submitted for delivery, so any failure there is terminal and must NOT be
+    // reported as ambiguous. Only the /send POST can leave delivery in doubt.
+    let draftId: string;
     try {
-      const draftId = await this.prepareReplyDraft(messageId, body, opts);
-      await this.client.post(`${this.basePath}/messages/${encodeGraphPathId(draftId)}/send`, {});
-      return { success: true, messageId: draftId };
+      draftId = await this.prepareReplyDraft(messageId, body, opts);
     } catch (err) {
       if (err instanceof GraphAttachmentError) {
         const detail = err.draftId
@@ -817,9 +917,22 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
           error: { ...err.emailError, message: err.emailError.message + detail },
         };
       }
-      const message = err instanceof Error ? err.message : 'Failed to send reply';
+      const message = err instanceof Error ? err.message : 'Failed to prepare reply';
       return { success: false, error: { code: 'REPLY_FAILED', message, recoverable: false } };
     }
+
+    try {
+      await this.client.post(`${this.basePath}/messages/${encodeGraphPathId(draftId)}/send`, {});
+    } catch (err) {
+      return {
+        success: false,
+        error: graphDeliveryError(err, {
+          ambiguous: `Microsoft Graph may have accepted this reply for delivery. Do not resend automatically; inspect message ${draftId} — it is in Sent Items if it was delivered, Drafts if it was not.`,
+          terminal: `Microsoft Graph rejected this reply; it was not delivered. The prepared draft remains at ${draftId}.`,
+        }),
+      };
+    }
+    return { success: true, messageId: draftId };
   }
 
   async createDraft(msg: ComposeMessage): Promise<DraftResult> {
@@ -848,7 +961,17 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
   }
 
   async sendDraft(draftId: string): Promise<SendResult> {
-    await this.client.post(`${this.basePath}/messages/${encodeGraphPathId(draftId)}/send`, {});
+    try {
+      await this.client.post(`${this.basePath}/messages/${encodeGraphPathId(draftId)}/send`, {});
+    } catch (err) {
+      return {
+        success: false,
+        error: graphDeliveryError(err, {
+          ambiguous: `Microsoft Graph may have accepted draft ${draftId} for delivery. Do not resend automatically; the draft is gone from Drafts and present in Sent Items if it was delivered.`,
+          terminal: `Microsoft Graph rejected draft ${draftId}; it was not delivered and remains in Drafts.`,
+        }),
+      };
+    }
     return { success: true, messageId: draftId };
   }
 
@@ -1581,29 +1704,23 @@ function scheduledDraftSendFailure(
   scheduledSendAt: string,
   err: unknown,
 ): ScheduledSendResult {
-  const detail = err instanceof Error ? err.message : String(err);
-  if (err instanceof GraphApiError && err.status >= 400 && err.status < 500) {
-    return {
-      success: false,
-      messageId: draftId,
-      scheduledSendAt,
-      error: {
-        code: 'SCHEDULE_SEND_FAILED',
-        message: `Microsoft Graph rejected scheduled-send submission; the tagged draft remains available at messageId ${draftId}. ${detail}`,
-        provider: 'microsoft',
-        recoverable: false,
-      },
-    };
-  }
+  // Shares classifyGraphDelivery with the immediate-send paths so the two
+  // families cannot drift on what counts as ambiguous. The codes stay
+  // scheduled-specific because they are spec'd and because the remedy differs:
+  // here there is a tagged draft to inspect or cancel.
+  const failure = classifyGraphDelivery(err);
   return {
     success: false,
     messageId: draftId,
     scheduledSendAt,
     error: {
-      code: 'SCHEDULE_SEND_STATUS_UNKNOWN',
-      message: `Microsoft Graph may have accepted scheduled-send submission. Do not schedule a duplicate; inspect or cancel messageId ${draftId}. ${detail}`,
+      code: failure.ambiguous ? 'SCHEDULE_SEND_STATUS_UNKNOWN' : 'SCHEDULE_SEND_FAILED',
+      message: failure.ambiguous
+        ? `Microsoft Graph may have accepted scheduled-send submission. Do not schedule a duplicate; inspect or cancel messageId ${draftId}. ${failure.detail}`
+        : `Microsoft Graph rejected scheduled-send submission; the tagged draft remains available at messageId ${draftId}. ${failure.detail}`,
       provider: 'microsoft',
       recoverable: false,
+      ...(failure.retryAfter !== undefined ? { retryAfter: failure.retryAfter } : {}),
     },
   };
 }

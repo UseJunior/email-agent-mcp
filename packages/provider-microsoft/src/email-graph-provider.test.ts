@@ -892,7 +892,11 @@ describe('provider-microsoft/Draft-Then-Send via createReplyAll', () => {
     expect(client.post).toHaveBeenCalledTimes(1); // only the failed createReplyAll
   });
 
-  it('Scenario: send failure (createReplyAll succeeds, /send fails) returns REPLY_FAILED', async () => {
+  it('Scenario: Reply dispatch of unknown outcome reports SEND_STATUS_UNKNOWN', async () => {
+    // The draft was created, so the /send POST reached Graph. A 5xx proves
+    // Graph received it but not whether it acted, so the reply may already be
+    // on its way — reporting a flat REPLY_FAILED here invites the caller to
+    // resend and deliver twice.
     const client = createMockClient({
       post: vi.fn()
         .mockResolvedValueOnce(quotedReplyResponse())
@@ -903,8 +907,44 @@ describe('provider-microsoft/Draft-Then-Send via createReplyAll', () => {
     const result = await provider.replyToMessage('msg-1', 'Response');
 
     expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('SEND_STATUS_UNKNOWN');
+    expect(result.error?.recoverable).toBe(false);
+    // The message string is the only channel that reaches an LLM caller — no
+    // outputSchema is published over MCP — so the guidance must be in it.
+    expect(result.error?.message).toContain('may have accepted');
+    expect(result.error?.message).toContain('Do not resend automatically');
+  });
+
+  it('Scenario: Reply dispatch rejected by Graph is terminal', async () => {
+    // A 4xx proves Graph received AND rejected the send, so nothing was
+    // delivered and resending is safe.
+    const client = createMockClient({
+      post: vi.fn()
+        .mockResolvedValueOnce(quotedReplyResponse())
+        .mockRejectedValueOnce(new GraphApiError(400, '{"error":{"code":"ErrorInvalidRecipients"}}')),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.replyToMessage('msg-1', 'Response');
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('INVALID_REQUEST');
+    expect(result.error?.message).not.toContain('may have accepted');
+  });
+
+  it('Scenario: Reply preparation failure is terminal, not ambiguous', async () => {
+    // createReplyAll failing means nothing was ever submitted for delivery.
+    // This must never be reported as a possible send.
+    const client = createMockClient({
+      post: vi.fn().mockRejectedValueOnce(new GraphApiError(500, 'Server Error')),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.replyToMessage('msg-1', 'Response');
+
+    expect(result.success).toBe(false);
     expect(result.error?.code).toBe('REPLY_FAILED');
-    expect(result.error?.message).toBeTruthy();
+    expect(result.error?.message).not.toContain('may have accepted');
   });
 
   it('Scenario: PATCH failure inside prepareReplyDraft returns REPLY_FAILED', async () => {
