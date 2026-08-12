@@ -54,6 +54,7 @@ const SendEmailOutput = z.object({
     recoverable: z.boolean(),
     availableMailboxes: z.array(z.string()).optional(),
     defaultMailbox: z.string().optional(),
+    retryAfter: z.number().optional(),
   }).optional(),
 });
 
@@ -62,7 +63,7 @@ export const sendEmailAction: EmailAction<
   z.infer<typeof SendEmailOutput>
 > = {
   name: 'send_email',
-  description: 'Compose and send a new email. Gated by send allowlist. Draft mode bypasses allowlist.',
+  description: 'Compose and send a new email. Gated by send allowlist. Draft mode bypasses allowlist. If a send fails with SEND_STATUS_UNKNOWN, the message may already have been delivered; do not resend without checking Sent Items.',
   input: SendEmailInput,
   output: SendEmailOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -218,6 +219,7 @@ export const sendEmailAction: EmailAction<
             code: result.error.code,
             message: result.error.message,
             recoverable: result.error.recoverable,
+            ...(typeof result.error.retryAfter === 'number' ? { retryAfter: result.error.retryAfter } : {}),
           } : undefined,
         };
       } catch (err) {
@@ -242,13 +244,18 @@ export const sendEmailAction: EmailAction<
         success: result.success,
         messageId: result.messageId,
         error: result.error ? {
-          code: result.error.code,
-          message: result.error.message,
-          recoverable: result.error.recoverable,
+            code: result.error.code,
+            message: result.error.message,
+            recoverable: result.error.recoverable,
+            ...(typeof result.error.retryAfter === 'number' ? { retryAfter: result.error.retryAfter } : {}),
         } : undefined,
       };
     } catch (err) {
-      return handleProviderError(err, 'SEND_FAILED');
+      const handled = handleProviderError(err, 'SEND_STATUS_UNKNOWN');
+      if (ctx.rateLimiter && handled.error.code === 'SEND_STATUS_UNKNOWN') {
+        ctx.rateLimiter.recordUsage('send_email');
+      }
+      return handled;
     }
   },
 };

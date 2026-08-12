@@ -587,6 +587,6 @@ describe('email-write/Delivery Failure Handling', () => {
 
     expect(callCount).toBe(1);
     expect(result.success).toBe(false);
-    expect(result.error!.code).toBe('REPLY_FAILED');
+    expect(result.error!.code).toBe('SEND_STATUS_UNKNOWN');
   });
 });
