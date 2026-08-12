@@ -33,10 +33,6 @@ const EXPECTED_ACTION_NAMES = [
   'list_inbox_rules',
   'create_inbox_rule',
   'delete_inbox_rule',
-  'configure_mailbox',
-  'remove_mailbox',
-  'list_mailboxes',
-  'get_mailbox_status',
 ] as const;
 
 describe('EMAIL_ACTIONS registry', () => {

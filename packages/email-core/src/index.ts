@@ -59,6 +59,7 @@ export {
   SendRateLimiter,
 } from './security/send-allowlist.js';
 export { WatchedAllowlist } from './security/watched-allowlist.js';
+export { recordActionMetric, getMetrics, resetMetrics } from './metrics.js';
 export { htmlToMarkdown, transformEmailContent } from './content/sanitize.js';
 export { readEmailAction, READ_HTML_BODY_LIMIT } from './actions/read.js';
 export { sendEmailAction } from './actions/send.js';

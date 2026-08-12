@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
-import { deleteEmailAction, sendEmailAction } from '@usejunior/email-core';
+import { deleteEmailAction, EMAIL_ACTIONS, sendEmailAction } from '@usejunior/email-core';
 import {
   actionsToMcpTools,
   handleToolCall,
@@ -318,7 +318,7 @@ describe('mcp-transport/Lazy Provider State', () => {
     // No init has been triggered — state is still 'pending'.
     const actions = await buildLazyActions(state, noAllowlist);
 
-    // 5 custom tools + 21 email-core actions = 26 tools, no auth performed.
+    // 5 state-aware tools + 21 derived email-core actions = 26 tools, no auth performed.
     expect(actions.length).toBe(26);
     expect(state.status).toBe('pending');
     expect(state.initPromise).toBeNull();
@@ -340,6 +340,17 @@ describe('mcp-transport/Lazy Provider State', () => {
       'create_inbox_rule',
       'delete_inbox_rule',
     ]));
+  });
+
+  it('Scenario: canonical actions have exactly one MCP tool', async () => {
+    const actions = await buildLazyActions(createLazyProviderState(), noAllowlist);
+    const toolNames = actions.map(action => action.name);
+
+    expect(new Set(toolNames).size).toBe(toolNames.length);
+    for (const action of EMAIL_ACTIONS) {
+      expect(toolNames.filter(name => name === action.name), `${action.name} must be exposed once`)
+        .toHaveLength(1);
+    }
   });
 
   it('Scenario: observe profile exposes only read-only tools', async () => {
@@ -1805,10 +1816,8 @@ describe('mcp-transport/Lazy Provider State', () => {
   });
 });
 
-// Issue #93: list_mailboxes is a bespoke tool that enumerates state.mailboxes —
-// the single source of truth for which mailboxes exist (#176; the unreachable
-// core listMailboxesAction is tracked separately in #175). These tests drive
-// the SHIPPED path (buildLazyActions → executeTool).
+// list_mailboxes enumerates state.mailboxes, the single source of truth for
+// configured mailboxes. These tests drive the shipped path.
 describe('mcp-transport/List Mailboxes Tool', () => {
   const noAllowlist = () => undefined;
 
@@ -1928,11 +1937,9 @@ describe('mcp-transport/List Mailboxes Tool', () => {
   });
 });
 
-// The SHIPPED list_mailboxes path (buildLazyActions → executeTool) is the
-// canonical implementation of the mailbox-config/List Mailboxes requirement —
-// the core listMailboxesAction reads an in-memory store this server never
-// populates (removal/reconciliation tracked in #175). This block is the
-// spec-traceable proof that the shipped output matches the canonical shape:
+// The shipped list_mailboxes path is the canonical implementation of the
+// mailbox-config/List Mailboxes requirement. This block is the spec-traceable
+// proof that the shipped output matches the canonical shape:
 // distinct `name` + `emailAddress`, provider, isDefault, status.
 describe('mailbox-config/List Mailboxes', () => {
   it('Scenario: List all mailboxes', async () => {
