@@ -2305,6 +2305,27 @@ describe('provider-microsoft/NemoClaw Compatibility', () => {
 });
 
 describe('provider-microsoft/Search Hardening', () => {
+  it('Scenario: Search preserves a long opaque Graph message ID byte-for-byte', async () => {
+    const opaqueId = `opaque-${'B'.repeat(145)}`;
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({
+        value: [{
+          id: opaqueId,
+          subject: 'Synthetic result',
+          from: { emailAddress: { address: 'sender@example.test' } },
+          toRecipients: [],
+          receivedDateTime: '2026-01-01T00:00:00Z',
+        }],
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const [message] = await provider.searchMessages('synthetic');
+
+    expect(message!.id).toBe(opaqueId);
+    expect(message!.id).toHaveLength(152);
+  });
+
   it('Scenario: Empty query returns empty array', async () => {
     const client = createMockClient();
     const provider = new GraphEmailProvider(client);
