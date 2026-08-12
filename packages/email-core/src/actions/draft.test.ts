@@ -277,6 +277,21 @@ describe('email-write/Send Draft', () => {
     expect(result.error!.code).toBe('SERVICE_UNAVAILABLE');
   });
 
+  it('Scenario: send_draft preserves provider Retry-After', async () => {
+    const draftResult = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Draft to throttle',
+      body: 'Body',
+    });
+    provider.sendDraft = async () => {
+      throw new ProviderError('RATE_LIMITED', 'Try later', 'test', false, 30);
+    };
+
+    const result = await sendDraftAction.run(ctx, { draft_id: draftResult.draftId! });
+
+    expect(result.error).toMatchObject({ code: 'RATE_LIMITED', retryAfter: 30 });
+  });
+
   it('Scenario: Send non-existent draft', async () => {
     const result = await sendDraftAction.run(ctx, {
       draft_id: 'nonexistent',

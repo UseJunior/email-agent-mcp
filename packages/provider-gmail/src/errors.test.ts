@@ -19,6 +19,27 @@ describe('provider-gmail/Gmail Error Classification', () => {
     expect(error.recoverable).toBe(false);
   });
 
+  it('Scenario: Gmail rate limit retains Retry-After', () => {
+    const error = gmailProviderError({
+      code: 429,
+      response: { headers: { 'retry-after': '45' } },
+    }, 'delivery');
+
+    expect(error.retryAfter).toBe(45);
+  });
+
+  it('Scenario: Gmail quota rejection retains Retry-After from Headers', () => {
+    const error = gmailProviderError({
+      code: 403,
+      response: {
+        headers: new Headers({ 'Retry-After': '30' }),
+        data: { error: { errors: [{ reason: 'quotaExceeded' }] } },
+      },
+    }, 'delivery');
+
+    expect(error.retryAfter).toBe(30);
+  });
+
   it('Scenario: Numeric string status is recognized', () => {
     expect(getErrorStatus({ code: '429' })).toBe(429);
   });

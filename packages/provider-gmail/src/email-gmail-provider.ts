@@ -213,28 +213,36 @@ export class GmailEmailProvider {
     // only to the original sender. Caller-supplied opts.cc/bcc layer on top
     // either way. No self-exclusion — an agent that replies to its own sent
     // mail may cc itself; documented caveat.
-    const original = await this.getMessage(messageId);
-    // No action-layer send path supplies opts.to today; if one ever does, its
-    // allowlist collection must cover those addresses (issue #164).
-    const { to: replyTo, cc: replyCc } = resolveReplyRecipients(original, opts);
-    const subject = prefixReSubject(original.subject);
-    const references = buildReferences(original.references, original.messageId);
-
-    const raw = buildRawMessage(
-      {
-        to: replyTo,
-        cc: replyCc.length > 0 ? replyCc : undefined,
-        bcc: opts?.bcc,
-        subject,
-        body,
-        bodyHtml: opts?.bodyHtml,
-        attachments: opts?.attachments,
-      },
-      {
-        inReplyTo: original.messageId,
-        references,
-      },
-    );
+    let original: EmailMessage;
+    let raw: string;
+    try {
+      original = await this.getMessage(messageId);
+      // No action-layer send path supplies opts.to today; if one ever does, its
+      // allowlist collection must cover those addresses (issue #164).
+      const { to: replyTo, cc: replyCc } = resolveReplyRecipients(original, opts);
+      const subject = prefixReSubject(original.subject);
+      const references = buildReferences(original.references, original.messageId);
+      raw = buildRawMessage(
+        {
+          to: replyTo,
+          cc: replyCc.length > 0 ? replyCc : undefined,
+          bcc: opts?.bcc,
+          subject,
+          body,
+          bodyHtml: opts?.bodyHtml,
+          attachments: opts?.attachments,
+        },
+        {
+          inReplyTo: original.messageId,
+          references,
+        },
+      );
+    } catch (err) {
+      // Fetching the original and constructing MIME are pre-dispatch work.
+      // Preserve their terminal/read failure classification rather than
+      // claiming the reply might have been delivered.
+      throw gmailProviderError(err, 'idempotent-read');
+    }
 
     try {
       const result = await this.client.sendMessage(raw, original.threadId);

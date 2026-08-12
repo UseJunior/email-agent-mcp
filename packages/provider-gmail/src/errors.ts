@@ -1,6 +1,7 @@
 import {
   classifyHttpStatus,
   classifyTransportError,
+  parseRetryAfter,
   ProviderError,
   type OperationKind,
 } from '@usejunior/email-core';
@@ -35,6 +36,22 @@ function getErrorReason(err: unknown): string | undefined {
   return typeof reason === 'string' ? reason : undefined;
 }
 
+function getErrorRetryAfter(err: unknown): number | undefined {
+  const record = err as { response?: { headers?: unknown } } | null;
+  const headers = record?.response?.headers;
+  if (!headers || typeof headers !== 'object') return undefined;
+
+  const get = (headers as { get?: unknown }).get;
+  if (typeof get === 'function') {
+    const value = get.call(headers, 'retry-after');
+    return typeof value === 'string' ? parseRetryAfter(value) : undefined;
+  }
+
+  const value = (headers as Record<string, unknown>)['retry-after']
+    ?? (headers as Record<string, unknown>)['Retry-After'];
+  return typeof value === 'string' ? parseRetryAfter(value) : undefined;
+}
+
 const RATE_LIMIT_REASONS = new Set(['rateLimitExceeded', 'userRateLimitExceeded', 'quotaExceeded']);
 
 export function gmailProviderError(
@@ -45,11 +62,12 @@ export function gmailProviderError(
   const status = getErrorStatus(err);
   const message = getErrorMessage(err) ?? (err instanceof Error ? err.message : String(err));
   const provider = ctx.provider ?? 'gmail';
+  const retryAfter = getErrorRetryAfter(err);
 
   if (status !== undefined) {
     const classified = status === 403 && RATE_LIMIT_REASONS.has(getErrorReason(err) ?? '')
-      ? { code: 'RATE_LIMITED', recoverable: operation !== 'delivery' }
-      : classifyHttpStatus(status, operation);
+      ? { code: 'RATE_LIMITED', recoverable: operation !== 'delivery', retryAfter }
+      : classifyHttpStatus(status, operation, { retryAfter });
     return new ProviderError(classified.code, message, provider, classified.recoverable, classified.retryAfter);
   }
 

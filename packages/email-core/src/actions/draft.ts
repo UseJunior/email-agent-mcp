@@ -40,9 +40,9 @@ const DraftOutput = z.object({
     code: z.string(),
     message: z.string(),
     recoverable: z.boolean(),
+    retryAfter: z.number().optional(),
     availableMailboxes: z.array(z.string()).optional(),
     defaultMailbox: z.string().optional(),
-    retryAfter: z.number().optional(),
   }).optional(),
 });
 
@@ -214,6 +214,7 @@ const SendDraftOutput = z.object({
     code: z.string(),
     message: z.string(),
     recoverable: z.boolean(),
+    retryAfter: z.number().optional(),
     availableMailboxes: z.array(z.string()).optional(),
     defaultMailbox: z.string().optional(),
   }).optional(),
