@@ -129,6 +129,41 @@ export function actionsToMcpTools(actions: EmailActionDef[]): McpTool[] {
   }));
 }
 
+/**
+ * Build the protocol server shared by stdio production startup and transport
+ * integration tests. MCP SDK/spec error semantics exempt `isError` results
+ * from an advertised output schema, so thrown actions return text-only error
+ * content; successful object results carry schema-validated `structuredContent`.
+ */
+export async function createMcpProtocolServer(
+  actions: EmailActionDef[],
+  ctx: unknown = {},
+): Promise<import('@modelcontextprotocol/sdk/server/index.js').Server> {
+  const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
+  const { ListToolsRequestSchema, CallToolRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
+  const server = new Server(
+    { name: 'email-agent-mcp', version: PACKAGE_VERSION },
+    { capabilities: { tools: {} } },
+  );
+  const tools = actionsToMcpTools(actions);
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  server.setRequestHandler(CallToolRequestSchema, (async (request: any) => {
+    const { name, arguments: args } = request.params;
+    try {
+      return await handleToolCall(actions, ctx, name, (args ?? {}) as Record<string, unknown>);
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  }) as never);
+
+  return server;
+}
+
 // Strict decimal/float regex for coercing numeric strings. Rejects hex
 // (`0x10`), scientific notation (`1e3`), `Infinity`, whitespace, and other
 // shapes that `Number()` silently accepts but which are unlikely to be
@@ -679,16 +714,6 @@ export async function buildLazyActions(
   // implicit process.cwd() fallback inside the file loaders.
   const safeDir = process.env.EMAIL_MCP_SAFE_DIR || process.cwd();
 
-  // Structured "provider unavailable" error — matches the shape of email-core errors.
-  const providerUnavailableError = (err: unknown) => ({
-    success: false,
-    error: {
-      code: 'PROVIDER_UNAVAILABLE',
-      message: err instanceof Error ? err.message : String(err),
-      recoverable: false,
-    },
-  });
-
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const wrapAction = (action: EmailAction<any, any>): EmailActionDef => ({
     name: action.name,
@@ -717,7 +742,15 @@ export async function buildLazyActions(
         };
         return action.run(actionCtx as never, input as never);
       } catch (err) {
-        return providerUnavailableError(err);
+        // Do not return a generic `{success,error}` object here: many wrapped
+        // actions advertise narrower output schemas (for example,
+        // list_attachments requires `{attachments}`), so treating an exception
+        // as ordinary success data makes MCP clients reject the response during
+        // structured-output validation. Throw into createMcpProtocolServer's
+        // protocol-level `isError` path instead; the code remains visible in the
+        // text error for both MCP and direct CLI callers.
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(`PROVIDER_UNAVAILABLE: ${detail}`, { cause: err });
       }
     },
   });
@@ -1055,9 +1088,7 @@ export async function buildLazyActions(
  * off provider init in the background so the MCP handshake never waits on OAuth.
  */
 export async function runServer(): Promise<void> {
-  const { Server } = await import('@modelcontextprotocol/sdk/server/index.js');
   const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
-  const { ListToolsRequestSchema, CallToolRequestSchema } = await import('@modelcontextprotocol/sdk/types.js');
 
   // Load send allowlist with hot-reload (convention: ~/.email-agent-mcp/send-allowlist.json)
   const { loadSendAllowlist, getSendAllowlistPath, WatchedAllowlist, getDeletePolicyFromEnv } = await import('@usejunior/email-core');
@@ -1086,26 +1117,8 @@ export async function runServer(): Promise<void> {
   const actions = await buildLazyActions(state, getSendAllowlist, getDeletePolicy);
   const scopeProfile = getEmailScopeProfile();
 
-  const server = new Server(
-    { name: 'email-agent-mcp', version: PACKAGE_VERSION },
-    { capabilities: { tools: {} } },
-  );
-
+  const server = await createMcpProtocolServer(actions);
   const tools = actionsToMcpTools(actions);
-
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  server.setRequestHandler(CallToolRequestSchema, (async (request: any) => {
-    const { name, arguments: args } = request.params;
-    try {
-      return await handleToolCall(actions, {}, name, (args ?? {}) as Record<string, unknown>);
-    } catch (err) {
-      return {
-        content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
-        isError: true,
-      };
-    }
-  }) as never);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

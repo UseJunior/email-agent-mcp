@@ -410,9 +410,10 @@ function classifyGraphDelivery(err: unknown): {
 /**
  * Build the EmailError for a failed delivery.
  *
- * The message string carries the guidance, because it is the only channel that
- * reaches an LLM caller — no outputSchema is published over MCP. So the
- * ambiguous wording must name a concrete artifact the caller can go and
+ * The message string carries the guidance because the structured action result
+ * has no separate guidance field. Publishing an MCP output schema makes the
+ * existing fields machine-readable; it does not create a new place for recovery
+ * advice. So the ambiguous wording must name a concrete artifact the caller can
  * inspect, and must say plainly not to resend. Wording mirrors the
  * scheduled-send path so the two families read alike.
  */

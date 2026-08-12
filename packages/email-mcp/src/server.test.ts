@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { deleteEmailAction, EMAIL_ACTIONS, sendEmailAction } from '@usejunior/email-core';
 import {
   actionsToMcpTools,
@@ -11,6 +13,7 @@ import {
   waitForInit,
   ensureProvider,
   buildLazyActions,
+  createMcpProtocolServer,
   coerceArgsForZod,
   type EmailActionDef,
   type LazyProviderState,
@@ -38,7 +41,7 @@ const testActions: EmailActionDef[] = [
 ];
 
 describe('mcp-transport/executeTool primitive', () => {
-  it('Scenario: opaque IDs longer than display previews round-trip through structured MCP output', async () => {
+  it('Scenario: opaque IDs round-trip through real MCP JSON-RPC search, reply draft, and update calls', async () => {
     const opaqueId = `opaque-${'A'.repeat(145)}`;
     const actions: EmailActionDef[] = [
       {
@@ -60,24 +63,85 @@ describe('mcp-transport/executeTool primitive', () => {
           draftId: (input as { reply_to: string }).reply_to,
         }),
       },
+      {
+        name: 'update_draft',
+        description: 'Update draft',
+        input: z.object({ draft_id: z.string() }),
+        output: z.object({ success: z.boolean(), draftId: z.string() }),
+        annotations: { readOnlyHint: false, destructiveHint: false },
+        run: async (_ctx, input) => ({
+          success: true,
+          draftId: (input as { draft_id: string }).draft_id,
+        }),
+      },
     ];
+    const server = await createMcpProtocolServer(actions);
+    const client = new Client({ name: 'opaque-id-regression', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
-    const search = await handleToolCall(actions, {}, 'search_emails', { query: 'synthetic' });
-    const structuredSearch = search.structuredContent as { emails: Array<{ id: string }> };
-    expect(structuredSearch.emails[0]!.id).toBe(opaqueId);
-    expect(structuredSearch.emails[0]!.id).toHaveLength(152);
-    expect(JSON.parse((search.content[0] as { text: string }).text).emails[0].id).toBe(opaqueId);
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const listed = await client.listTools();
+      expect(listed.tools.find(tool => tool.name === 'search_emails')!.outputSchema).toMatchObject({
+        type: 'object',
+        properties: { emails: { type: 'array' } },
+      });
 
-    const draft = await handleToolCall(actions, {}, 'create_draft', {
-      reply_to: structuredSearch.emails[0]!.id,
-    });
-    expect((draft.structuredContent as { draftId: string }).draftId).toBe(opaqueId);
+      const search = await client.callTool({ name: 'search_emails', arguments: { query: 'synthetic' } });
+      const searchResult = search.structuredContent as { emails: Array<{ id: string }> };
+      expect(searchResult.emails[0]!.id).toBe(opaqueId);
+      expect(searchResult.emails[0]!.id).toHaveLength(152);
 
-    const tools = actionsToMcpTools(actions);
-    expect(tools.find(tool => tool.name === 'search_emails')!.outputSchema).toMatchObject({
-      type: 'object',
-      properties: { emails: { type: 'array' } },
-    });
+      const draft = await client.callTool({
+        name: 'create_draft',
+        arguments: { reply_to: searchResult.emails[0]!.id },
+      });
+      const draftId = (draft.structuredContent as { draftId: string }).draftId;
+      expect(draftId).toBe(opaqueId);
+
+      const update = await client.callTool({
+        name: 'update_draft',
+        arguments: { draft_id: draftId },
+      });
+      expect((update.structuredContent as { draftId: string }).draftId).toBe(opaqueId);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('Scenario: lazy provider failure is a protocol error, not schema-invalid ordinary data', async () => {
+    const state = createLazyProviderState();
+    state.status = 'error';
+    state.isDemo = true;
+    state.error = 'Synthetic mailbox authentication failure';
+    state.initPromise = Promise.resolve();
+    const actions = await buildLazyActions(state, () => undefined);
+    const server = await createMcpProtocolServer(actions);
+    const client = new Client({ name: 'error-regression', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      await client.listTools();
+      // list_attachments advertises `{attachments: [...]}`. Before the fix the
+      // lazy wrapper returned `{success:false,error:...}` as ordinary structured
+      // content and the SDK rejected it against that schema before the caller
+      // could inspect the provider error.
+      const result = await client.callTool({
+        name: 'list_attachments',
+        arguments: { message_id: 'synthetic-message-id' },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toBeUndefined();
+      expect(result.content).toEqual([{
+        type: 'text',
+        text: 'Error: PROVIDER_UNAVAILABLE: Synthetic mailbox authentication failure',
+      }]);
+    } finally {
+      await client.close();
+    }
   });
 
   it('Scenario: executeTool returns raw action result without MCP envelope', async () => {
@@ -485,7 +549,7 @@ describe('mcp-transport/Lazy Provider State', () => {
     await expect(ensureProvider(state)).rejects.toThrow(/All configured mailboxes/);
   });
 
-  it('Scenario: email-core wrapped action returns structured error on init failure', async () => {
+  it('Scenario: email-core wrapped action throws a coded provider error on init failure', async () => {
     const state = createLazyProviderState();
     // Simulate: init has run, all mailboxes failed.
     state.status = 'error';
@@ -496,17 +560,11 @@ describe('mcp-transport/Lazy Provider State', () => {
     const actions = await buildLazyActions(state, noAllowlist);
     const sendEmail = actions.find(a => a.name === 'send_email')!;
 
-    // Must NOT throw — must return the structured error shape.
-    const result = await sendEmail.run({}, {
+    await expect(sendEmail.run({}, {
       to: ['x@example.com'],
       subject: 'test',
       body: 'test',
-    }) as { success: boolean; error?: { code: string; message: string; recoverable: boolean } };
-
-    expect(result.success).toBe(false);
-    expect(result.error?.code).toBe('PROVIDER_UNAVAILABLE');
-    expect(result.error?.message).toMatch(/All configured mailboxes/);
-    expect(result.error?.recoverable).toBe(false);
+    })).rejects.toThrow(/PROVIDER_UNAVAILABLE: All configured mailboxes/);
   });
 
   it('Scenario: custom tools fall back to demo responses in demo mode', async () => {
@@ -1826,7 +1884,7 @@ describe('mcp-transport/Lazy Provider State', () => {
     expect(Buffer.from(result.base64!, 'base64').equals(PAYLOAD)).toBe(true);
   });
 
-  it('Scenario: download_attachment returns PROVIDER_UNAVAILABLE when init failed', async () => {
+  it('Scenario: download_attachment throws PROVIDER_UNAVAILABLE when init failed', async () => {
     const state = createLazyProviderState();
     state.status = 'error';
     state.isDemo = true;
@@ -1835,15 +1893,11 @@ describe('mcp-transport/Lazy Provider State', () => {
 
     const actions = await buildLazyActions(state, noAllowlist);
     const downloadAttachment = actions.find(a => a.name === 'download_attachment')!;
-    const result = await downloadAttachment.run({}, {
+    await expect(downloadAttachment.run({}, {
       message_id: 'msg-1',
       attachment_id: 'att-1',
       max_size_mb: 5,
-    }) as { success: boolean; error?: { code: string; message: string; recoverable: boolean } };
-
-    expect(result.success).toBe(false);
-    expect(result.error?.code).toBe('PROVIDER_UNAVAILABLE');
-    expect(result.error?.message).toMatch(/All configured mailboxes/);
+    })).rejects.toThrow(/PROVIDER_UNAVAILABLE: All configured mailboxes/);
   });
 
   it('Scenario: waitForInit returns immediately once a terminal state is reached', async () => {
