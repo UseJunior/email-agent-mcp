@@ -2,6 +2,7 @@
 import { createRequire } from 'node:module';
 import type { DeletePolicy, EmailAction, EmailMessage, EmailProvider } from '@usejunior/email-core';
 import {
+  EMAIL_ACTIONS,
   EmailDraftStatusSchema,
   EmailThreadFieldsSchema,
   getEmailDraftStatus,
@@ -102,6 +103,12 @@ export interface EmailActionDef {
 }
 
 type ProfiledActionList = EmailActionDef[] & { profileBlockedActionNames?: ReadonlySet<string> };
+
+const STATE_AWARE_ACTION_NAMES = new Set([
+  'list_emails',
+  'read_email',
+  'search_emails',
+]);
 
 /**
  * Generate MCP tool list from action registry.
@@ -662,30 +669,6 @@ export async function buildLazyActions(
   // implicit process.cwd() fallback inside the file loaders.
   const safeDir = process.env.EMAIL_MCP_SAFE_DIR || process.cwd();
 
-  const {
-    sendEmailAction,
-    replyToEmailAction,
-    createDraftAction,
-    sendDraftAction,
-    updateDraftAction,
-    cancelScheduledSendAction,
-    listScheduledSendsAction,
-    getThreadAction,
-    listAttachmentsAction,
-    downloadAttachmentAction,
-    labelEmailAction,
-    flagEmailAction,
-    markReadAction,
-    moveToFolderAction,
-    deleteEmailAction,
-    listFoldersAction,
-    createFolderAction,
-    deleteFolderAction,
-    listInboxRulesAction,
-    createInboxRuleAction,
-    deleteInboxRuleAction,
-  } = await import('@usejunior/email-core');
-
   // Structured "provider unavailable" error — matches the shape of email-core errors.
   const providerUnavailableError = (err: unknown) => ({
     success: false,
@@ -1017,10 +1000,8 @@ export async function buildLazyActions(
         ),
       }),
       annotations: { readOnlyHint: true, destructiveHint: false },
-      // Enumerates state.mailboxes — the single source of truth for which
-      // mailboxes exist — rather than going through the generic action wrapper
-      // or the core listMailboxesAction, whose in-memory mailboxStore this
-      // server never populates (reconciliation tracked in #175).
+      // Enumerates state.mailboxes, the single source of truth for configured
+      // mailboxes. It deliberately does not require a connected provider.
       // Uses waitForInit rather than ensureProvider: ensureProvider throws when
       // zero mailboxes are connected, which is exactly the misconfigured case an
       // agent would call this tool to diagnose. waitForInit resolves once init
@@ -1042,27 +1023,9 @@ export async function buildLazyActions(
         };
       },
     },
-    wrapAction(sendEmailAction),
-    wrapAction(replyToEmailAction),
-    wrapAction(createDraftAction),
-    wrapAction(sendDraftAction),
-    wrapAction(updateDraftAction),
-    wrapAction(cancelScheduledSendAction),
-    wrapAction(listScheduledSendsAction),
-    wrapAction(getThreadAction),
-    wrapAction(listAttachmentsAction),
-    wrapAction(downloadAttachmentAction),
-    wrapAction(labelEmailAction),
-    wrapAction(flagEmailAction),
-    wrapAction(markReadAction),
-    wrapAction(moveToFolderAction),
-    wrapAction(deleteEmailAction),
-    wrapAction(listFoldersAction),
-    wrapAction(createFolderAction),
-    wrapAction(deleteFolderAction),
-    wrapAction(listInboxRulesAction),
-    wrapAction(createInboxRuleAction),
-    wrapAction(deleteInboxRuleAction),
+    ...EMAIL_ACTIONS
+      .filter(action => !STATE_AWARE_ACTION_NAMES.has(action.name))
+      .map(wrapAction),
   ];
 
   const profile = getEmailScopeProfile();

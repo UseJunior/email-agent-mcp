@@ -2,7 +2,6 @@
 import { z } from 'zod';
 import type { EmailProvider } from '../providers/provider.js';
 import { listAttachmentsAction, downloadAttachmentAction } from './attachments.js';
-import { configureMailboxAction, removeMailboxAction, listMailboxesAction } from './configure.js';
 import { getThreadAction } from './conversation.js';
 import { createDraftAction, sendDraftAction, updateDraftAction } from './draft.js';
 import { listFoldersAction, createFolderAction, deleteFolderAction } from './folders.js';
@@ -15,7 +14,6 @@ import { listInboxRulesAction, createInboxRuleAction, deleteInboxRuleAction } fr
 import { cancelScheduledSendAction, listScheduledSendsAction } from './scheduling.js';
 import { searchEmailsAction } from './search.js';
 import { sendEmailAction } from './send.js';
-import { getMailboxStatusAction } from './status.js';
 
 export interface ActionContext {
   provider: EmailProvider;
@@ -94,9 +92,4 @@ export const EMAIL_ACTIONS: readonly EmailAction<any, any>[] = [
   listInboxRulesAction,
   createInboxRuleAction,
   deleteInboxRuleAction,
-  // Mailbox management / status
-  configureMailboxAction,
-  removeMailboxAction,
-  listMailboxesAction,
-  getMailboxStatusAction,
 ];

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createLogger, sanitizeError, sendMcpWarning, createSpan } from './observability.js';
-import { recordActionMetric, getMetrics, resetMetrics } from './actions/status.js';
+import { recordActionMetric, getMetrics, resetMetrics } from './metrics.js';
 
 beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});

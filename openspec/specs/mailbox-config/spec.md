@@ -38,12 +38,7 @@ Mailbox metadata files SHALL be stored using a filesystem-safe derived key from 
 
 ### Requirement: Configure Mailbox
 
-The system SHALL provide a `configure_mailbox` action that connects a named mailbox to a provider with credentials. The resulting metadata SHALL include the `emailAddress` field fetched from the provider during configuration.
-
-#### Scenario: Add work mailbox
-- **WHEN** `configure_mailbox` is called with `{name: "work", provider: "microsoft", credentials: {...}, default: true}`
-- **THEN** the system connects to the Microsoft Graph API, fetches the email address, and marks "work" as the default mailbox
-- **AND** the stored metadata includes `emailAddress`
+The system SHALL provide CLI configuration that connects a named mailbox to a provider with credentials. The resulting metadata SHALL include the `emailAddress` field fetched from the provider during configuration. Credential collection SHALL NOT be exposed through an agent-facing MCP tool.
 
 #### Scenario: Gmail mailbox metadata is mode-discriminated
 - **WHEN** a Gmail mailbox is configured
@@ -68,17 +63,9 @@ One mailbox SHALL be marked as default. If only one is configured, it is default
 - **WHEN** only one mailbox ("personal") is configured
 - **THEN** "personal" is automatically the default for all actions
 
-### Requirement: Remove Mailbox
-
-The system SHALL provide a `remove_mailbox` action that disconnects a named mailbox.
-
-#### Scenario: Remove old account
-- **WHEN** `remove_mailbox` is called with `{name: "old-account"}`
-- **THEN** the system disconnects and removes the mailbox configuration
-
 ### Requirement: List Mailboxes
 
-The system SHALL provide a `list_mailboxes` action that returns all configured mailboxes with their status, including the `emailAddress` field.
+The MCP server SHALL provide a `list_mailboxes` diagnostic tool backed by its configured mailbox state. It SHALL return all configured mailboxes with their status, including the `emailAddress` field.
 
 #### Scenario: List all mailboxes
 - **WHEN** `list_mailboxes` is called
@@ -86,11 +73,11 @@ The system SHALL provide a `list_mailboxes` action that returns all configured m
 
 ### Requirement: Mailbox Status
 
-The system SHALL provide a `get_mailbox_status` action returning connection state, unread count, provider type, subscription status, `emailAddress`, and warnings (e.g., "outbound disabled — no send allowlist configured").
+The MCP server SHALL provide a state-backed `get_mailbox_status` diagnostic tool returning connection state, provider type, and warnings (e.g., "outbound disabled — no send allowlist configured").
 
 #### Scenario: Status with warning
 - **WHEN** `get_mailbox_status` is called and no send allowlist is configured
-- **THEN** the result includes `emailAddress` and `warnings: ["Outbound email disabled — configure send allowlist to enable replies and sends"]`
+- **THEN** the result includes warnings explaining that outbound email is disabled
 
 ### Requirement: Convention-Over-Configuration Paths
 
@@ -141,4 +128,3 @@ A mailbox `name` surfaced as an available action selector SHALL be accepted verb
 - **AND** the same call is retried with `{mailbox: "work"}`
 - **THEN** action dispatch selects the "work" mailbox
 - **AND** the retry does not return `MAILBOX_REQUIRED`
-
