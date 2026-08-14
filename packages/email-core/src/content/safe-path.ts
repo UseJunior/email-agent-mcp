@@ -5,7 +5,7 @@
 // surfaces share one policy.
 import { realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { resolve, relative, isAbsolute, delimiter, normalize } from 'node:path';
+import { resolve, relative, isAbsolute, delimiter } from 'node:path';
 
 /** Env var that adds trusted roots beyond the safe base directory. */
 export const ALLOWED_DIRS_ENV = 'AGENT_EMAIL_ALLOWED_DIRS';
@@ -80,7 +80,9 @@ export function parseAllowedDirs(
       continue;
     }
 
-    const normalized = normalize(expanded);
+    // `resolve` on an already-absolute path only normalizes it — collapsing
+    // `.` segments and a trailing slash — so `/a/b/` and `/a/b` dedupe.
+    const normalized = resolve(expanded);
     if (!dirs.includes(normalized)) dirs.push(normalized);
   }
 

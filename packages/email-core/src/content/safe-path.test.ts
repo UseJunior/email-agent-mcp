@@ -221,7 +221,7 @@ describe('content/safe-path — parseAllowedDirs', () => {
   });
 
   it('splits on the platform delimiter, trims, and deduplicates', () => {
-    const raw = [` ${workDir} `, extraDir, workDir].join(delimiter);
+    const raw = [` ${workDir} `, extraDir, workDir, `${workDir}${sep}`].join(delimiter);
     expect(parseAllowedDirs(raw).dirs).toEqual([workDir, extraDir]);
   });
 
