@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { writeFile, mkdir, symlink, rm } from 'node:fs/promises';
+import { writeFile, mkdir, mkdtemp, symlink, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MockEmailProvider } from '../testing/mock-provider.js';
@@ -139,6 +139,71 @@ describe('email-write/Body File Composition', () => {
 
     expect(result.success).toBe(true);
     expect(provider.getSentMessages()[0]!.body).toBe('Safe body content');
+  });
+
+  // Issue #105 — operator-allowlisted roots, so a body file (or attachment)
+  // outside the working directory need not be copied into a git working tree.
+  it('Scenario: Configured additional root', async () => {
+    const extraDir = await mkdtemp(join(tmpdir(), 'allowed-root-'));
+    await writeFile(join(extraDir, 'outside-draft.md'), 'Body from an allowed root');
+
+    const result = await sendEmailAction.run(
+      { ...ctx, allowedDirs: [extraDir] },
+      {
+        to: 'alice@allowed.com',
+        subject: 'Test',
+        body_file: join(extraDir, 'outside-draft.md'),
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(provider.getSentMessages()[0]!.body).toBe('Body from an allowed root');
+
+    await rm(extraDir, { recursive: true, force: true });
+  });
+
+  it('Scenario: Allowlisted root is itself a symlink', async () => {
+    const realRoot = await mkdtemp(join(tmpdir(), 'real-root-'));
+    await writeFile(join(realRoot, 'linked-draft.md'), 'Body behind a symlinked root');
+    const linkedRoot = join(tmpdir(), `linked-root-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    try {
+      await symlink(realRoot, linkedRoot);
+    } catch {
+      return; // symlinks may not be supported
+    }
+
+    const result = await sendEmailAction.run(
+      { ...ctx, allowedDirs: [linkedRoot] },
+      {
+        to: 'alice@allowed.com',
+        subject: 'Test',
+        body_file: join(linkedRoot, 'linked-draft.md'),
+      },
+    );
+
+    expect(result.success).toBe(true);
+    expect(provider.getSentMessages()[0]!.body).toBe('Body behind a symlinked root');
+
+    await rm(linkedRoot, { force: true });
+    await rm(realRoot, { recursive: true, force: true });
+  });
+
+  it('Scenario: Unset configuration preserves the single-root sandbox', async () => {
+    const extraDir = await mkdtemp(join(tmpdir(), 'unconfigured-root-'));
+    await writeFile(join(extraDir, 'outside-draft.md'), 'Body from an unconfigured root');
+
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Test',
+      body_file: join(extraDir, 'outside-draft.md'),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('PATH_TRAVERSAL');
+    expect(result.error!.message).toContain('body_file must be within the working directory');
+    expect(provider.getSentMessages()).toHaveLength(0);
+
+    await rm(extraDir, { recursive: true, force: true });
   });
 
   it('Scenario: Frontmatter format override', async () => {

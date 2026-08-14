@@ -2,7 +2,7 @@
 import { readFile } from 'node:fs/promises';
 import { extname } from 'node:path';
 import { parseFrontmatter, type FrontmatterFields } from './frontmatter.js';
-import { assertPathInSafeDir } from './safe-path.js';
+import { assertPathInSafeDir, type PathSandboxInput } from './safe-path.js';
 
 export const BODY_SIZE_LIMIT = 3.5 * 1024 * 1024; // 3.5MB
 export const TEXT_EXTENSIONS = new Set(['.md', '.html', '.htm', '.txt', '.text']);
@@ -15,9 +15,9 @@ export interface BodyFileResult {
 
 export async function resolveBodyFile(
   bodyFile: string,
-  safeDir?: string,
+  sandbox?: PathSandboxInput,
 ): Promise<BodyFileResult> {
-  const pathCheck = await assertPathInSafeDir(bodyFile, safeDir, 'body_file');
+  const pathCheck = await assertPathInSafeDir(bodyFile, sandbox, 'body_file');
   if (pathCheck.error) {
     return { error: pathCheck.error };
   }

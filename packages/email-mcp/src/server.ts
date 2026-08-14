@@ -10,6 +10,8 @@ import {
   filterActionsForProfile,
   getEmailScopeProfile,
   profileBlockedActionError,
+  parseAllowedDirs,
+  ALLOWED_DIRS_ENV,
 } from '@usejunior/email-core';
 import { z } from 'zod';
 
@@ -713,6 +715,14 @@ export async function buildLazyActions(
   // the boundary is intentional and operator-overridable rather than an
   // implicit process.cwd() fallback inside the file loaders.
   const safeDir = process.env.EMAIL_MCP_SAFE_DIR || process.cwd();
+  // Extra trusted roots (e.g. ~/Downloads, a cloud-storage mount) so operators
+  // can attach files that live outside the working directory without staging
+  // confidential documents inside a git working tree. Unset means today's
+  // single-root behavior.
+  const { dirs: allowedDirs, warnings } = parseAllowedDirs(process.env[ALLOWED_DIRS_ENV]);
+  for (const warning of warnings) {
+    console.error(`[email-agent-mcp] ${warning}`);
+  }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const wrapAction = (action: EmailAction<any, any>): EmailActionDef => ({
@@ -737,6 +747,7 @@ export async function buildLazyActions(
           allMailboxes: resolved.allMailboxes,
           sendAllowlist: getSendAllowlist(),
           safeDir,
+          allowedDirs,
           deleteEnabled: deletePolicy?.enabled === true,
           hardDeleteAllowed: deletePolicy?.hardDeleteAllowed === true,
         };

@@ -107,6 +107,8 @@ export {
 export { parseFrontmatter } from './content/frontmatter.js';
 export type { FrontmatterFields } from './content/frontmatter.js';
 export { resolveBodyFile, truncateBody, BODY_SIZE_LIMIT } from './content/body-loader.js';
+export { parseAllowedDirs, ALLOWED_DIRS_ENV } from './content/safe-path.js';
+export type { PathSandbox, PathSandboxInput } from './content/safe-path.js';
 export {
   checkMailboxRequired,
   resolveComposeFields,

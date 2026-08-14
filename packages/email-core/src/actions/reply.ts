@@ -15,6 +15,7 @@ import {
   AttachmentInputSchema,
   DraftPreviewSchema,
   PreviewErrorSchema,
+  pathSandbox,
 } from './compose-helpers.js';
 
 const ReplyToEmailInput = z.object({
@@ -147,7 +148,7 @@ export const replyToEmailAction: EmailAction<
     }
 
     // Resolve attachments (sandboxed path reads + validation)
-    const attResult = await resolveAttachments(input.attachments, ctx.safeDir);
+    const attResult = await resolveAttachments(input.attachments, pathSandbox(ctx));
     if (attResult.error) {
       return { success: false, error: attResult.error };
     }

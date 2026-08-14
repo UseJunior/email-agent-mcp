@@ -271,7 +271,8 @@ white-on-white.
 
 **Body files** — `send_email`, `create_draft`, and `update_draft` also accept
 `body_file`: a path to a `.md`, `.html`, or `.txt` file (read relative to
-`EMAIL_MCP_SAFE_DIR`, default the process working directory) used as the body
+`EMAIL_MCP_SAFE_DIR`, default the process working directory, plus any
+`AGENT_EMAIL_ALLOWED_DIRS` roots) used as the body
 instead of `body`. A `.md` body file may
 open with a YAML frontmatter block:
 
@@ -355,7 +356,8 @@ unchanged.
 
 `send_email`, `reply_to_email`, `create_draft`, and `update_draft` accept an
 optional `attachments` array. Each entry takes a sandboxed file `path` (read
-relative to `EMAIL_MCP_SAFE_DIR`, default the process working directory) or
+relative to `EMAIL_MCP_SAFE_DIR`, default the process working directory, plus
+any `AGENT_EMAIL_ALLOWED_DIRS` roots — see below) or
 inline `base64`, plus optional `filename` / `mimeType` overrides:
 
 ```json
@@ -374,6 +376,32 @@ Files are capped at 25MB each; Microsoft Graph additionally caps inline sends
 at ~3MB total (larger files need an upload session — not yet supported). For
 `update_draft`, omitting `attachments` preserves the draft's existing files;
 passing an array (even empty) replaces them.
+
+**Attaching files from outside the working directory** — set
+`AGENT_EMAIL_ALLOWED_DIRS` to a delimiter-separated list of absolute
+directories (`:` on macOS/Linux, `;` on Windows; a leading `~` is expanded) that
+`attachments[].path` and `body_file` may also read from:
+
+```json
+{
+  "mcpServers": {
+    "email-agent-mcp": {
+      "command": "npx",
+      "args": ["-y", "@usejunior/email-agent-mcp"],
+      "env": { "AGENT_EMAIL_ALLOWED_DIRS": "~/Downloads:/Volumes/Shared/Contracts" }
+    }
+  }
+}
+```
+
+Paths are resolved against `EMAIL_MCP_SAFE_DIR` first, then each allowed
+directory in order, and the first match wins. Each root is canonicalised with
+`realpath` before the containment check, so an allowlisted root that is itself a
+symlink is resolved to its real location and a symlink escaping every root is
+still rejected. Unset (the default) keeps the working directory as the only
+root — which is why an agent that cannot reach a file should ask you to
+allowlist its directory rather than copy confidential documents into a git
+working tree.
 
 ## Provider Support
 

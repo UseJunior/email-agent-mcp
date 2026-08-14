@@ -3,7 +3,7 @@
 // assertPathInSafeDir, but reads raw bytes — no text-extension gate, no
 // null-byte rejection, no UTF-8 decode, no frontmatter parsing.
 import { open } from 'node:fs/promises';
-import { assertPathInSafeDir } from './safe-path.js';
+import { assertPathInSafeDir, type PathSandboxInput } from './safe-path.js';
 
 export const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024; // 25MB
 
@@ -43,9 +43,9 @@ function mapFsError(err: unknown, filePath: string): AttachmentFileResult {
  */
 export async function resolveAttachmentFile(
   filePath: string,
-  safeDir?: string,
+  sandbox?: PathSandboxInput,
 ): Promise<AttachmentFileResult> {
-  const pathCheck = await assertPathInSafeDir(filePath, safeDir, 'attachment path');
+  const pathCheck = await assertPathInSafeDir(filePath, sandbox, 'attachment path');
   if (pathCheck.error) {
     return { error: pathCheck.error };
   }
