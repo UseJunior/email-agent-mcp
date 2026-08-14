@@ -394,15 +394,28 @@ directories (`:` on macOS/Linux, `;` on Windows; a leading `~` is expanded) that
 }
 ```
 
-A **relative** path resolves against `EMAIL_MCP_SAFE_DIR` only — allowed
-directories are reached by **absolute** path, so a bare `contract.pdf` can never
-silently pick up a different file from another root. Each root is canonicalised
-with `realpath` before the containment check: an allowlisted root that is itself
-a symlink resolves to its real location, a root that cannot be canonicalised
-authorises nothing, and a symlink escaping every root is still rejected. Unset
-(the default) keeps the working directory as the only root — which is why an
-agent that cannot reach a file should ask you to allowlist its directory rather
-than copy confidential documents into a git working tree.
+**How a caller's path is resolved** — the two rules below both surface as
+`FILE_NOT_FOUND`, which is easy to misread as a missing file:
+
+| Path you pass | Resolves against | Finds a file in an allowed root? |
+|---|---|---|
+| `contract.pdf` | `EMAIL_MCP_SAFE_DIR` (default: cwd) | ❌ relative paths never search the extra roots |
+| `~/Downloads/contract.pdf` | `EMAIL_MCP_SAFE_DIR` — the `~` is **not** expanded | ❌ |
+| `/Users/you/Downloads/contract.pdf` | each root in turn | ✅ |
+
+The `~` shorthand is expanded in `AGENT_EMAIL_ALLOWED_DIRS` (the operator's
+config) but **not** in `attachments[].path` or `body_file` (the caller's
+argument) — pass those as absolute paths. And a relative path is deliberately
+confined to the safe directory: searching every allowed root for a bare
+`contract.pdf` would silently attach whichever copy happened to exist first.
+
+Each root is canonicalised with `realpath` before the containment check: an
+allowlisted root that is itself a symlink resolves to its real location, a root
+that cannot be canonicalised authorises nothing, and a symlink escaping every
+root is still rejected. Unset (the default) keeps the working directory as the
+only root — which is why an agent that cannot reach a file should ask you to
+allowlist its directory rather than copy confidential documents into a git
+working tree.
 
 Allowlisting a directory trusts everyone who can write to it. Validation and
 open are separate operations on a path, so a principal who can replace a
