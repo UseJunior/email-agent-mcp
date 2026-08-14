@@ -55,7 +55,8 @@ const CreateDraftInput = z.object({
   cc: z.array(z.string()).optional(),
   subject: z.string().optional(),
   body: z.string().optional(),
-  body_file: z.string().optional(),
+  body_file: z.string().optional()
+    .describe('Path to a .md/.html/.txt file to use as the body. Sandboxed like attachment paths: relative paths resolve against the working directory only; files in an AGENT_EMAIL_ALLOWED_DIRS root must be given as an ABSOLUTE path (a leading ~ is not expanded here).'),
   reply_to: z.string().optional(),
   reply_all: z.boolean().optional().default(true)
     .describe('Only relevant when reply_to is set. When false, the draft replies only to the original sender. Default true preserves reply-all behavior (cc the original thread).'),
@@ -361,7 +362,8 @@ const UpdateDraftInput = z.object({
   cc: z.array(z.string()).optional(),
   subject: z.string().optional(),
   body: z.string().optional(),
-  body_file: z.string().optional(),
+  body_file: z.string().optional()
+    .describe('Path to a .md/.html/.txt file to use as the body. Sandboxed like attachment paths: relative paths resolve against the working directory only; files in an AGENT_EMAIL_ALLOWED_DIRS root must be given as an ABSOLUTE path (a leading ~ is not expanded here).'),
   replace_body: z.boolean().optional()
     .describe('Required as true to replace the body of a non-reply draft wholesale. Reply draft bodies cannot be edited; create a new draft instead.'),
   include_quoted: z.boolean().optional().default(false)

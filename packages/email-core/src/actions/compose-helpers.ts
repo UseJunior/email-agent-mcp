@@ -152,7 +152,7 @@ function isValidBase64(value: string): boolean {
 export const AttachmentInputSchema = z
   .object({
     path: z.string().optional()
-      .describe('Path to a file within the working directory, or within a directory the server operator allowlisted via AGENT_EMAIL_ALLOWED_DIRS (sandboxed, like body_file).'),
+      .describe('Path to a file, sandboxed like body_file. Relative paths resolve against the working directory only; files in a directory the operator allowlisted via AGENT_EMAIL_ALLOWED_DIRS must be given as an ABSOLUTE path (a leading ~ is not expanded here).'),
     base64: z.string().optional()
       .describe('Inline standard-base64-encoded file content. Alternative to path.'),
     filename: z.string().optional()

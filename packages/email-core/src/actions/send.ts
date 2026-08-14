@@ -30,7 +30,8 @@ const SendEmailInput = z.object({
   cc: z.array(z.string()).optional(),
   subject: z.string().optional(),
   body: z.string().optional(),
-  body_file: z.string().optional(),
+  body_file: z.string().optional()
+    .describe('Path to a .md/.html/.txt file to use as the body. Sandboxed like attachment paths: relative paths resolve against the working directory only; files in an AGENT_EMAIL_ALLOWED_DIRS root must be given as an ABSOLUTE path (a leading ~ is not expanded here).'),
   mailbox: z.string().optional(),
   draft: z.boolean().optional(),
   format: z.enum(['markdown', 'html', 'text']).optional()
