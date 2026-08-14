@@ -7,4 +7,4 @@
 
 ## 2. Specification and verification
 - [x] 2.1 Update the reply-draft requirement and scenario.
-- [ ] 2.2 Run tests, lint, build, strict OpenSpec validation, and spec coverage.
+- [x] 2.2 Run tests, lint, build, strict OpenSpec validation, and spec coverage.

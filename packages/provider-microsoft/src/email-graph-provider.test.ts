@@ -1646,6 +1646,57 @@ describe('provider-microsoft/Reply-All Routing', () => {
     const patchArgs = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]!;
     expect(patchArgs[1] as Record<string, unknown>).not.toHaveProperty('toRecipients');
   });
+
+  it('Scenario: reply-all with no to keeps Graph\'s multi-participant derivation (issue #192)', async () => {
+    // create_draft no longer requires `to`, so a reply-all draft reaches this
+    // path with no recipients of its own. Graph's createReplyAll recipients —
+    // the parent's sender on To, the rest of the thread on Cc — must survive
+    // the follow-up PATCH untouched.
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse({
+        toRecipients: [
+          { emailAddress: { address: 'alice@corp.com' } },
+          { emailAddress: { address: 'bob@corp.com' } },
+        ],
+        ccRecipients: [{ emailAddress: { address: 'carol@corp.com' } }],
+      })),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createReplyDraft('msg-1', 'reply', { replyAll: true });
+
+    const firstUrl = (client.post as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(firstUrl).toContain('createReplyAll');
+    const patch = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]![1] as {
+      toRecipients?: unknown;
+      ccRecipients?: Array<{ emailAddress: { address: string } }>;
+    };
+    expect(patch).not.toHaveProperty('toRecipients');
+    // Cc is a merge, so the thread's derived Cc is preserved as-is.
+    expect(patch.ccRecipients?.map(r => r.emailAddress.address)).toEqual(['carol@corp.com']);
+  });
+
+  it('Scenario: sender-only reply with no to keeps Graph\'s derived To (issue #192)', async () => {
+    // Self-sent parent: createReply addresses the draft back to the mailbox
+    // owner. Without an explicit `to` that derivation is what the caller asked
+    // for, so the PATCH must not override it.
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse({
+        toRecipients: [{ emailAddress: { address: 'owner@corp.com' } }],
+        ccRecipients: [],
+      })),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createReplyDraft('msg-1', 'reply', { replyAll: false });
+
+    const firstUrl = (client.post as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    expect(firstUrl).toContain('/createReply');
+    expect(firstUrl).not.toContain('createReplyAll');
+    const patch = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]![1] as Record<string, unknown>;
+    expect(patch).not.toHaveProperty('toRecipients');
+    expect(patch).not.toHaveProperty('ccRecipients');
+  });
 });
 
 describe('provider-microsoft/Size Limits', () => {
