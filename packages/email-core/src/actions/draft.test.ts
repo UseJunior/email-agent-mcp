@@ -226,6 +226,158 @@ Body from file.`);
     expect(result.error!.code).toBe('MISSING_FIELD');
   });
 
+  it('Scenario: Reply-all draft without to derives its recipients (issue #192)', async () => {
+    // A threaded reply already names its audience: the parent message plus
+    // reply_all. Requiring the caller to restate it made the ordinary reply
+    // fail with MISSING_FIELD.
+    provider.addMessage({
+      id: 'derive-all-msg',
+      subject: 'Multi Participant',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }, { email: 'teammate@allowed.com' }],
+      cc: [{ email: 'observer@allowed.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+    const draftSpy = vi.spyOn(provider, 'createReplyDraft');
+
+    const result = await createDraftAction.run(ctx, {
+      body: 'Thanks.',
+      reply_to: 'derive-all-msg',
+      reply_all: true,
+    });
+
+    expect(result.success).toBe(true);
+    // No `to` reaches the provider, so its derived reply-all recipients stand.
+    expect(draftSpy.mock.calls[0]![2]!.to).toBeUndefined();
+    expect(draftSpy).toHaveBeenCalledWith(
+      'derive-all-msg',
+      expect.any(String),
+      expect.objectContaining({ replyAll: true }),
+    );
+    expect([...provider.getDrafts().values()][0]!.to.map(a => a.email))
+      .toEqual(['partner@allowed.com']);
+  });
+
+  it('Scenario: Sender-only draft without to targets the original sender (issue #192)', async () => {
+    provider.addMessage({
+      id: 'derive-sender-msg',
+      subject: 'Multi Participant',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }, { email: 'teammate@allowed.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+    const draftSpy = vi.spyOn(provider, 'createReplyDraft');
+
+    const result = await createDraftAction.run(ctx, {
+      body: 'Thanks.',
+      reply_to: 'derive-sender-msg',
+      reply_all: false,
+    });
+
+    expect(result.success).toBe(true);
+    expect(draftSpy.mock.calls[0]![2]!.to).toBeUndefined();
+    expect(draftSpy).toHaveBeenCalledWith(
+      'derive-sender-msg',
+      expect.any(String),
+      expect.objectContaining({ replyAll: false }),
+    );
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.to.map(a => a.email)).toEqual(['partner@allowed.com']);
+    expect(draft.to.map(a => a.email)).not.toContain('teammate@allowed.com');
+  });
+
+  it('Scenario: Reply draft without to on a self-sent parent (issue #192)', async () => {
+    // Replying to your own sent message with no `to` is the documented
+    // provider-derived case: the parent's sender is the mailbox owner, so the
+    // reply comes back addressed to the owner. Supplying `to` remains the way
+    // to redirect it — see the issue #164 scenario above.
+    provider.addMessage({
+      id: 'self-sent-derive-msg',
+      subject: 'Self Sent',
+      from: { email: 'me@company.com' },
+      to: [{ email: 'partner@allowed.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+
+    const result = await createDraftAction.run(ctx, {
+      body: 'Following up.',
+      reply_to: 'self-sent-derive-msg',
+      reply_all: false,
+    });
+
+    expect(result.success).toBe(true);
+    expect([...provider.getDrafts().values()][0]!.to.map(a => a.email))
+      .toEqual(['me@company.com']);
+  });
+
+  it('Scenario: Explicit to still overrides on a reply draft without subject (issue #192)', async () => {
+    provider.addMessage({
+      id: 'override-msg',
+      subject: 'Override',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+    const draftSpy = vi.spyOn(provider, 'createReplyDraft');
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'redirected@allowed.com',
+      body: 'Redirected.',
+      reply_to: 'override-msg',
+      reply_all: false,
+    });
+
+    expect(result.success).toBe(true);
+    expect(draftSpy.mock.calls[0]![2]!.to).toEqual([{ email: 'redirected@allowed.com' }]);
+    expect([...provider.getDrafts().values()][0]!.to.map(a => a.email))
+      .toEqual(['redirected@allowed.com']);
+  });
+
+  it('Scenario: Reply draft with cc but no to keeps the derived To (issue #192)', async () => {
+    provider.addMessage({
+      id: 'cc-only-msg',
+      subject: 'Cc Only',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'me@company.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+    const draftSpy = vi.spyOn(provider, 'createReplyDraft');
+
+    const result = await createDraftAction.run(ctx, {
+      body: 'Looping in Alice.',
+      cc: ['alice@allowed.com'],
+      reply_to: 'cc-only-msg',
+      reply_all: false,
+    });
+
+    expect(result.success).toBe(true);
+    expect(draftSpy.mock.calls[0]![2]!.to).toBeUndefined();
+    const draft = [...provider.getDrafts().values()][0]!;
+    expect(draft.to.map(a => a.email)).toEqual(['partner@allowed.com']);
+    expect(draft.cc?.map(a => a.email)).toEqual(['alice@allowed.com']);
+  });
+
+  it('Scenario: Non-reply draft still requires to (issue #192)', async () => {
+    const result = await createDraftAction.run(ctx, {
+      subject: 'No Recipients',
+      body: 'Body',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('MISSING_FIELD');
+    expect(result.error!.message).toContain('to is required');
+  });
+
   it('Scenario: Re: subject without reply_to blocked', async () => {
     const result = await createDraftAction.run(ctx, {
       to: 'alice@allowed.com',

@@ -51,7 +51,7 @@ const DraftOutput = z.object({
 
 const CreateDraftInput = z.object({
   to: z.string().or(z.array(z.string())).optional()
-    .describe('Recipient address(es). With reply_to set, this replaces the provider-derived To rather than adding to it, so the draft is addressed to exactly these recipients. Under reply_all, thread participants displaced from the To line move to Cc rather than being dropped; pass reply_all=false to address the reply to these recipients alone.'),
+    .describe('Recipient address(es). Required for a new draft; optional with reply_to set, where recipients are derived from the parent message. When supplied alongside reply_to it replaces the provider-derived To rather than adding to it, so the draft is addressed to exactly these recipients. Under reply_all, thread participants displaced from the To line move to Cc rather than being dropped; pass reply_all=false to address the reply to these recipients alone.'),
   cc: z.array(z.string()).optional(),
   subject: z.string().optional(),
   body: z.string().optional(),
@@ -75,7 +75,7 @@ export const createDraftAction: EmailAction<
   z.infer<typeof DraftOutput>
 > = {
   name: 'create_draft',
-  description: 'Create an email draft. Supports body_file with YAML frontmatter. Use reply_to for threaded reply drafts; pass reply_all=false with reply_to to draft a sender-only reply.',
+  description: 'Create an email draft. Supports body_file with YAML frontmatter. Use reply_to for threaded reply drafts, where to and subject are derived from the parent message and may be omitted; pass reply_all=false with reply_to to draft a sender-only reply.',
   input: CreateDraftInput,
   output: DraftOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -102,13 +102,17 @@ export const createDraftAction: EmailAction<
     }
     const attachments = attResult.files!;
 
-    // Validate required fields
-    const requiredError = validateRequiredFields(to, replyTo ? 'reply' : subject);
-    if (requiredError) {
-      return { success: false, error: requiredError };
+    // Validate required fields. A reply draft derives both its recipients and
+    // its subject from the parent message, so neither is required there
+    // (issue #192) — an explicitly supplied `to` stays available as an override.
+    if (!replyTo) {
+      const requiredError = validateRequiredFields(to, subject);
+      if (requiredError) {
+        return { success: false, error: requiredError };
+      }
     }
 
-    const recipients = Array.isArray(to) ? to : [to!];
+    const recipients = to === undefined ? undefined : (Array.isArray(to) ? to : [to]);
 
     // Parse name-address strings into {name, email} once before any provider call.
     const parsed = parseRecipients({ to: recipients, cc });
@@ -119,7 +123,7 @@ export const createDraftAction: EmailAction<
     // Drafts bypass allowlist — enforcement happens at send_draft time
 
     // Re: threading guardrail
-    const threadingError = checkReplyThreading(subject!, replyTo);
+    const threadingError = checkReplyThreading(subject ?? '', replyTo);
     if (threadingError) {
       return { success: false, error: threadingError };
     }
@@ -147,10 +151,11 @@ export const createDraftAction: EmailAction<
       }
       try {
         const result = await ctx.provider.createReplyDraft(replyTo, body, {
-          // `to` is a required input on this action, so forward it rather than
-          // letting the provider derive the To from the parent (issue #164).
-          // Providers treat an explicit `to` as a replacement, not a merge.
-          to: parsed.to,
+          // Forward an explicitly supplied `to` — providers treat it as a
+          // replacement for the derived To, not a merge (issue #164). Omit it
+          // when the caller supplied none so the provider derives recipients
+          // from the parent message under `reply_all` (issue #192).
+          to: parsed.to.length > 0 ? parsed.to : undefined,
           cc: parsed.cc,
           bodyHtml: outBodyHtml,
           attachments: attachments.length > 0 ? attachments : undefined,

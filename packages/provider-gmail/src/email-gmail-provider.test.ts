@@ -1029,6 +1029,47 @@ describe('provider-gmail/Reply Drafts', () => {
     const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
     expect(raw).toContain('To: "Alice" <alice@corp.com>');
   });
+
+  it('Scenario: reply-all with no to derives the multi-participant audience (issue #192)', async () => {
+    // create_draft no longer requires `to`, so this is now the ordinary reply
+    // path: the parent's sender on To, the rest of the thread on Cc.
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(originalMessageMock()),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.createReplyDraft('msg-original', 'reply', { replyAll: true });
+
+    const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
+    expect(raw).toContain('To: "Alice" <alice@corp.com>');
+    expect(raw).toMatch(/^Cc: .*bob@corp\.com.*carol@corp\.com/m);
+  });
+
+  it('Scenario: reply with no to on a self-sent parent addresses the owner (issue #192)', async () => {
+    // Documented caveat: with no explicit `to`, replying to your own sent mail
+    // derives the owner's own address. Supplying `to` is how a caller redirects
+    // it (issue #164); omitting it is no longer an error.
+    const selfSent = {
+      ...originalMessageMock(),
+      payload: {
+        ...originalMessageMock().payload,
+        headers: [
+          ...originalMessageMock().payload.headers.filter(h => h.name !== 'From'),
+          { name: 'From', value: '"Owner" <owner@corp.com>' },
+        ],
+      },
+    };
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(selfSent),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.createReplyDraft('msg-original', 'reply', { replyAll: false });
+
+    const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
+    expect(raw).toContain('To: "Owner" <owner@corp.com>');
+    expect(raw).not.toMatch(/^Cc:/m);
+  });
 });
 
 describe('provider-gmail/Reply Threading on Send', () => {
