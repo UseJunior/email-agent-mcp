@@ -394,14 +394,22 @@ directories (`:` on macOS/Linux, `;` on Windows; a leading `~` is expanded) that
 }
 ```
 
-Paths are resolved against `EMAIL_MCP_SAFE_DIR` first, then each allowed
-directory in order, and the first match wins. Each root is canonicalised with
-`realpath` before the containment check, so an allowlisted root that is itself a
-symlink is resolved to its real location and a symlink escaping every root is
-still rejected. Unset (the default) keeps the working directory as the only
-root — which is why an agent that cannot reach a file should ask you to
-allowlist its directory rather than copy confidential documents into a git
-working tree.
+A **relative** path resolves against `EMAIL_MCP_SAFE_DIR` only — allowed
+directories are reached by **absolute** path, so a bare `contract.pdf` can never
+silently pick up a different file from another root. Each root is canonicalised
+with `realpath` before the containment check: an allowlisted root that is itself
+a symlink resolves to its real location, a root that cannot be canonicalised
+authorises nothing, and a symlink escaping every root is still rejected. Unset
+(the default) keeps the working directory as the only root — which is why an
+agent that cannot reach a file should ask you to allowlist its directory rather
+than copy confidential documents into a git working tree.
+
+Allowlisting a directory trusts everyone who can write to it. Validation and
+open are separate operations on a path, so a principal who can replace a
+directory *inside* an allowed root between the two can still redirect the read;
+only allowlist roots whose ancestors are not writable by untrusted users. The
+final file is opened with `O_NOFOLLOW`, so the file itself cannot be swapped for
+a symlink after validation.
 
 ## Provider Support
 

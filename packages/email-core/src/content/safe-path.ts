@@ -3,12 +3,22 @@
 // operator-allowlisted extra roots — and rejects path traversal and symlink
 // escapes. Used by body-loader and attachment-loader so both file-read
 // surfaces share one policy.
+import { constants as fsConstants } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { resolve, relative, isAbsolute, delimiter } from 'node:path';
 
 /** Env var that adds trusted roots beyond the safe base directory. */
 export const ALLOWED_DIRS_ENV = 'AGENT_EMAIL_ALLOWED_DIRS';
+
+/**
+ * Open flags for a path already validated by `assertPathInSafeDir`. The
+ * returned path is canonical, so its leaf is not a symlink — `O_NOFOLLOW`
+ * therefore rejects nothing legitimate, and closes the window in which the
+ * leaf is swapped for a symlink between validation and open. Windows has no
+ * `O_NOFOLLOW`; there the flags degrade to a plain read.
+ */
+export const SAFE_READ_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
 
 export interface SafePathError {
   code: string;
@@ -40,12 +50,17 @@ function isWithin(base: string, target: string): boolean {
   return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
 }
 
-/** Canonicalize a root, falling back to the literal path when it does not exist. */
-async function canonicalize(dir: string): Promise<string> {
+/**
+ * Canonicalize a root, or `null` when it cannot be resolved (missing,
+ * unreadable, or an I/O error). Fails closed: a root we cannot canonicalize is
+ * dropped from the authorization set rather than falling back to its literal
+ * path, so an unresolvable root never authorizes a read.
+ */
+async function canonicalize(dir: string): Promise<string | null> {
   try {
     return await realpath(dir);
   } catch {
-    return dir;
+    return null;
   }
 }
 
@@ -72,7 +87,7 @@ export function parseAllowedDirs(
 
     const expanded =
       trimmed === '~' ? home
-      : trimmed.startsWith('~/') ? resolve(home, trimmed.slice(2))
+      : trimmed.startsWith('~/') || trimmed.startsWith('~\\') ? resolve(home, trimmed.slice(2))
       : trimmed;
 
     if (!isAbsolute(expanded)) {
@@ -105,13 +120,20 @@ function rootsOf(sandbox: PathSandboxInput): string[] {
 /**
  * Resolve `filePath` within the sandbox and verify it does not escape via `..`
  * segments, an absolute path outside every root, or a symlink (leaf OR an
- * ancestor directory). Roots are tried in order — the safe base directory
- * first, then each configured extra root — and the first containment match
- * wins. Both every root and the fully resolved target are canonicalized with
- * `realpath` before the containment check, so a symlink anywhere in the chain
- * that points outside every root is caught — and the comparison is a true
- * path-segment containment test, not a string prefix (so a sibling like
- * `<safeDir>-evil` cannot pass).
+ * ancestor directory). A RELATIVE path resolves against the safe base
+ * directory only; an ABSOLUTE path is checked against every root in order and
+ * the first containment match wins. Every root and the fully resolved target
+ * are canonicalized with `realpath` before the containment check, so a symlink
+ * anywhere in the chain that points outside every root is caught — and the
+ * comparison is a true path-segment containment test, not a string prefix (so
+ * a sibling like `<safeDir>-evil` cannot pass). A root that cannot be
+ * canonicalized authorizes nothing.
+ *
+ * Note the residual TOCTOU window: this returns a canonical *pathname* that
+ * the caller then opens. The leaf cannot be swapped for a symlink (callers
+ * open with `O_NOFOLLOW`), but an ancestor directory inside a root could be
+ * replaced between validation and open. Allowlisted roots and their ancestors
+ * must therefore not be writable by untrusted principals.
  *
  * A symlink that lands inside *another* allowlisted root is accepted: the
  * operator has already declared that directory trusted, so which root the
@@ -139,12 +161,20 @@ export async function assertPathInSafeDir(
   // Cheap literal pre-check before touching the filesystem.
   if (filePath.includes('..')) return traversalError();
 
-  const candidates = roots
+  // A relative path resolves against the safe directory ONLY. Searching every
+  // allowed root for a bare filename would make `contract.pdf` silently attach
+  // whichever copy happened to exist first — ambient basename lookup, not path
+  // resolution. Extra roots are reachable by absolute path.
+  const searchRoots = isAbsolute(filePath) ? roots : roots.slice(0, 1);
+
+  const candidates = searchRoots
     .map(root => ({ root, target: resolve(root, filePath) }))
     .filter(({ root, target }) => isWithin(root, target));
   if (candidates.length === 0) return traversalError();
 
-  const realRoots = await Promise.all(roots.map(canonicalize));
+  const realRoots = (await Promise.all(roots.map(canonicalize))).filter(
+    (real): real is string => real !== null,
+  );
 
   let sawEscape = false;
   for (const { target } of candidates) {
@@ -154,7 +184,7 @@ export async function assertPathInSafeDir(
     try {
       realTarget = await realpath(target);
     } catch {
-      continue; // Missing under this root; a later root may still hold it.
+      continue; // Missing under this root; another candidate may still hold it.
     }
 
     // Roots are canonicalized too — a sandbox root may itself live under a

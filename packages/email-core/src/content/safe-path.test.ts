@@ -189,18 +189,36 @@ describe('content/safe-path — configured extra roots', () => {
     expect(result.error!.code).toBe('FILE_NOT_FOUND');
   });
 
-  it('falls through to a later root when a relative path is missing in the first', async () => {
+  it('does not search extra roots for a relative path', async () => {
+    // Ambient basename lookup would make `contract.pdf` silently resolve to
+    // whichever root happened to hold a copy. Relative paths stay cwd-scoped.
     await writeFile(join(extraDir, 'contract.pdf'), 'data');
     const result = await assertPathInSafeDir(
       'contract.pdf',
       { safeDir: workDir, allowedDirs: [extraDir] },
       'attachment path',
     );
-    expect(result.error).toBeUndefined();
-    expect(result.resolved).toContain('extra');
+    expect(result.error!.code).toBe('FILE_NOT_FOUND');
   });
 
-  it('prefers the safe directory over a later root for the same relative path', async () => {
+  it('drops a configured root that cannot be canonicalized', async () => {
+    const missingRoot = join(root, 'not-created');
+    const result = await assertPathInSafeDir(
+      join(missingRoot, 'contract.pdf'),
+      { safeDir: workDir, allowedDirs: [missingRoot] },
+      'attachment path',
+    );
+    // The root is literally contained but unresolvable, so it authorizes
+    // nothing — no literal-path fallback.
+    expect(result.error!.code).toBe('FILE_NOT_FOUND');
+  });
+
+  it('expands a Windows-style ~\\ prefix', () => {
+    const { dirs } = parseAllowedDirs('~\\Downloads', { home: '/home/agent' });
+    expect(dirs).toEqual([join('/home/agent', 'Downloads')]);
+  });
+
+  it('resolves a relative path against the safe directory', async () => {
     await writeFile(join(workDir, 'contract.pdf'), 'work copy');
     await writeFile(join(extraDir, 'contract.pdf'), 'extra copy');
     const result = await assertPathInSafeDir(

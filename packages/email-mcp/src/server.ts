@@ -1,4 +1,5 @@
 // MCP server — thin transport adapter mapping action registry to MCP tools
+import { stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import type { DeletePolicy, EmailAction, EmailMessage, EmailProvider } from '@usejunior/email-core';
 import {
@@ -722,6 +723,20 @@ export async function buildLazyActions(
   const { dirs: allowedDirs, warnings } = parseAllowedDirs(process.env[ALLOWED_DIRS_ENV]);
   for (const warning of warnings) {
     console.error(`[email-agent-mcp] ${warning}`);
+  }
+  // Surface roots that cannot authorize anything at startup rather than only
+  // as a confusing per-call FILE_NOT_FOUND. Kept in the list either way — a
+  // mount may appear later — but the sandbox fails closed on any root it
+  // cannot canonicalize at read time.
+  for (const dir of allowedDirs) {
+    void stat(dir).then(
+      info => {
+        if (!info.isDirectory()) {
+          console.error(`[email-agent-mcp] ${ALLOWED_DIRS_ENV} entry is not a directory: ${dir}`);
+        }
+      },
+      () => console.error(`[email-agent-mcp] ${ALLOWED_DIRS_ENV} entry is not readable: ${dir}`),
+    );
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

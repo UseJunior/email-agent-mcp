@@ -7,7 +7,7 @@ The system SHALL accept file attachments for outbound emails from a local file p
 A caller-supplied `attachments[].path` SHALL be read under the same sandbox as `body_file`: it resolves within the safe directory (`EMAIL_MCP_SAFE_DIR`, default the process working directory) or within any absolute root the operator allowlists via `AGENT_EMAIL_ALLOWED_DIRS`, with every root canonicalized before the containment check. A path outside every root SHALL be rejected with `PATH_TRAVERSAL`, and a symlink escaping every root with `SYMLINK_ESCAPE`.
 
 #### Scenario: Attach file to reply
-- **WHEN** `reply_to_email` is called with `{attachments: [{path: "/tmp/report.pdf"}]}` and `/tmp` is an allowed root
+- **WHEN** `reply_to_email` is called with `{attachments: [{path: "/tmp/report.pdf"}]}`
 - **THEN** the system base64-encodes the file and includes it as a Graph/Gmail attachment
 
 #### Scenario: Attach a file from an allowlisted directory

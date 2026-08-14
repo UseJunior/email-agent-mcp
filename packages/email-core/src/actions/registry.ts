@@ -26,7 +26,7 @@ export interface ActionContext {
    * Extra absolute roots that caller-supplied `body_file` / attachment paths
    * may also resolve within, beyond `safeDir` (see AGENT_EMAIL_ALLOWED_DIRS).
    */
-  allowedDirs?: string[];
+  allowedDirs?: readonly string[];
   deleteEnabled?: boolean;
   hardDeleteAllowed?: boolean;
   rateLimiter?: RateLimiter;

@@ -3,7 +3,7 @@
 // assertPathInSafeDir, but reads raw bytes — no text-extension gate, no
 // null-byte rejection, no UTF-8 decode, no frontmatter parsing.
 import { open } from 'node:fs/promises';
-import { assertPathInSafeDir, type PathSandboxInput } from './safe-path.js';
+import { assertPathInSafeDir, SAFE_READ_FLAGS, type PathSandboxInput } from './safe-path.js';
 
 export const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024; // 25MB
 
@@ -20,6 +20,15 @@ function mapFsError(err: unknown, filePath: string): AttachmentFileResult {
   }
   if (code === 'EACCES' || code === 'EPERM') {
     return { error: { code: 'PERMISSION_DENIED', message: `attachment path is not readable: ${filePath}`, recoverable: false } };
+  }
+  if (code === 'ELOOP') {
+    return {
+      error: {
+        code: 'SYMLINK_ESCAPE',
+        message: `attachment path changed to a symlink during validation: ${filePath}`,
+        recoverable: false,
+      },
+    };
   }
   if (code === 'EISDIR') {
     return { error: { code: 'INVALID_FILE_TYPE', message: `attachment path is not a regular file: ${filePath}`, recoverable: false } };
@@ -53,7 +62,7 @@ export async function resolveAttachmentFile(
 
   let filehandle;
   try {
-    filehandle = await open(resolved, 'r');
+    filehandle = await open(resolved, SAFE_READ_FLAGS);
     const fileStat = await filehandle.stat();
 
     if (!fileStat.isFile()) {

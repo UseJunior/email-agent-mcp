@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { z } from 'zod';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -2549,5 +2552,94 @@ describe('mailbox-config/Mailbox Names Are Round-Trippable Selectors', () => {
     expect(retried.error?.code).not.toBe('MAILBOX_REQUIRED');
     expect(personalCreate).toHaveBeenCalledTimes(1);
     expect(workCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe('mcp-transport/Allowed attachment roots wiring', () => {
+  // Issue #105 — the sandbox widening is operator-configured, so the env var
+  // must actually reach ActionContext. A unit test of the parser alone would
+  // pass even if the server never wired it up.
+  const withAllowedDirs = async <T>(value: string, run: () => Promise<T>): Promise<T> => {
+    const previous = process.env['AGENT_EMAIL_ALLOWED_DIRS'];
+    process.env['AGENT_EMAIL_ALLOWED_DIRS'] = value;
+    try {
+      return await run();
+    } finally {
+      if (previous === undefined) delete process.env['AGENT_EMAIL_ALLOWED_DIRS'];
+      else process.env['AGENT_EMAIL_ALLOWED_DIRS'] = previous;
+    }
+  };
+
+  const connectedState = (sendMessage: (msg: unknown) => Promise<unknown>) => {
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.mailboxes = [{
+      name: 'work',
+      emailAddress: 'me@company.com',
+      displayName: 'work',
+      providerType: 'microsoft',
+      provider: { sendMessage } as never,
+      auth: null,
+      isDefault: true,
+      status: 'connected',
+    }];
+    return state;
+  };
+
+  it('attaches a file from an AGENT_EMAIL_ALLOWED_DIRS root', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'mcp-allowed-root-'));
+    const pdf = Buffer.from('%PDF-1.4\n1 0 obj<<>>endobj\n', 'utf-8');
+    await writeFile(join(dir, 'contract.pdf'), pdf);
+    const sendMessage = vi.fn(async () => ({ success: true, messageId: 'sent-1' }));
+
+    try {
+      const result = await withAllowedDirs(dir, async () => {
+        const actions = await buildLazyActions(connectedState(sendMessage), () => ({ entries: ['*'] }));
+        const send = actions.find(a => a.name === 'send_email')!;
+        return await send.run({}, {
+          to: 'alice@example.com',
+          subject: 'Contract',
+          body: 'Attached.',
+          attachments: [{ path: join(dir, 'contract.pdf') }],
+        }) as { success: boolean; error?: { code: string; message: string } };
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.success).toBe(true);
+      const sent = sendMessage.mock.calls[0]![0] as { attachments?: { filename: string; content: Buffer }[] };
+      expect(sent.attachments![0]!.filename).toBe('contract.pdf');
+      expect(sent.attachments![0]!.content.equals(pdf)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects the same path when the env var is unset, and warns on relative entries', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'mcp-unallowed-root-'));
+    await writeFile(join(dir, 'contract.pdf'), Buffer.from('%PDF-1.4\n', 'utf-8'));
+    const sendMessage = vi.fn(async () => ({ success: true, messageId: 'sent-1' }));
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const result = await withAllowedDirs('relative/dir', async () => {
+        const actions = await buildLazyActions(connectedState(sendMessage), () => ({ entries: ['*'] }));
+        const send = actions.find(a => a.name === 'send_email')!;
+        return await send.run({}, {
+          to: 'alice@example.com',
+          subject: 'Contract',
+          body: 'Attached.',
+          attachments: [{ path: join(dir, 'contract.pdf') }],
+        }) as { success: boolean; error?: { code: string; message: string } };
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error!.code).toBe('PATH_TRAVERSAL');
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect(stderr.mock.calls.flat().join(' ')).toContain('ignoring non-absolute AGENT_EMAIL_ALLOWED_DIRS entry');
+    } finally {
+      stderr.mockRestore();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

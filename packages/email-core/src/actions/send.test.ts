@@ -188,6 +188,26 @@ describe('email-write/Body File Composition', () => {
     await rm(realRoot, { recursive: true, force: true });
   });
 
+  it('Scenario: Relative path does not search allowlisted roots', async () => {
+    const extraDir = await mkdtemp(join(tmpdir(), 'allowed-root-'));
+    await writeFile(join(extraDir, 'roaming-draft.md'), 'Body that must not be found');
+
+    const result = await sendEmailAction.run(
+      { ...ctx, allowedDirs: [extraDir] },
+      {
+        to: 'alice@allowed.com',
+        subject: 'Test',
+        body_file: 'roaming-draft.md',
+      },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('FILE_NOT_FOUND');
+    expect(provider.getSentMessages()).toHaveLength(0);
+
+    await rm(extraDir, { recursive: true, force: true });
+  });
+
   it('Scenario: Unset configuration preserves the single-root sandbox', async () => {
     const extraDir = await mkdtemp(join(tmpdir(), 'unconfigured-root-'));
     await writeFile(join(extraDir, 'outside-draft.md'), 'Body from an unconfigured root');
