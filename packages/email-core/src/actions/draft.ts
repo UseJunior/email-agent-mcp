@@ -23,6 +23,7 @@ import {
   AttachmentInputSchema,
   DraftPreviewSchema,
   PreviewErrorSchema,
+  pathSandbox,
 } from './compose-helpers.js';
 
 // --- Shared schemas ---
@@ -86,7 +87,7 @@ export const createDraftAction: EmailAction<
     }
 
     // Resolve body and frontmatter
-    const fields = await resolveComposeFields(input, ctx.safeDir);
+    const fields = await resolveComposeFields(input, pathSandbox(ctx));
     if (fields.error) {
       return { success: false, error: fields.error };
     }
@@ -95,7 +96,7 @@ export const createDraftAction: EmailAction<
     let { body } = fields;
 
     // Resolve attachments (sandboxed path reads + validation)
-    const attResult = await resolveAttachments(input.attachments, ctx.safeDir);
+    const attResult = await resolveAttachments(input.attachments, pathSandbox(ctx));
     if (attResult.error) {
       return { success: false, error: attResult.error };
     }
@@ -394,7 +395,7 @@ export const updateDraftAction: EmailAction<
     }
 
     // Resolve body from file if provided (body is optional for updates)
-    const fields = await resolveComposeFields(input, ctx.safeDir, { bodyOptional: true });
+    const fields = await resolveComposeFields(input, pathSandbox(ctx), { bodyOptional: true });
     if (fields.error) {
       return { success: false, error: fields.error };
     }
@@ -460,7 +461,7 @@ export const updateDraftAction: EmailAction<
     // Attachments: omitted → preserve existing (handled provider-side);
     // provided → replace entirely (an empty array removes all).
     if (input.attachments !== undefined) {
-      const attResult = await resolveAttachments(input.attachments, ctx.safeDir);
+      const attResult = await resolveAttachments(input.attachments, pathSandbox(ctx));
       if (attResult.error) {
         return { success: false, error: attResult.error };
       }

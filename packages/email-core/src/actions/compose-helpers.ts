@@ -1,11 +1,12 @@
 // Shared helpers for compose actions — internal module, NOT exported from package root
 import { z } from 'zod';
 import { basename } from 'node:path';
-import type { RateLimiter, MailboxEntry } from './registry.js';
+import type { RateLimiter, MailboxEntry, ActionContext } from './registry.js';
 import { isProviderError } from '../providers/provider.js';
 import type { EmailReader } from '../providers/provider.js';
 import { resolveBodyFile } from '../content/body-loader.js';
 import { resolveAttachmentFile } from '../content/attachment-loader.js';
+import type { PathSandboxInput } from '../content/safe-path.js';
 import type { BodyFormat } from '../content/body-renderer.js';
 import { parseAddressList } from '../utils/address.js';
 import { validateAttachment, sanitizeFilename } from './attachments.js';
@@ -23,6 +24,14 @@ interface ActionError {
   // MCP wrapper), not necessarily every mailbox on disk.
   availableMailboxes?: string[];
   defaultMailbox?: string;
+}
+
+/**
+ * The filesystem sandbox for caller-supplied paths on this request: the safe
+ * base directory plus any operator-allowlisted extra roots.
+ */
+export function pathSandbox(ctx: ActionContext): PathSandboxInput {
+  return { safeDir: ctx.safeDir, allowedDirs: ctx.allowedDirs };
 }
 
 // --- checkMailboxRequired ---
@@ -77,7 +86,7 @@ export async function resolveComposeFields(
     format?: BodyFormat;
     force_black?: boolean;
   },
-  safeDir?: string,
+  sandbox?: PathSandboxInput,
   opts?: { bodyOptional?: boolean },
 ): Promise<ComposeFields> {
   let body: string | undefined;
@@ -90,7 +99,7 @@ export async function resolveComposeFields(
   let forceBlack = input.force_black;
 
   if (input.body_file) {
-    const bodyResult = await resolveBodyFile(input.body_file, safeDir);
+    const bodyResult = await resolveBodyFile(input.body_file, sandbox);
     if (bodyResult.error) {
       return { body: '', error: bodyResult.error };
     }
@@ -143,7 +152,7 @@ function isValidBase64(value: string): boolean {
 export const AttachmentInputSchema = z
   .object({
     path: z.string().optional()
-      .describe('Path to a file within the working directory (sandboxed, like body_file).'),
+      .describe('Path to a file within the working directory, or within a directory the server operator allowlisted via AGENT_EMAIL_ALLOWED_DIRS (sandboxed, like body_file).'),
     base64: z.string().optional()
       .describe('Inline standard-base64-encoded file content. Alternative to path.'),
     filename: z.string().optional()
@@ -171,14 +180,14 @@ export interface ResolveAttachmentsResult {
 
 /**
  * Resolve caller-supplied attachment inputs into validated OutboundAttachment
- * buffers. Path entries are read sandboxed to `safeDir`; base64 entries are
+ * buffers. Path entries are read sandboxed to `sandbox`; base64 entries are
  * decoded inline. Each file is run through validateAttachment (25MB cap +
  * magic-byte MIME). Returns a structured error on the first failure — never
  * throws. An undefined/empty input yields `{ files: [] }`.
  */
 export async function resolveAttachments(
   attachments: AttachmentInput[] | undefined,
-  safeDir: string | undefined,
+  sandbox: PathSandboxInput,
 ): Promise<ResolveAttachmentsResult> {
   if (!attachments || attachments.length === 0) {
     return { files: [] };
@@ -190,7 +199,7 @@ export async function resolveAttachments(
     let defaultName: string;
 
     if (hasNonEmpty(att.path)) {
-      const read = await resolveAttachmentFile(att.path!, safeDir);
+      const read = await resolveAttachmentFile(att.path!, sandbox);
       if (read.error) {
         return { error: { ...read.error, message: `attachments[${index}]: ${read.error.message}` } };
       }

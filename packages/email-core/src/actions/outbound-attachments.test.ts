@@ -1,7 +1,7 @@
 // Outbound attachment coverage for create_draft / update_draft / send_email /
 // reply_to_email — issue #89.
 import { describe, it, expect, beforeEach } from 'vitest';
-import { writeFile, mkdir } from 'node:fs/promises';
+import { writeFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MockEmailProvider } from '../testing/mock-provider.js';
@@ -323,5 +323,58 @@ describe('outbound-attachments/reply_to_email', () => {
     expect(result.success).toBe(true);
     const draft = provider.getDrafts().get(result.draftId!);
     expect(draft!.attachments).toHaveLength(1);
+  });
+});
+
+describe('email-attachments/Attach Files to Outbound — allowlisted roots (#105)', () => {
+  // Issue #105 — an operator-declared root lets an agent attach a document that
+  // lives outside the working directory instead of staging it inside a repo.
+  it('Scenario: Attach a file from an allowlisted directory', async () => {
+    const outsideDir = await mkdtemp(join(tmpdir(), 'allowed-dir-test-'));
+    const contract = join(outsideDir, 'contract.pdf');
+    await writeFile(contract, PDF_BYTES);
+
+    const result = await sendEmailAction.run(
+      { ...ctx, allowedDirs: [outsideDir] },
+      {
+        to: 'alice@allowed.com',
+        subject: 'Outside',
+        body: 'body',
+        attachments: [{ path: contract }],
+      },
+    );
+
+    expect(result.success).toBe(true);
+    const sent = provider.getSentMessages();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.attachments![0]!.filename).toBe('contract.pdf');
+    expect(sent[0]!.attachments![0]!.content.equals(PDF_BYTES)).toBe(true);
+
+    await rm(outsideDir, { recursive: true, force: true });
+  });
+
+  it('Scenario: Attachment outside every allowed root rejected', async () => {
+    const outsideDir = await mkdtemp(join(tmpdir(), 'denied-dir-test-'));
+    const allowedDir = await mkdtemp(join(tmpdir(), 'allowed-dir-test-'));
+    const contract = join(outsideDir, 'contract.pdf');
+    await writeFile(contract, PDF_BYTES);
+
+    const result = await sendEmailAction.run(
+      { ...ctx, allowedDirs: [allowedDir] },
+      {
+        to: 'alice@allowed.com',
+        subject: 'Outside',
+        body: 'body',
+        attachments: [{ path: contract }],
+      },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('PATH_TRAVERSAL');
+    expect(result.error!.message).toContain(allowedDir);
+    expect(provider.getSentMessages()).toHaveLength(0);
+
+    await rm(outsideDir, { recursive: true, force: true });
+    await rm(allowedDir, { recursive: true, force: true });
   });
 });

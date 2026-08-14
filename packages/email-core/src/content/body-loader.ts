@@ -1,8 +1,8 @@
 // Shared body-file resolution — safe file loading with frontmatter support
-import { readFile } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { extname } from 'node:path';
 import { parseFrontmatter, type FrontmatterFields } from './frontmatter.js';
-import { assertPathInSafeDir } from './safe-path.js';
+import { assertPathInSafeDir, SAFE_READ_FLAGS, type PathSandboxInput } from './safe-path.js';
 
 export const BODY_SIZE_LIMIT = 3.5 * 1024 * 1024; // 3.5MB
 export const TEXT_EXTENSIONS = new Set(['.md', '.html', '.htm', '.txt', '.text']);
@@ -15,9 +15,9 @@ export interface BodyFileResult {
 
 export async function resolveBodyFile(
   bodyFile: string,
-  safeDir?: string,
+  sandbox?: PathSandboxInput,
 ): Promise<BodyFileResult> {
-  const pathCheck = await assertPathInSafeDir(bodyFile, safeDir, 'body_file');
+  const pathCheck = await assertPathInSafeDir(bodyFile, sandbox, 'body_file');
   if (pathCheck.error) {
     return { error: pathCheck.error };
   }
@@ -35,8 +35,28 @@ export async function resolveBodyFile(
     };
   }
 
-  // Read file and check for binary content
-  const raw = await readFile(resolved);
+  // Read through an opened descriptor with O_NOFOLLOW, matching the
+  // attachment loader: the validated leaf cannot be swapped for a symlink
+  // between the containment check and the read.
+  let raw: Buffer;
+  let filehandle;
+  try {
+    filehandle = await open(resolved, SAFE_READ_FLAGS);
+    raw = await filehandle.readFile();
+  } catch (err) {
+    if ((err as { code?: string } | null)?.code === 'ELOOP') {
+      return {
+        error: {
+          code: 'SYMLINK_ESCAPE',
+          message: `body_file changed to a symlink during validation: ${bodyFile}`,
+          recoverable: false,
+        },
+      };
+    }
+    throw err;
+  } finally {
+    await filehandle?.close();
+  }
 
   // Binary file detection: check for null bytes
   if (raw.includes(0)) {

@@ -22,6 +22,7 @@ import {
   AttachmentInputSchema,
   DraftPreviewSchema,
   PreviewErrorSchema,
+  pathSandbox,
 } from './compose-helpers.js';
 
 const SendEmailInput = z.object({
@@ -92,7 +93,7 @@ export const sendEmailAction: EmailAction<
     }
 
     // Resolve body content and frontmatter
-    const fields = await resolveComposeFields(input, ctx.safeDir);
+    const fields = await resolveComposeFields(input, pathSandbox(ctx));
     if (fields.error) {
       return { success: false, error: fields.error };
     }
@@ -101,7 +102,7 @@ export const sendEmailAction: EmailAction<
     let { body } = fields;
 
     // Resolve attachments (sandboxed path reads + validation)
-    const attResult = await resolveAttachments(input.attachments, ctx.safeDir);
+    const attResult = await resolveAttachments(input.attachments, pathSandbox(ctx));
     if (attResult.error) {
       return { success: false, error: attResult.error };
     }
