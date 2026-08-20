@@ -63,7 +63,7 @@ requires:
     - calendar_integration
 metadata:
   author: UseJunior
-  version: "0.1.7"
+  version: "0.1.8"
 ---
 
 # Outlook Email Management
@@ -89,8 +89,8 @@ Why this matters: a single wrong send — wrong recipient, wrong attachment, con
 **email-agent-mcp** enforces this via concrete runtime guardrails:
 
 - **Empty send allowlist by default** — agents cannot send email until the user explicitly configures allowed recipients
-- **Action-level blocks** on dangerous inbox rule actions: `forwardTo`, `forwardAsAttachmentTo`, `redirectTo`, `delete`, `permanentDelete` ([rules.ts:39](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts#L39))
-- **`delete_email` disabled by default** unless the caller explicitly opts in with `user_explicitly_requested_deletion: true` ([label.ts](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/label.ts))
+- **Action-level rejection of dangerous inbox rule actions** — `createInboxRuleAction` refuses `forwardTo`, `forwardAsAttachmentTo`, `redirectTo`, and `delete` against its `BLOCKED_ACTIONS` denylist, and refuses anything outside its `SAFE_ACTIONS` allowlist — `permanentDelete` among them — as an unsupported action ([`createInboxRuleAction` in `rules.ts`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts))
+- **`delete_email` disabled by default** — `deleteEmailAction` requires *both* an operator-enabled delete policy (`AGENT_EMAIL_DELETE_ENABLED=true`) *and* a caller-supplied `user_explicitly_requested_deletion: true` ([`deleteEmailAction` in `label.ts`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/label.ts))
 
 **NemoClaw** can enforce it at the network policy level — see the [NemoClaw Email Policy skill](#related-skills).
 
@@ -112,7 +112,7 @@ Before you install or grant OAuth consent, understand where the safety boundary 
 This skill requests high-impact Microsoft Graph scopes (`Mail.ReadWrite`, `MailboxSettings.ReadWrite`, optionally `Mail.Send`). Review the items below before you grant consent. They are the exact things to check; the skill cannot enforce any of them for you.
 
 1. **Only grant `Mail.Send` if you trust the runtime** to honor draft-first. The skill itself cannot enforce "draft first, send second" — that's a runtime property. Verify your runtime either (a) blocks direct send by default, or (b) is `email-agent-mcp` which ships with an empty send allowlist by default.
-2. **Only grant `MailboxSettings.ReadWrite` if you trust the runtime** to block dangerous rule actions (`forwardTo`, `forwardAsAttachmentTo`, `redirectTo`, `delete`, `permanentDelete`). The reference runtime does this at [`rules.ts:39`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts#L39) — inspect the code yourself. Alternatively, prefer `MailboxSettings.Read` if rule auditing is all you need.
+2. **Only grant `MailboxSettings.ReadWrite` if you trust the runtime** to reject dangerous rule actions. The reference runtime does this in `createInboxRuleAction`: `forwardTo`, `forwardAsAttachmentTo`, `redirectTo`, and `delete` are refused against a `BLOCKED_ACTIONS` denylist, and any action outside the `SAFE_ACTIONS` allowlist — `permanentDelete` included — is refused as unsupported ([`createInboxRuleAction` in `rules.ts`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts)) — inspect the code yourself. Alternatively, prefer `MailboxSettings.Read` if rule auditing is all you need.
 3. **Prefer least-privilege consent.** Start with `Mail.Read` + `offline_access` for read-only triage. Escalate to write scopes only as specific workflows require them. Skip `Mail.Send` entirely if draft-first (user sends manually from Outlook) is acceptable.
 4. **Review the client app identity.** Whatever `AGENT_EMAIL_CLIENT_ID` resolves to is the Azure AD application you are consenting to. Check the consent screen, verify the app name and publisher, and make sure the requested scopes match what you see in this document.
 5. **Test on a non-production account first.** Be prepared to revoke OAuth consent and invalidate refresh tokens at https://myaccount.microsoft.com/consent if anything looks wrong or misconfigured.
@@ -149,7 +149,7 @@ offline_access
 
 `User.Read` is requested by the reference runtime only — it is used by the CLI to fetch `/me` and persist the authenticated mailbox address to config. A generic Graph client does not need `User.Read` unless it performs the same profile lookup.
 
-Source: [`packages/provider-microsoft/src/auth.ts:14`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/provider-microsoft/src/auth.ts#L14)
+Source: the `GRAPH_SCOPES` constant in [`packages/provider-microsoft/src/auth.ts`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/provider-microsoft/src/auth.ts)
 
 ### Token storage
 
@@ -176,7 +176,7 @@ Draft-first is the recommended workflow for all runtimes. Enforcement is layered
 
 | Layer | Enforcement mechanism |
 |-------|----------------------|
-| **Reference runtime (email-agent-mcp)** | Send allowlist empty by default. Action-level blocks on `forwardTo`, `forwardAsAttachmentTo`, `redirectTo`, `delete`, `permanentDelete` in [`rules.ts:39`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts#L39). `delete_email` disabled by default in [`label.ts`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/label.ts). |
+| **Reference runtime (email-agent-mcp)** | Send allowlist empty by default. `createInboxRuleAction` refuses `forwardTo`, `forwardAsAttachmentTo`, `redirectTo`, `delete` (`BLOCKED_ACTIONS` denylist) and `permanentDelete` (outside the `SAFE_ACTIONS` allowlist) in [`rules.ts`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts). `deleteEmailAction` has `delete_email` disabled by default in [`label.ts`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/label.ts). |
 | **Network policy (NemoClaw)** | Can block `graph.microsoft.com/v1.0/me/sendMail` at the network layer via custom policy, eliminating send capability entirely |
 | **Raw Graph API client** | Instruction-level only. Relies on the agent honoring the draft-first instructions. **Not recommended for safety-critical use** — pair with one of the runtime layers above |
 
@@ -219,7 +219,7 @@ When drafting replies:
 
 - **Match the sender's tone** — if they wrote "Dear Steven," reply with "Dear [Name]," not "Hey!"
 - **State the outcome, not the journey** — "The document is ready for your review" beats "I processed the document through our pipeline and..."
-- **One clear ask per message** — don't bury the action item in paragraph three
+- **One primary ask on cold outreach** — don't bury the action item in paragraph three. In transactional or ongoing-relationship mail, keep every ask that is independently necessary and readily answerable (see `email-drafting`)
 - **Check threading** — if the subject has "Re:" or "RE:", find the original message and create a threaded reply, not a standalone draft
 
 **Formatting gotchas** agents get wrong:
