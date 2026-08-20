@@ -50,7 +50,7 @@ requires:
       - permanentDelete
 metadata:
   author: UseJunior
-  version: "0.1.4"
+  version: "0.1.5"
 ---
 
 # Inbox Cleanup & Rules (Outlook)
@@ -71,7 +71,7 @@ Before you install or grant OAuth consent, understand where the safety boundary 
 
 ### What that means in practice
 
-- The blocked-actions list (`forwardTo`, `redirectTo`, `delete`, etc.) describes what a trusted runtime SHOULD reject. Whether those actions are actually rejected depends on the runtime. If you use [`email-agent-mcp`](https://github.com/UseJunior/email-agent-mcp), rejection is built into the action handler ([`rules.ts:39`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts#L39)). If you use a raw Graph API client or a custom MCP without equivalent guards, the protections do not automatically apply.
+- The blocked-actions list (`forwardTo`, `redirectTo`, `delete`, etc.) describes what a trusted runtime SHOULD reject. Whether those actions are actually rejected depends on the runtime. If you use [`email-agent-mcp`](https://github.com/UseJunior/email-agent-mcp), rejection is built into the action handler ([`createInboxRuleAction` in `rules.ts`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts)). If you use a raw Graph API client or a custom MCP without equivalent guards, the protections do not automatically apply.
 - `MailboxSettings.ReadWrite` is a high-risk scope because it controls inbox rules — and inbox rules can be configured to forward or redirect mail externally. Granting the scope without a runtime that enforces the blocked-actions list gives up the primary mitigation.
 - Autonomous invocation (where the agent runs this skill without per-call approval) is a platform-level setting, not something the skill controls. Combined with write scopes, it increases the surface area of any runtime weakness.
 
@@ -79,9 +79,9 @@ Before you install or grant OAuth consent, understand where the safety boundary 
 
 This skill requests a high-risk mailbox-rule permission (`MailboxSettings.ReadWrite`). Review the five items below before you grant consent. They are the exact things to check; the skill cannot enforce any of them for you.
 
-1. **Only grant `MailboxSettings.ReadWrite` if you trust the runtime** that will execute these instructions. The skill itself cannot enforce the blocked-actions list (`forwardTo`, `forwardAsAttachmentTo`, `redirectTo`, `delete`, `permanentDelete`). Verify your runtime does.
+1. **Only grant `MailboxSettings.ReadWrite` if you trust the runtime** that will execute these instructions. The skill itself cannot refuse these actions — `forwardTo`, `forwardAsAttachmentTo`, `redirectTo`, and `delete` (refused against the runtime's `BLOCKED_ACTIONS` denylist) or `permanentDelete` (refused as an action outside the `SAFE_ACTIONS` allowlist). Verify your runtime does.
 2. **Prefer audit-only scopes** (`MailboxSettings.Read`) — or omit rule creation entirely — if you do not need automated rule management. Folder operations and batch moves work with just `Mail.ReadWrite`.
-3. **If you must grant full scopes, use a vetted runtime** that enforces blocking of forward/redirect/delete actions at the action handler. The reference runtime `email-agent-mcp` does this at [`rules.ts:39`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts#L39) — inspect the code yourself. Alternatively, add network-level protections (for example, NemoClaw) to block Graph endpoints that create dangerous rules.
+3. **If you must grant full scopes, use a vetted runtime** that enforces blocking of forward/redirect/delete actions at the action handler. The reference runtime `email-agent-mcp` does this in [`createInboxRuleAction` in `rules.ts`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts) — inspect the code yourself. Alternatively, add network-level protections (for example, NemoClaw) to block Graph endpoints that create dangerous rules.
 4. **Test on a non-production account first.** Be prepared to revoke OAuth consent and invalidate refresh tokens at https://myaccount.microsoft.com/consent if anything looks wrong or misconfigured.
 5. **Avoid enabling autonomous invocation** for this skill unless you understand and trust the runtime's guardrails. Autonomous invocation combined with `MailboxSettings.ReadWrite` gives the agent the ability to create inbox rules without per-call user approval — only safe if the runtime enforces the blocked-actions list.
 
@@ -118,7 +118,7 @@ The reference runtime stores OAuth tokens in the OS keychain (macOS Keychain / W
 
 This skill is instruction-only — it cannot enforce any guardrails by itself. The protections below are provided by the **runtime** that actually executes the Graph API calls, not by this skill.
 
-If you use [`email-agent-mcp`](https://github.com/UseJunior/email-agent-mcp) as the runtime, it blocks dangerous inbox rule actions at the action handler level — `forwardTo`, `forwardAsAttachmentTo`, `redirectTo`, `delete`, `permanentDelete` — and rejects any rule creation attempt that includes them. Source: [`packages/email-core/src/actions/rules.ts:39`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts#L39).
+If you use [`email-agent-mcp`](https://github.com/UseJunior/email-agent-mcp) as the runtime, it refuses dangerous inbox rule actions at the action handler level. `forwardTo`, `forwardAsAttachmentTo`, `redirectTo`, and `delete` are matched against a `BLOCKED_ACTIONS` denylist and rejected with `UNSAFE_RULE_ACTION`; anything outside the `SAFE_ACTIONS` allowlist — `permanentDelete` among them — is rejected with `UNSUPPORTED_RULE_ACTION`. Either way the rule is not created. Source: [`createInboxRuleAction` in `rules.ts`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts).
 
 If you use a different runtime (raw Graph API client, custom MCP server), these protections are NOT automatically present. You should either layer NemoClaw network policy, restrict OAuth scopes, or use a runtime that provides equivalent guardrails.
 
@@ -238,7 +238,7 @@ Always set `stopProcessingRules: true` on each rule to prevent cascade.
 
 Not all rule actions are safe. Agents should never create rules with the actions listed below. This skill is instruction-only — it cannot enforce these restrictions itself. The agent's runtime is what actually makes (or blocks) the API calls.
 
-If your runtime is [`email-agent-mcp`](https://github.com/UseJunior/email-agent-mcp), it rejects rule creation attempts that include any of these actions and returns a `BLOCKED_ACTION` error. Source: [`rules.ts:39`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts#L39). If you use a different runtime, you should verify it provides equivalent enforcement, or layer network-level controls (e.g. NemoClaw).
+If your runtime is [`email-agent-mcp`](https://github.com/UseJunior/email-agent-mcp), it rejects rule creation attempts that include any of these actions — `UNSAFE_RULE_ACTION` for the four on the `BLOCKED_ACTIONS` denylist, `UNSUPPORTED_RULE_ACTION` for `permanentDelete`, which is refused as an action outside the `SAFE_ACTIONS` allowlist rather than named on the denylist. Source: [`createInboxRuleAction` in `rules.ts`](https://github.com/UseJunior/email-agent-mcp/blob/main/packages/email-core/src/actions/rules.ts). If you use a different runtime, you should verify it provides equivalent enforcement, or layer network-level controls (e.g. NemoClaw).
 
 **Block these actions:**
 

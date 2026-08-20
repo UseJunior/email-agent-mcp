@@ -13,7 +13,7 @@ compatibility: >-
   and thread detection.
 metadata:
   author: UseJunior
-  version: "0.1.1"
+  version: "0.1.2"
 ---
 
 # Email Response Drafting
@@ -73,12 +73,21 @@ If the original message cannot be found, tell the user rather than silently crea
 
 **MCP**: `reply_to_email` handles threading automatically.
 
-## Structure: One Ask Per Email
+## Structure: How Many Asks?
 
-Every email should have exactly one clear action item. If you need multiple things, either:
+**Unsolicited cold outreach: one primary ask.** You have no relationship, the recipient owes you no reply, and every additional ask lowers the odds of getting one. If you need more than one thing, either:
 
 - Pick the most important one and save the rest for a follow-up
 - Use a numbered list where the first item is the ask and the rest are context
+
+**Transactional mail, and mail to anyone you already have a relationship with: every ask that is independently necessary.** The one-ask rule is a cold-outreach heuristic, not a general law. Applied to mail the recipient is already expecting, it causes the worse failure — a necessary question gets deferred to a follow-up, or pushed below the fold into supporting detail, where the recipient skims past the one thing that needed an answer. Trimming to hit a lower number costs a round trip and buys nothing.
+
+An ask belongs in the message when both of these hold:
+
+- **It is independently necessary** — you cannot proceed without the answer, and no other ask in the message already covers it.
+- **It is readily answerable** — the recipient can answer from what they already know, in a word or a sentence. If answering it means doing work you could have done yourself, it is not a question yet.
+
+Anything that fails those tests is not an ask. It is either an assumption you state and invite them to correct, or work you do before you write.
 
 **Structure template for action-needed replies:**
 
