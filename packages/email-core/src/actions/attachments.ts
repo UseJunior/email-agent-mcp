@@ -113,8 +113,10 @@ export const listAttachmentsAction: EmailAction<
   output: ListAttachmentsOutput,
   annotations: { readOnlyHint: true, destructiveHint: false },
   run: async (ctx, input) => {
-    const msg = await ctx.provider.getMessage(input.message_id);
-    const attachments = (msg.attachments ?? []).map(a => ({
+    const listed = typeof ctx.provider.listAttachments === 'function'
+      ? await ctx.provider.listAttachments(input.message_id)
+      : (await ctx.provider.getMessage(input.message_id)).attachments ?? [];
+    const attachments = listed.map(a => ({
       id: a.id,
       filename: sanitizeFilename(a.filename),
       original_filename: a.filename,
