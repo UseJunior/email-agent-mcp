@@ -13,6 +13,24 @@ beforeEach(() => {
 });
 
 describe('email-attachments/Download Attachments', () => {
+  it('Scenario: List attachments uses the provider attachment collection when available', async () => {
+    const canonicalId = `attachment-${'A'.repeat(160)}`;
+    const listAttachments = vi.spyOn(provider, 'listAttachments').mockResolvedValue([{
+      id: canonicalId,
+      filename: 'canonical.pdf',
+      mimeType: 'application/pdf',
+      size: 123,
+      isInline: false,
+    }]);
+    const getMessage = vi.spyOn(provider, 'getMessage');
+
+    const result = await listAttachmentsAction.run(ctx, { message_id: 'message-id' });
+
+    expect(listAttachments).toHaveBeenCalledWith('message-id');
+    expect(getMessage).not.toHaveBeenCalled();
+    expect(result.attachments[0]!.id).toBe(canonicalId);
+  });
+
   it('Scenario: List attachments', async () => {
     provider.addMessage({
       id: 'msg1',

@@ -47,6 +47,13 @@ const SUBJECT_MAX_LENGTH = 255;
 // need the upload-session flow, which is intentionally out of scope here.
 const GRAPH_ENCODED_LIMIT = 3 * 1024 * 1024;
 
+// Ask Graph to return immutable Outlook resource IDs. They remain valid when a
+// message is moved and are materially shorter than the default REST IDs, which
+// also makes them safer to round-trip through MCP hosts that redact or shorten
+// long high-entropy strings. Graph continues to accept legacy/default IDs in
+// request paths, so existing callers do not need a migration.
+const IMMUTABLE_ID_PREFER = 'IdType="ImmutableId"';
+
 /** base64-encoded byte length of a buffer of `rawBytes` bytes. */
 function base64Size(rawBytes: number): number {
   return 4 * Math.ceil(rawBytes / 3);
@@ -305,7 +312,7 @@ export class RealGraphApiClient implements GraphApiClient {
     const token = await this.getToken();
     const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
     const resp = await this.fetchWithAuthRetry(fullUrl, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${token}`, Prefer: IMMUTABLE_ID_PREFER },
     });
     if (!resp.ok) {
       throw await this.errorFrom(resp);
@@ -316,7 +323,10 @@ export class RealGraphApiClient implements GraphApiClient {
   async post(url: string, body?: unknown): Promise<{ id?: string; [key: string]: unknown }> {
     const token = await this.getToken();
     const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
-    const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      Prefer: IMMUTABLE_ID_PREFER,
+    };
     const init: RequestInit = { method: 'POST', headers };
     if (body !== undefined) {
       headers['Content-Type'] = 'application/json';
@@ -339,6 +349,7 @@ export class RealGraphApiClient implements GraphApiClient {
       method: 'PATCH',
       headers: {
         Authorization: `Bearer ${token}`,
+        Prefer: IMMUTABLE_ID_PREFER,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
@@ -353,7 +364,7 @@ export class RealGraphApiClient implements GraphApiClient {
     const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
     const resp = await this.fetchWithAuthRetry(fullUrl, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${token}`, Prefer: IMMUTABLE_ID_PREFER },
     });
     if (!resp.ok) {
       throw await this.errorFrom(resp);

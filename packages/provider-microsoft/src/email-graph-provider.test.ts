@@ -2127,7 +2127,10 @@ describe('provider-microsoft/Graph API Client', () => {
       'https://graph.microsoft.com/v1.0/me/messages/msg-1/permanentDelete',
       {
         method: 'POST',
-        headers: { Authorization: 'Bearer token-123' },
+        headers: {
+          Authorization: 'Bearer token-123',
+          Prefer: 'IdType="ImmutableId"',
+        },
       },
     );
 
@@ -2159,6 +2162,7 @@ describe('provider-microsoft/Graph API Auth Retry', () => {
     // Retry should use fresh token
     const retryHeaders = fetchMock.mock.calls[1]![1]!.headers as Record<string, string>;
     expect(retryHeaders['Authorization']).toBe('Bearer token-v2');
+    expect(retryHeaders['Prefer']).toBe('IdType="ImmutableId"');
     expect(result.value).toHaveLength(1);
   });
 
