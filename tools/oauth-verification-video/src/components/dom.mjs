@@ -22,7 +22,7 @@ export function brandMark() {
   return mark;
 }
 
-export function scopeChip(label = 'gmail.modify') {
+export function scopeChip(label = 'gmail.readonly + gmail.compose') {
   return element('span', 'scope-chip', label);
 }
 

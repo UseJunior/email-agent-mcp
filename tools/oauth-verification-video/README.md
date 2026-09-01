@@ -10,7 +10,7 @@ encodes the MP4.
 
 ## What to select in Google Auth Platform
 
-For `gmail.modify`, select exactly:
+For `gmail.readonly` plus `gmail.compose`, select exactly:
 
 - **Email client**
 - **Email productivity**
@@ -97,7 +97,7 @@ Before the first rehearsal:
    scaling.
 4. Seed a two-message self-thread named `EA-MCP REVIEW READ 001` in the
    otherwise empty review mailbox.
-5. Publish a post-`0.1.9` CLI release containing `gmail.modify`, deploy the
+5. Publish a CLI release containing `gmail.readonly` plus `gmail.compose`, deploy the
    production broker, and revoke the mailbox's prior grant.
 
 Copy the example configuration, replace its mailbox and exact package version,
@@ -113,7 +113,8 @@ npm run record:preflight
 ```
 
 `record:preflight` downloads and inspects the named public package. It fails if
-the Gmail provider lacks `gmail.modify`, still contains `mail.google.com`, uses
+the Gmail provider lacks `gmail.readonly` or `gmail.compose`, contains
+`gmail.modify` or `mail.google.com`, uses
 a floating version, cannot reach the production broker, or any operator
 confirmation remains false. To exercise macOS Screen Recording permission with
 a disposable one-second take, run:
@@ -155,7 +156,7 @@ recordings in the ignored `captures/` directory:
 | Capture ID | Required proof |
 |---|---|
 | `identity` | Product page, privacy link, and Google-data section |
-| `auth-platform` | Production Web client, `gmail.modify`, Email client, Email productivity |
+| `auth-platform` | Production Web client, `gmail.readonly`, `gmail.compose`, Email client, Email productivity |
 | `configure` | Released CLI version and hosted-broker configure handoff |
 | `oauth-consent` | Continuous real Google OAuth flow with complete permission visible |
 | `connected` | Successful connection and status for the test mailbox |

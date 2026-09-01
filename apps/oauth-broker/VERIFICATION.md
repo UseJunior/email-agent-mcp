@@ -4,7 +4,7 @@ This runbook prepares the hosted `email-agent-mcp` Gmail OAuth client for
 Google production publishing and restricted-scope verification. It contains no
 client credentials.
 
-Last audited: 2026-07-23.
+Last audited: 2026-09-01.
 
 ## Known project and deployment state
 
@@ -131,10 +131,18 @@ consent screen language set to English:
    token can be removed by deleting the mailbox token file and revoking the
    grant in the user's Google Account.
 
-Do not demonstrate or claim label, read-state, folder, or Trash behavior: the
-Gmail provider does not currently expose those mutations. Draft and attachment
-footage may be added after those paths pass a live end-to-end smoke; the minimum
-script above proves the read and compose/send permission categories directly.
+Do not demonstrate or claim label, read-state, move, Trash, or delete behavior.
+The shared cross-provider MCP registry still advertises `label_email`,
+`flag_email`, `mark_read`, `move_to_folder`, and `delete_email`, but the Gmail
+adapter intentionally does not implement those mutation capabilities. They
+fail closed before any Gmail mutation request: unsupported actions return
+`NOT_SUPPORTED`, while deletion can stop first at the default `DELETE_DISABLED`
+operator gate. The default `gmail.readonly` plus `gmail.compose` grant would not
+authorize the mutations either. Operators must not expect them to work or
+restore `gmail.modify` to enable them. Draft and attachment footage may be
+added after
+those paths pass a live end-to-end smoke; the minimum script above proves the
+read and compose/send permission categories directly.
 
 Upload the recording to an unlisted URL accessible to Google's reviewers.
 Avoid displaying client secrets, refresh tokens, unrelated inbox contents, or
