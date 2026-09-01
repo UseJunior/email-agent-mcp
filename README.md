@@ -234,10 +234,11 @@ is marked as mailbox-mutating:
 | `delete_inbox_rule` | Delete a server-side inbox rule (requires operator env + caller flag) (Microsoft 365) | destructive |
 
 This is a shared cross-provider tool surface. Although `label_email`,
-`mark_read`, `move_to_folder`, and `delete_email` are advertised, the Gmail
-adapter intentionally does not implement those mutation capabilities. Calls
-against a Gmail mailbox fail closed with `NOT_SUPPORTED`, irrespective of the
-OAuth grant. The default `gmail.readonly` plus `gmail.compose` grant would not
+`flag_email`, `mark_read`, `move_to_folder`, and `delete_email` are advertised,
+the Gmail adapter intentionally does not implement those mutation capabilities.
+They fail closed before any Gmail mutation request: unsupported actions return
+`NOT_SUPPORTED`, while deletion can stop first at the default `DELETE_DISABLED`
+operator gate. The default `gmail.readonly` plus `gmail.compose` grant would not
 authorize those mutations either; do not add `gmail.modify` to try to make the
 tools available. They remain available only for providers whose adapters and
 grants support them.
