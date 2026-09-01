@@ -79,7 +79,7 @@ by `Map.delete` between awaits is effectively atomic.
 5. Optional:
 
    ```
-   GMAIL_OAUTH_SCOPES=https://www.googleapis.com/auth/gmail.modify    # default
+   GMAIL_OAUTH_SCOPES="https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose"    # default
    BROKER_TICKET_TTL_MS=300000                    # 5 min, default
    BROKER_REQUIRE_KV=true                         # force-fail without Redis even outside prod
    ```
@@ -96,15 +96,16 @@ by `Map.delete` between awaits is effectively atomic.
 ## Verification
 
 `https://<your-broker-domain>` must complete Google's OAuth verification
-flow for the restricted
-`https://www.googleapis.com/auth/gmail.modify` scope. Per Google's
+flow for the restricted `gmail.readonly` and `gmail.compose` scopes. Per Google's
 restricted-scope policy, transmitting restricted-scope data through a server
 requires a security assessment; running a server in the auth path does not
 remove that requirement.
 
 If an existing deployment explicitly sets `GMAIL_OAUTH_SCOPES`, update the
-environment value to `https://www.googleapis.com/auth/gmail.modify` before
-submitting the OAuth app for verification.
+environment value to the space-separated `https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose`
+pair before submitting the OAuth app for verification. Operators and users
+completing new or repeated authorizations must re-consent. Existing local
+refresh-token metadata is preserved.
 
 For the audited project values, pre-submission gates, scope justification,
 privacy-policy facts, and demo script, follow the

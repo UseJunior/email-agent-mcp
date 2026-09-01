@@ -108,7 +108,7 @@ describe('provider-gmail/OAuth2 Authentication (broker routes)', () => {
       expect(captured.redirect).toContain('accounts.google.com');
       expect(captured.redirect).toContain(`state=${sessionId}`);
       expect(new URL(captured.redirect!).searchParams.get('scope')).toBe(
-        'https://www.googleapis.com/auth/gmail.modify',
+        'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose',
       );
     }
 
@@ -120,7 +120,7 @@ describe('provider-gmail/OAuth2 Authentication (broker routes)', () => {
           access_token: 'broker-access',
           refresh_token: 'broker-refresh',
           expires_in: 3600,
-          scope: 'https://www.googleapis.com/auth/gmail.modify',
+          scope: 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose',
           token_type: 'Bearer',
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },

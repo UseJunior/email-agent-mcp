@@ -44,7 +44,7 @@ export function getConfig(): BrokerConfig {
     redirectUri,
     scopes: (
       process.env['GMAIL_OAUTH_SCOPES'] ??
-      'https://www.googleapis.com/auth/gmail.modify'
+      'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose'
     ).split(/\s+/).filter(Boolean),
     ticketTtlMs: Number(process.env['BROKER_TICKET_TTL_MS'] ?? 5 * 60 * 1000),
     useKv,

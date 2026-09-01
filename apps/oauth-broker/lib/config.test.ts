@@ -29,10 +29,12 @@ afterEach(() => {
 });
 
 describe('provider-gmail/OAuth2 Authentication (broker config)', () => {
-  it('defaults to the narrow Gmail modify scope', () => {
+  it('defaults to Gmail read and compose scopes without modify', () => {
     expect(getConfig().scopes).toEqual([
-      'https://www.googleapis.com/auth/gmail.modify',
+      'https://www.googleapis.com/auth/gmail.readonly',
+      'https://www.googleapis.com/auth/gmail.compose',
     ]);
+    expect(getConfig().scopes).not.toContain('https://www.googleapis.com/auth/gmail.modify');
   });
 
   it('Scenario: Broker requires Redis in production', () => {
