@@ -233,6 +233,14 @@ is marked as mailbox-mutating:
 | `create_inbox_rule` | Create a persistent safe inbox rule; forwarding, redirection, deletion, and discarding to Deleted Items are blocked (Microsoft 365) | write |
 | `delete_inbox_rule` | Delete a server-side inbox rule (requires operator env + caller flag) (Microsoft 365) | destructive |
 
+This is a shared cross-provider tool surface. Although `label_email`,
+`mark_read`, `move_to_folder`, and `delete_email` are advertised, the Gmail
+adapter intentionally does not implement those mutation capabilities under the
+default `gmail.readonly` plus `gmail.compose` grant. Calls against a Gmail
+mailbox fail closed with `NOT_SUPPORTED`; do not add `gmail.modify` to make them
+available. They remain available only for providers whose adapters and grants
+support them.
+
 Every row returned by `list_emails`, `search_emails`, and `get_thread`, and the
 `read_email` response, carries an always-present `isDraft` boolean. `isDraft: true`
 means the message is an unsent draft: it has **not** been sent, and its `receivedAt`
