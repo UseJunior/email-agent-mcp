@@ -12,7 +12,7 @@ export const scenes = [
     durationMs: 7_000,
     eyebrow: 'Google OAuth verification',
     title: 'Email Agent MCP',
-    subtitle: 'Authentic product evidence · gmail.modify',
+    subtitle: 'Authentic product evidence · gmail.readonly + gmail.compose',
     narration: 'This video demonstrates the production Email Agent MCP OAuth client and the Gmail features enabled by the requested permission.',
   },
   {
@@ -37,9 +37,9 @@ export const scenes = [
     durationMs: 22_000,
     chapter: '02',
     title: 'Production client & requested scope',
-    caption: 'One Web client · gmail.modify · Email client · Email productivity',
-    recordingInstruction: 'Record Google Auth Platform Clients and Data Access. Show only the production Web client and its non-secret client ID; show gmail.modify and the Email client + Email productivity selections. Never reveal the client secret.',
-    narration: 'The production project contains the hosted Web OAuth client. Data Access requests gmail.modify and identifies the product as an email client and email productivity application.',
+    caption: 'One Web client · gmail.readonly + gmail.compose · Email client · Email productivity',
+    recordingInstruction: 'Record Google Auth Platform Clients and Data Access. Show only the production Web client and its non-secret client ID; show gmail.readonly, gmail.compose, and the Email client + Email productivity selections. Never reveal the client secret.',
+    narration: 'The production project contains the hosted Web OAuth client. Data Access requests gmail.readonly and gmail.compose and identifies the product as an email client and email productivity application.',
   },
   {
     id: 'architecture-intro',

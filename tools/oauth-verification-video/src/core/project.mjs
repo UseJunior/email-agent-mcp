@@ -9,7 +9,10 @@ const REQUIRED_ATTESTATIONS = [
   'appScopeAndBrandingMatchSubmission',
 ];
 
-export const EXPECTED_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
+export const EXPECTED_SCOPES = [
+  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.compose',
+];
 
 export function captureRequirements(scenes) {
   const seen = new Set();
@@ -43,8 +46,8 @@ export function validateProjectShape(project, scenes, mode) {
   if (submission.appName !== 'email-agent-mcp') {
     errors.push('submission.appName must exactly match "email-agent-mcp"');
   }
-  if (submission.requestedScope !== EXPECTED_SCOPE) {
-    errors.push(`submission.requestedScope must be ${EXPECTED_SCOPE}`);
+  if (JSON.stringify(submission.requestedScopes) !== JSON.stringify(EXPECTED_SCOPES)) {
+    errors.push(`submission.requestedScopes must be ${EXPECTED_SCOPES.join(', ')}`);
   }
 
   const features = Array.isArray(submission.dataAccessFeatures)

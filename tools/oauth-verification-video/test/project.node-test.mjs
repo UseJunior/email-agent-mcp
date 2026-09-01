@@ -16,6 +16,24 @@ test('storyboard mode allows missing media only as explicit warnings', () => {
   assert.match(result.warnings[0], /Storyboard placeholder/);
 });
 
+test('project requires exactly readonly and compose and rejects modify', () => {
+  const missingReadonly = exampleProject();
+  missingReadonly.submission.requestedScopes = [
+    'https://www.googleapis.com/auth/gmail.compose',
+  ];
+  assert.ok(validateProjectShape(missingReadonly, scenes, 'storyboard').errors.some(
+    error => error.includes('submission.requestedScopes'),
+  ));
+
+  const withModify = exampleProject();
+  withModify.submission.requestedScopes.push(
+    'https://www.googleapis.com/auth/gmail.modify',
+  );
+  assert.ok(validateProjectShape(withModify, scenes, 'storyboard').errors.some(
+    error => error.includes('submission.requestedScopes'),
+  ));
+});
+
 test('final mode fails closed on missing evidence and attestations', () => {
   const result = validateProjectShape(exampleProject(), scenes, 'final');
   assert.ok(result.errors.some(error => error.includes('Missing authentic capture')));

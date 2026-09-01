@@ -10,7 +10,7 @@ Email Agent MCP is an open-source, locally run email client and productivity int
 
 3
 00:00:25.350 --> 00:00:46.650
-The production project contains the hosted Web OAuth client. Data Access requests gmail.modify and identifies the product as an email client and email productivity application.
+The production project contains the hosted Web OAuth client. Data Access requests gmail.readonly and gmail.compose and identifies the product as an email client and email productivity application.
 
 4
 00:00:47.350 --> 00:00:57.650

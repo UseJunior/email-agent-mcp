@@ -235,11 +235,12 @@ is marked as mailbox-mutating:
 
 This is a shared cross-provider tool surface. Although `label_email`,
 `mark_read`, `move_to_folder`, and `delete_email` are advertised, the Gmail
-adapter intentionally does not implement those mutation capabilities under the
-default `gmail.readonly` plus `gmail.compose` grant. Calls against a Gmail
-mailbox fail closed with `NOT_SUPPORTED`; do not add `gmail.modify` to make them
-available. They remain available only for providers whose adapters and grants
-support them.
+adapter intentionally does not implement those mutation capabilities. Calls
+against a Gmail mailbox fail closed with `NOT_SUPPORTED`, irrespective of the
+OAuth grant. The default `gmail.readonly` plus `gmail.compose` grant would not
+authorize those mutations either; do not add `gmail.modify` to try to make the
+tools available. They remain available only for providers whose adapters and
+grants support them.
 
 Every row returned by `list_emails`, `search_emails`, and `get_thread`, and the
 `read_email` response, carries an always-present `isDraft` boolean. `isDraft: true`
@@ -478,9 +479,10 @@ https://www.googleapis.com/auth/gmail.compose
 `gmail.readonly` is required for reading messages and threads;
 `gmail.compose` manages drafts and sending but does not authorize
 `users.threads.get` or `users.messages.get`. The default grant does not include
-`gmail.modify`, so Gmail label changes, read-state changes, moves, trash, and
-delete operations are unavailable. Add both scopes to your OAuth consent
-screen.
+`gmail.modify`. Separately, the Gmail adapter intentionally leaves label
+changes, read-state changes, moves, trash, and delete operations unsupported,
+so those tools fail closed with `NOT_SUPPORTED`. Add both scopes to your OAuth
+consent screen.
 
 Deployments that explicitly set `GMAIL_OAUTH_SCOPES` must update it to the two
 space-separated scopes above. New authorizations and repeated authorizations

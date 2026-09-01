@@ -129,26 +129,26 @@ test('dry-run and generated operator script cover all authentic capture IDs', ()
   assert.match(dryRun, /no applications opened/i);
 });
 
-test('published artifact scope check rejects the legacy broad scope', () => {
+test('published artifact scope check requires readonly and compose and rejects broader scopes', () => {
   assert.equal(
-    validatePublishedScopeText('https://www.googleapis.com/auth/gmail.modify'),
+    validatePublishedScopeText(
+      'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose',
+    ),
     true,
   );
   assert.throws(
     () => validatePublishedScopeText(
-      'https://www.googleapis.com/auth/gmail.modify https://mail.google.com/',
+      'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.modify',
     ),
-    /legacy scope/,
+    /forbidden scope/,
+  );
+  assert.throws(
+    () => validatePublishedScopeText('https://www.googleapis.com/auth/gmail.compose'),
+    /gmail\.readonly/,
   );
   assert.equal(
     validatePublishedScopeText(
-      'https://www.googleapis.com/auth/gmail.modify https://attacker.example/https://mail.google.com/',
-    ),
-    true,
-  );
-  assert.equal(
-    validatePublishedScopeText(
-      'https://www.googleapis.com/auth/gmail.modify https://mail.google.com/.attacker.example',
+      'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://attacker.example/https://mail.google.com/',
     ),
     true,
   );

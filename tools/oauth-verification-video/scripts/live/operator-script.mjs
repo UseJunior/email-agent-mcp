@@ -4,7 +4,7 @@ import {displayCommandPlans} from './commands.mjs';
 
 const MANUAL_NOTES = {
   identity: 'Open the public product page, click the privacy link, and show the Google-data/Limited Use section.',
-  'auth-platform': 'Show the sole production Web client and non-secret client ID, then Data Access with gmail.modify, Email client, and Email productivity. Never reveal the client secret.',
+  'auth-platform': 'Show the sole production Web client and non-secret client ID, then Data Access with gmail.readonly, gmail.compose, Email client, and Email productivity. Never reveal the client secret.',
   configure: 'The director shows the released version and starts configure. Stop this take only after the production broker URL is visible; leave configure waiting.',
   'oauth-consent': 'Start before the broker URL opens with a clean profile already signed in to the dedicated account. Expand the permission and manually click Continue/Allow. If a password or MFA prompt appears, abort the take and prepare the profile; never enter secrets on camera. Do not cut before Terminal reports Connected.',
   connected: 'Show status for the dedicated synthetic mailbox. Never open token files.',

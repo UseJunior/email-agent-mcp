@@ -9,8 +9,14 @@ import {
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 
-const EXPECTED_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
-const LEGACY_SCOPE = 'https://mail.google.com/';
+const EXPECTED_SCOPES = [
+  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.compose',
+];
+const FORBIDDEN_SCOPES = [
+  'https://www.googleapis.com/auth/gmail.modify',
+  'https://mail.google.com/',
+];
 const URL_TOKEN = /https:\/\/[A-Za-z0-9./_-]+/g;
 
 function filesBelow(root) {
@@ -26,11 +32,15 @@ function filesBelow(root) {
 
 export function validatePublishedScopeText(text) {
   const urls = new Set(text.match(URL_TOKEN) ?? []);
-  if (!urls.has(EXPECTED_SCOPE)) {
-    throw new Error(`Published Gmail provider does not contain ${EXPECTED_SCOPE}`);
+  for (const scope of EXPECTED_SCOPES) {
+    if (!urls.has(scope)) {
+      throw new Error(`Published Gmail provider does not contain ${scope}`);
+    }
   }
-  if (urls.has(LEGACY_SCOPE)) {
-    throw new Error(`Published Gmail provider still contains legacy scope ${LEGACY_SCOPE}`);
+  for (const scope of FORBIDDEN_SCOPES) {
+    if (urls.has(scope)) {
+      throw new Error(`Published Gmail provider still contains forbidden scope ${scope}`);
+    }
   }
   return true;
 }

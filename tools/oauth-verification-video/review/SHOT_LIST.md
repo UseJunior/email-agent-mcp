@@ -22,9 +22,9 @@ Narration: Email Agent MCP is an open-source, locally run email client and produ
 
 Capture ID: `auth-platform`
 
-Record Google Auth Platform Clients and Data Access. Show only the production Web client and its non-secret client ID; show gmail.modify and the Email client + Email productivity selections. Never reveal the client secret.
+Record Google Auth Platform Clients and Data Access. Show only the production Web client and its non-secret client ID; show gmail.readonly, gmail.compose, and the Email client + Email productivity selections. Never reveal the client secret.
 
-Narration: The production project contains the hosted Web OAuth client. Data Access requests gmail.modify and identifies the product as an email client and email productivity application.
+Narration: The production project contains the hosted Web OAuth client. Data Access requests gmail.readonly and gmail.compose and identifies the product as an email client and email productivity application.
 
 ## 00:00:47–00:00:58 — OAuth broker, direct Gmail data path
 

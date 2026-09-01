@@ -134,10 +134,11 @@ consent screen language set to English:
 Do not demonstrate or claim label, read-state, move, Trash, or delete behavior.
 The shared cross-provider MCP registry still advertises `label_email`,
 `mark_read`, `move_to_folder`, and `delete_email`, but the Gmail adapter
-intentionally does not implement those mutation capabilities. Under the default
-`gmail.readonly` plus `gmail.compose` grant, those tools fail closed with
-`NOT_SUPPORTED`; operators must not expect them to work or restore
-`gmail.modify` to enable them. Draft and attachment footage may be added after
+intentionally does not implement those mutation capabilities. Those tools fail
+closed with `NOT_SUPPORTED`, irrespective of the OAuth grant; the default
+`gmail.readonly` plus `gmail.compose` grant would not authorize the mutations
+either. Operators must not expect them to work or restore `gmail.modify` to
+enable them. Draft and attachment footage may be added after
 those paths pass a live end-to-end smoke; the minimum script above proves the
 read and compose/send permission categories directly.
 

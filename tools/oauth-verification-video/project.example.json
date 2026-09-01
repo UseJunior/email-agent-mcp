@@ -2,7 +2,10 @@
   "submission": {
     "appName": "email-agent-mcp",
     "googleCloudProject": "email-agent-mcp-gmail",
-    "requestedScope": "https://www.googleapis.com/auth/gmail.modify",
+    "requestedScopes": [
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.compose"
+    ],
     "dataAccessFeatures": [
       "Email client",
       "Email productivity"
