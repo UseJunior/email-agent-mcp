@@ -46,7 +46,10 @@ export function validateProjectShape(project, scenes, mode) {
   if (submission.appName !== 'email-agent-mcp') {
     errors.push('submission.appName must exactly match "email-agent-mcp"');
   }
-  if (JSON.stringify(submission.requestedScopes) !== JSON.stringify(EXPECTED_SCOPES)) {
+  const requestedScopes = Array.isArray(submission.requestedScopes)
+    ? [...submission.requestedScopes].sort()
+    : [];
+  if (JSON.stringify(requestedScopes) !== JSON.stringify([...EXPECTED_SCOPES].sort())) {
     errors.push(`submission.requestedScopes must be ${EXPECTED_SCOPES.join(', ')}`);
   }
 

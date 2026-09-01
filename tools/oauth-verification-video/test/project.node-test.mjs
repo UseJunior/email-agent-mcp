@@ -17,6 +17,10 @@ test('storyboard mode allows missing media only as explicit warnings', () => {
 });
 
 test('project requires exactly readonly and compose and rejects modify', () => {
+  const reversed = exampleProject();
+  reversed.submission.requestedScopes.reverse();
+  assert.deepEqual(validateProjectShape(reversed, scenes, 'storyboard').errors, []);
+
   const missingReadonly = exampleProject();
   missingReadonly.submission.requestedScopes = [
     'https://www.googleapis.com/auth/gmail.compose',
