@@ -17,7 +17,7 @@ Last audited: 2026-07-23.
 | Cloud billing | Enabled |
 | Hosted broker origin | `https://oauth.usejunior.com` |
 | OAuth callback | `https://oauth.usejunior.com/api/callback` |
-| Requested Gmail scope | `https://www.googleapis.com/auth/gmail.modify` |
+| Requested Gmail scopes | `https://www.googleapis.com/auth/gmail.readonly` and `https://www.googleapis.com/auth/gmail.compose` |
 | Product homepage | `https://usejunior.com/products/email-agent-mcp` |
 | Privacy policy | `https://usejunior.com/privacy_policy` |
 | Terms | `https://usejunior.com/terms` |
@@ -30,8 +30,11 @@ attached, so public broker routes still return `DEPLOYMENT_NOT_FOUND`. Complete
 those gates and a successful broker OAuth smoke before moving the OAuth app to
 production or recording the demo.
 
-The repository defaults to `gmail.modify`. A deployed broker with an explicit
-`GMAIL_OAUTH_SCOPES` value must set it to the same scope.
+The repository defaults to `gmail.readonly` plus `gmail.compose`. A deployed
+broker with an explicit `GMAIL_OAUTH_SCOPES` value must set it to those two
+space-separated scopes. Operators and users completing new or repeated
+authorizations must re-consent. Existing local refresh-token metadata is
+preserved.
 
 ## Pre-submission gates
 
@@ -40,7 +43,7 @@ The repository defaults to `gmail.modify`. A deployed broker with an explicit
 - [ ] Attach Redis and set `BROKER_REQUIRE_KV=true` in production.
 - [ ] Set `GMAIL_OAUTH_CLIENT_ID`, `GMAIL_OAUTH_CLIENT_SECRET`,
       `BROKER_PUBLIC_ORIGIN=https://oauth.usejunior.com`, and
-      `GMAIL_OAUTH_SCOPES=https://www.googleapis.com/auth/gmail.modify`.
+      `GMAIL_OAUTH_SCOPES="https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose"`.
 - [ ] Confirm `POST /api/sessions` reaches the application rather than a
       Vercel deployment error.
 - [ ] Complete an end-to-end hosted-broker Gmail authorization and refresh
@@ -77,7 +80,7 @@ Use these values in project `email-agent-mcp-gmail`:
 | Authorized domain | `usejunior.com` |
 | Developer contact | `steven@usejunior.com` |
 | Audience | External |
-| Data-access scope | `https://www.googleapis.com/auth/gmail.modify` |
+| Data-access scopes | `https://www.googleapis.com/auth/gmail.readonly` and `https://www.googleapis.com/auth/gmail.compose` |
 
 The app name, logo, homepage identity, consent screen, and demo recording must
 match. Keep a separate Google Cloud project for development/testing rather than
@@ -91,12 +94,12 @@ adding test-only clients or scopes to this production project.
 > updates, and sends drafts; sends new messages; and sends replies within
 > existing threads.
 >
-> `gmail.modify` is the narrowest single scope that supports this implemented
-> combination of reading existing Gmail content and composing and sending
-> messages. `gmail.readonly` cannot send messages, while `gmail.compose` and
-> `gmail.send` cannot read existing message content. The application does not
-> immediately or permanently delete Gmail messages and therefore does not
-> request `https://mail.google.com/`.
+> `gmail.readonly` authorizes reading existing Gmail messages and threads, and
+> `gmail.compose` authorizes managing drafts and sending messages. Both are
+> required: Gmail's `users.threads.get` and `users.messages.get` methods do not
+> accept `gmail.compose`. The default grant does not request `gmail.modify` or
+> `https://mail.google.com/`, and Gmail label, read-state, move, trash, and
+> delete mutations are unavailable under it.
 >
 > Gmail API calls and message content travel directly between the user's local
 > email-agent-mcp process and Google. UseJunior's hosted OAuth broker performs
@@ -108,13 +111,13 @@ ask for separate explanations of read and compose/send behavior.
 
 ## Demo video script
 
-Record against a dedicated test mailbox with the consent screen language set
-to English:
+Record against the personal Gmail account `steven.obiajulu@gmail.com` with the
+consent screen language set to English:
 
 1. Show the public product homepage and its privacy-policy link.
 2. Show Google Auth Platform > Clients with the single production Web client
-   and its client ID, then show Data Access with `gmail.modify`, `Email client`,
-   and `Email productivity`.
+   and its client ID, then show Data Access with `gmail.readonly`,
+   `gmail.compose`, `Email client`, and `Email productivity`.
 3. Start `email-agent-mcp configure --provider gmail --mailbox <test-account>`.
 4. Show the browser redirect to the same app name and branding configured in
    Google Auth Platform.
@@ -191,4 +194,6 @@ Current Google references:
 - [Verification requirements](https://support.google.com/cloud/answer/13464321)
 - [Submitting an app for verification](https://support.google.com/cloud/answer/13461325)
 - [Gmail API scopes](https://developers.google.com/workspace/gmail/api/auth/scopes)
+- [Gmail `users.threads.get` authorization scopes](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.threads/get)
+- [Gmail `users.messages.get` authorization scopes](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/get)
 - [Security assessment](https://support.google.com/cloud/answer/13465431)

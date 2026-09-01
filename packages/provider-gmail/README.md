@@ -77,8 +77,11 @@ The simplest path is Google's OAuth 2.0 Playground using your own client credent
 1. Open `https://developers.google.com/oauthplayground/`.
 2. Click the gear icon and enable "Use your own OAuth credentials".
 3. Paste your Google `client_id` and `client_secret`.
-4. Authorize the Gmail scope
-   `https://www.googleapis.com/auth/gmail.modify`.
+4. Authorize both Gmail scopes:
+   `https://www.googleapis.com/auth/gmail.readonly` and
+   `https://www.googleapis.com/auth/gmail.compose`. Compose alone cannot read
+   messages or threads. The default grant does not support Gmail label,
+   read-state, move, trash, or delete mutations.
 5. Exchange the authorization code for tokens.
 6. Copy the returned `refresh_token`.
 

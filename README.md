@@ -458,18 +458,26 @@ Other reasons to pick BYOK: dedicated API quota, your own privacy policy and
 verification status, and no dependency on the hosted broker at
 `https://oauth.usejunior.com`.
 
-### Scope requested
+### Scopes requested
 
-Agent Email requests exactly one Gmail scope:
+Agent Email requests exactly these two Gmail scopes by default:
 
 ```text
-https://www.googleapis.com/auth/gmail.modify
+https://www.googleapis.com/auth/gmail.readonly
+https://www.googleapis.com/auth/gmail.compose
 ```
 
-This is the narrowest Gmail scope that covers Agent Email's read, compose,
-send, label, and soft-delete-to-trash behavior. It does not permit immediate,
-permanent deletion. It is the single scope you add to your own OAuth consent
+`gmail.readonly` is required for reading messages and threads;
+`gmail.compose` manages drafts and sending but does not authorize
+`users.threads.get` or `users.messages.get`. The default grant does not include
+`gmail.modify`, so Gmail label changes, read-state changes, moves, trash, and
+delete operations are unavailable. Add both scopes to your OAuth consent
 screen.
+
+Deployments that explicitly set `GMAIL_OAUTH_SCOPES` must update it to the two
+space-separated scopes above. New authorizations and repeated authorizations
+must re-consent to the new scope pair. Existing mailbox files and their stored
+refresh-token metadata remain unchanged.
 
 ### BYOK: create your own Google OAuth client
 
@@ -479,7 +487,8 @@ screen.
 3. **Configure the OAuth consent screen** under *APIs & Services → OAuth consent screen*:
    - User type **External** for a personal `@gmail.com` account, or **Internal**
      if you are on Google Workspace and only your own org needs access.
-   - Add the scope `https://www.googleapis.com/auth/gmail.modify`.
+   - Add both `https://www.googleapis.com/auth/gmail.readonly` and
+     `https://www.googleapis.com/auth/gmail.compose`.
    - While the app is in *Testing*, add your own Gmail address under **Test users**,
      or consent will be refused.
 4. **Create the OAuth client** under *APIs & Services → Credentials → Create
