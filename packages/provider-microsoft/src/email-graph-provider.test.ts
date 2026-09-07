@@ -1135,6 +1135,16 @@ describe('provider-microsoft/Deferred Delivery via Graph Extended Property', () 
 });
 
 describe('provider-microsoft/Graph Scheduled Send Inspection and Cancellation', () => {
+  // Pending sends are the ones still in the future, so the fixtures' deferred
+  // timestamps only mean anything against a pinned clock.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-20T00:00:00Z'));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('Scenario: Deferred property casing is normalized', async () => {
     const client = createMockClient({
       get: vi.fn().mockResolvedValue({
@@ -1179,10 +1189,75 @@ describe('provider-microsoft/Graph Scheduled Send Inspection and Cancellation', 
       scheduledSendAt: '2026-07-24T12:00:00.000Z',
     }]);
     expect(client.get).toHaveBeenCalledWith(
-      expect.stringContaining('/me/mailFolders/drafts/messages?$select=id,subject,toRecipients,isDraft&$top=100'),
+      expect.stringContaining('/me/messages?$select=id,subject,toRecipients,isDraft&$filter=isDraft eq true&$top=500'),
     );
     expect(client.get).toHaveBeenCalledWith(
       expect.stringContaining("$expand=singleValueExtendedProperties($filter=id eq 'SystemTime 0x3FEF')"),
+    );
+  });
+
+  it('Scenario: Outlook UI-scheduled message outside Drafts is listed', async () => {
+    // Live Graph check on a real mailbox: Outlook's own "Schedule send" left the
+    // deferred message in Deleted Items, absent from both Drafts and Outbox.
+    const client = createMockClient({
+      get: vi.fn().mockResolvedValue({
+        value: [
+          {
+            id: 'mcp-scheduled',
+            subject: 'Scheduled by email-agent-mcp',
+            toRecipients: [{ emailAddress: { address: 'alice@example.com', name: 'Alice' } }],
+            isDraft: true,
+            parentFolderId: 'drafts-folder-id',
+            singleValueExtendedProperties: [{
+              id: 'SystemTime 0x3FEF',
+              value: '2026-07-24T12:00:00Z',
+            }],
+          },
+          {
+            id: 'outlook-ui-scheduled',
+            subject: 'Scheduled in the Outlook UI',
+            toRecipients: [{ emailAddress: { address: 'bob@example.com' } }],
+            isDraft: true,
+            parentFolderId: 'deleted-items-folder-id',
+            singleValueExtendedProperties: [{
+              id: 'SystemTime 0x3fef',
+              value: '2026-07-25T15:00:00Z',
+            }],
+          },
+          {
+            id: 'already-delivered',
+            subject: 'Deferred time has passed',
+            toRecipients: [],
+            isDraft: true,
+            parentFolderId: 'deleted-items-folder-id',
+            singleValueExtendedProperties: [{
+              id: 'SystemTime 0x3FEF',
+              value: '2026-07-19T23:59:59Z',
+            }],
+          },
+        ],
+      }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.listScheduledSends();
+
+    expect(result).toEqual([
+      {
+        messageId: 'mcp-scheduled',
+        subject: 'Scheduled by email-agent-mcp',
+        to: [{ email: 'alice@example.com', name: 'Alice' }],
+        scheduledSendAt: '2026-07-24T12:00:00.000Z',
+      },
+      {
+        messageId: 'outlook-ui-scheduled',
+        subject: 'Scheduled in the Outlook UI',
+        to: [{ email: 'bob@example.com', name: undefined }],
+        scheduledSendAt: '2026-07-25T15:00:00.000Z',
+      },
+    ]);
+    expect(client.get).toHaveBeenCalledWith(
+      expect.not.stringContaining('/mailFolders/'),
     );
   });
 

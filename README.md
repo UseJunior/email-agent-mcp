@@ -354,7 +354,10 @@ bytes survive the round trip untouched.
 timestamp with an explicit timezone. Microsoft 365 holds the message
 server-side, so delivery survives this process exiting. Use the returned
 `messageId` with `cancel_scheduled_send` while it is pending, or inspect pending
-items with `list_scheduled_sends`.
+items with `list_scheduled_sends`. That listing covers messages you scheduled
+from Outlook itself, not just ones scheduled through this server — Outlook parks
+the held message wherever it likes (often Deleted Items), so discovery scans the
+mailbox rather than a folder, and reports only sends whose time is still ahead.
 
 Microsoft Graph changes the message ID when the held draft moves to Sent Items,
 so the returned ID is a pre-delivery management handle, not a permanent sent

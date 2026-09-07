@@ -22,13 +22,18 @@ For a new message it SHALL create a draft carrying the property and then POST `/
 
 ### Requirement: Graph Scheduled Send Inspection and Cancellation
 
-The Microsoft provider SHALL list scheduled sends only from Drafts and SHALL recognize the deferred property id case-insensitively because Graph normalizes the proptag hex casing. Before cancellation it SHALL fetch and verify both `isDraft: true` and the deferred property, then DELETE the encoded message path.
+The Microsoft provider SHALL list scheduled sends mailbox-wide, narrowed to `isDraft eq true` rather than to a folder, because Outlook's own Schedule send leaves the deferred message outside Drafts (observed in Deleted Items). Listing SHALL return only sends whose deferred time is still in the future, since Outlook leaves the tagged copy behind after delivery. It SHALL recognize the deferred property id case-insensitively because Graph normalizes the proptag hex casing. Before cancellation it SHALL fetch and verify both `isDraft: true` and the deferred property, then DELETE the encoded message path.
 
 Listing SHALL follow Graph `@odata.nextLink` pages with a finite loop/page guard and SHALL fail explicitly rather than silently returning a partial list. A missing item before verification or between verification and DELETE SHALL return `NOT_SCHEDULED`.
 
 #### Scenario: Scheduled send listing follows Graph pagination
-- **WHEN** Graph returns scheduled drafts across more than one Drafts page
+- **WHEN** Graph returns scheduled drafts across more than one page
 - **THEN** the provider follows `@odata.nextLink` and returns the scheduled drafts from every page
+
+#### Scenario: Outlook UI-scheduled message outside Drafts is listed
+- **WHEN** a deferred draft sits outside Drafts because Outlook's Schedule send moved it
+- **THEN** listing returns it alongside sends scheduled through this server
+- **AND** a deferred message whose scheduled time has already passed is omitted
 
 #### Scenario: Delivered handle is no longer scheduled
 - **WHEN** cancellation receives a handle that is missing before verification or disappears before DELETE
