@@ -259,7 +259,18 @@ export const sendEmailAction: EmailAction<
         };
       } catch (err) {
         settleClaimFromThrow(claim, err);
-        return handleProviderError(err, 'SCHEDULE_SEND_FAILED');
+        // An unclassified throw out of a two-write draft→send cannot prove the
+        // submission was not accepted, so the fallback must be the ambiguous
+        // code, not a terminal one — the rule handleProviderError states for
+        // every delivery operation. SCHEDULE_SEND_FAILED remains correct where
+        // the provider itself classified a 4xx rejection; it is wrong as a
+        // catch-all here. Quota is charged on the ambiguous outcome for the
+        // same reason the non-throw branch above charges it.
+        const handled = handleProviderError(err, 'SCHEDULE_SEND_STATUS_UNKNOWN');
+        if (ctx.rateLimiter && handled.error.code === 'SCHEDULE_SEND_STATUS_UNKNOWN') {
+          ctx.rateLimiter.recordUsage('send_email');
+        }
+        return handled;
       }
     }
 
