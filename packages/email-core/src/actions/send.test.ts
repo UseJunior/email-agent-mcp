@@ -865,6 +865,51 @@ describe('email-write/Duplicate Delivery Guard', () => {
     }
   });
 
+  it('Scenario: Separate mailboxes do not share a duplicate record', async () => {
+    // Two mailboxes, no mailboxName, sharing the process-default ledger. Before
+    // the namespace fix the second mailbox's FIRST send was refused and handed
+    // the first mailbox's message id — a wrong refusal and a cross-mailbox id
+    // leak in one response.
+    resetDefaultSendLedger();
+    try {
+      const providerB = new MockEmailProvider();
+      const ctxA: ActionContext = { provider, sendAllowlist: { entries: ['*@allowed.com'] }, safeDir: testDir };
+      const ctxB: ActionContext = { provider: providerB, sendAllowlist: { entries: ['*@allowed.com'] }, safeDir: testDir };
+
+      const a = await sendEmailAction.run(ctxA, MESSAGE);
+      const b = await sendEmailAction.run(ctxB, MESSAGE);
+
+      expect(a.success).toBe(true);
+      expect(b.success).toBe(true);
+      expect(provider.getSentMessages()).toHaveLength(1);
+      expect(providerB.getSentMessages()).toHaveLength(1);
+
+      // ...and each mailbox is still guarded against its own replay.
+      const replayB = await sendEmailAction.run(ctxB, MESSAGE);
+      expect(replayB.error!.code).toBe('DUPLICATE_SEND_BLOCKED');
+      expect(replayB.messageId).toBe(b.messageId);
+    } finally {
+      resetDefaultSendLedger();
+    }
+  });
+
+  it('holds a delivery record through a rejected allow_duplicate attempt', async () => {
+    const first = await sendEmailAction.run(ctx, MESSAGE);
+    expect(first.success).toBe(true);
+
+    provider.sendMessage = async () => {
+      throw new ProviderError('INVALID_REQUEST', 'rejected', 'microsoft', false);
+    };
+    const forced = await sendEmailAction.run(ctx, { ...MESSAGE, allow_duplicate: true });
+    expect(forced.error!.code).toBe('INVALID_REQUEST');
+
+    // The override authorized that one send, not the erasure of the delivery
+    // it was overriding. An ordinary replay must still be refused.
+    const replay = await sendEmailAction.run(ctx, MESSAGE);
+    expect(replay.error!.code).toBe('DUPLICATE_SEND_BLOCKED');
+    expect(replay.messageId).toBe(first.messageId);
+  });
+
   it('Scenario: A bail-out before dispatch does not block the corrected call', async () => {
     // An allowlist refusal never touched the provider, so it must not leave a
     // record that blocks the corrected send.

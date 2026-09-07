@@ -65,6 +65,15 @@ export const DELIVERY_PROVEN_UNSENT_CODES: ReadonlySet<string> = new Set([
   'SCHEDULE_SEND_FAILED', // scheduling's non-ambiguous variant
   'NOT_SUPPORTED',       // capability rejection, never dispatched
   'ALLOWLIST_BLOCKED',   // refused before dispatch
+  // Graph paths that fail strictly BEFORE the delivery POST. Each was checked
+  // at its production site: prepareReplyDraft throws before `/send`
+  // (email-graph-provider.ts REPLY_FAILED), attachment size validation runs
+  // with zero POSTs, an attachment upload failure leaves an unsent draft, and
+  // a scheduled draft with no id was never given a deferred-send time.
+  'REPLY_FAILED',
+  'ATTACHMENT_TOO_LARGE_FOR_PROVIDER',
+  'ATTACHMENT_UPLOAD_FAILED',
+  'SCHEDULE_DRAFT_FAILED',
 ]);
 
 /** Whether a failure code proves nothing was delivered. */
@@ -82,6 +91,21 @@ export interface SendAttempt {
   settledAt?: number;
   /** Provider message id, present only for a delivered attempt. */
   messageId?: string;
+}
+
+/**
+ * An attempt plus the identity that makes its callbacks safe.
+ *
+ * A fingerprint can carry more than one live attempt — `allow_duplicate`
+ * deliberately creates a second — so a callback that addressed only the
+ * fingerprint would act on whichever attempt happened to occupy the key. That
+ * let a slow first attempt's rejection delete a newer attempt's successful
+ * record, after which an ordinary replay dispatched again. The claim closure
+ * holds the entry object itself, so settle and release can only ever touch the
+ * attempt that produced them.
+ */
+interface LedgerEntry extends SendAttempt {
+  readonly id: number;
 }
 
 export interface SendOutcome {
@@ -207,10 +231,18 @@ export function resolveDuplicateSendWindowMs(
 }
 
 export class SendLedger {
-  private readonly attempts = new Map<string, SendAttempt>();
+  /**
+   * Live attempts per fingerprint, oldest first.
+   *
+   * A list rather than a single record because `allow_duplicate` legitimately
+   * puts two attempts on one fingerprint. Keeping both means a rejected
+   * override cannot erase the delivery it was overriding.
+   */
+  private readonly attempts = new Map<string, LedgerEntry[]>();
   private readonly windowMs: number;
   private readonly maxEntries: number;
   private readonly now: () => number;
+  private nextId = 1;
 
   constructor(opts: SendLedgerOptions = {}) {
     this.windowMs = opts.windowMs ?? resolveDuplicateSendWindowMs();
@@ -226,9 +258,10 @@ export class SendLedger {
   /**
    * Reserve a fingerprint ahead of dispatch.
    *
-   * `force` is the `allow_duplicate` path: it discards any prior record and
-   * claims afresh, so the deliberate duplicate is still protected against ITS
-   * own replay.
+   * `force` is the `allow_duplicate` path. It admits an attempt alongside any
+   * existing ones rather than replacing them: the caller authorised THIS send,
+   * not the erasure of what came before. If the forced attempt is then
+   * rejected, the earlier delivery still blocks an ordinary replay.
    */
   claim(fingerprint: string, opts: { force?: boolean } = {}): ClaimResult {
     if (!this.enabled) {
@@ -238,89 +271,181 @@ export class SendLedger {
     this.prune();
 
     if (!opts.force) {
-      const prior = this.attempts.get(fingerprint);
+      const prior = this.strongest(fingerprint);
       if (prior) return { ok: false, fingerprint, prior };
     }
 
-    const attempt: SendAttempt = { state: 'in-flight', startedAt: this.now() };
-    this.attempts.delete(fingerprint); // re-insert so eviction order is recency
-    this.attempts.set(fingerprint, attempt);
+    const entry: LedgerEntry = { id: this.nextId++, state: 'in-flight', startedAt: this.now() };
+    this.insert(fingerprint, entry);
     this.evictOverflow();
 
     return {
       ok: true,
       fingerprint,
-      settle: (outcome: SendOutcome) => this.settle(fingerprint, outcome),
-      release: () => {
-        // Only drop a record still in flight: a settled attempt is real
-        // history, and a late release would reopen it to replay.
-        if (this.attempts.get(fingerprint)?.state === 'in-flight') {
-          this.attempts.delete(fingerprint);
-        }
-      },
+      settle: (outcome: SendOutcome) => this.settle(fingerprint, entry, outcome),
+      release: () => this.release(fingerprint, entry),
     };
   }
 
-  /** Inspect a record without claiming. Intended for tests and diagnostics. */
+  /**
+   * The attempt a colliding claim is told about.
+   *
+   * Strongest evidence first: a delivered attempt (most recently settled) beats
+   * an unresolved one, which beats one still in flight. The caller's question
+   * is "did this already go out?", and a delivery elsewhere in the list answers
+   * it more decisively than a sibling attempt that has not returned.
+   */
+  private strongest(fingerprint: string): SendAttempt | undefined {
+    const entries = this.attempts.get(fingerprint);
+    if (!entries || entries.length === 0) return undefined;
+    // Latest first, with the attempt id as tie-break: two attempts can settle
+    // inside the same millisecond, and a caller told about the older of two
+    // deliveries is told about the wrong message.
+    const byState = (state: SendAttemptState): LedgerEntry | undefined => entries
+      .filter(e => e.state === state)
+      .sort((a, b) => ((b.settledAt ?? b.startedAt) - (a.settledAt ?? a.startedAt)) || (b.id - a.id))[0];
+    return byState('delivered') ?? byState('unresolved') ?? byState('in-flight');
+  }
+
+  /** Inspect the strongest record without claiming. For tests and diagnostics. */
   peek(fingerprint: string): SendAttempt | undefined {
     this.prune();
-    return this.attempts.get(fingerprint);
+    return this.strongest(fingerprint);
+  }
+
+  /** Every live attempt on a fingerprint, oldest first. For tests. */
+  peekAll(fingerprint: string): readonly SendAttempt[] {
+    this.prune();
+    return [...(this.attempts.get(fingerprint) ?? [])];
   }
 
   size(): number {
     this.prune();
-    return this.attempts.size;
+    let total = 0;
+    for (const entries of this.attempts.values()) total += entries.length;
+    return total;
   }
 
   clear(): void {
     this.attempts.clear();
   }
 
-  private settle(fingerprint: string, outcome: SendOutcome): void {
-    const attempt = this.attempts.get(fingerprint);
-    if (!attempt) return; // pruned mid-flight; nothing to settle
+  private insert(fingerprint: string, entry: LedgerEntry): void {
+    const entries = this.attempts.get(fingerprint);
+    if (entries) entries.push(entry);
+    else this.attempts.set(fingerprint, [entry]);
+  }
 
-    if (outcome.success) {
-      attempt.state = 'delivered';
-      attempt.settledAt = this.now();
-      if (outcome.messageId !== undefined) attempt.messageId = outcome.messageId;
-      return;
-    }
+  private remove(fingerprint: string, entry: LedgerEntry): void {
+    const entries = this.attempts.get(fingerprint);
+    if (!entries) return;
+    const index = entries.indexOf(entry);
+    if (index >= 0) entries.splice(index, 1);
+    if (entries.length === 0) this.attempts.delete(fingerprint);
+  }
 
+  private settle(fingerprint: string, entry: LedgerEntry, outcome: SendOutcome): void {
     if (isDeliveryProvenUnsent(outcome.errorCode)) {
-      // Provably not delivered — resending is safe, so stop blocking it.
-      this.attempts.delete(fingerprint);
+      // Provably not delivered — this attempt stops blocking. Siblings are
+      // untouched: a rejected override must not clear the delivery it overrode.
+      this.remove(fingerprint, entry);
       return;
     }
 
-    attempt.state = 'unresolved';
-    attempt.settledAt = this.now();
+    entry.settledAt = this.now();
+    if (outcome.success) {
+      entry.state = 'delivered';
+      if (outcome.messageId !== undefined) entry.messageId = outcome.messageId;
+    } else {
+      entry.state = 'unresolved';
+    }
+
+    // The attempt may have been pruned or evicted while it was in flight. A
+    // success that lands late is still evidence that mail went out, so put it
+    // back rather than dropping it; its window now runs from settlement.
+    const entries = this.attempts.get(fingerprint);
+    if (!entries || !entries.includes(entry)) this.insert(fingerprint, entry);
+  }
+
+  private release(fingerprint: string, entry: LedgerEntry): void {
+    // Only a reservation that never reached the provider may be withdrawn. A
+    // settled attempt is real history, and a late release would hand a replay
+    // the delivery it was meant to be refused.
+    if (entry.state === 'in-flight') this.remove(fingerprint, entry);
   }
 
   /**
-   * Drop records past the window.
+   * Drop attempts past the window.
    *
-   * An in-flight record is aged from `startedAt`, so an action that throws
+   * An in-flight attempt is aged from `startedAt`, so an action that throws
    * between claim and settle stops blocking once the window passes rather than
    * wedging the fingerprint forever. Holding it until then is the fail-closed
    * direction: a throw after dispatch is precisely the ambiguous case.
    */
   private prune(): void {
     const cutoff = this.now() - this.windowMs;
-    for (const [fingerprint, attempt] of this.attempts) {
-      if ((attempt.settledAt ?? attempt.startedAt) <= cutoff) {
-        this.attempts.delete(fingerprint);
-      }
+    for (const [fingerprint, entries] of this.attempts) {
+      const live = entries.filter(e => (e.settledAt ?? e.startedAt) > cutoff);
+      if (live.length === 0) this.attempts.delete(fingerprint);
+      else if (live.length !== entries.length) this.attempts.set(fingerprint, live);
     }
   }
 
+  /**
+   * Keep memory bounded by discarding the oldest SETTLED attempts.
+   *
+   * In-flight attempts are never evicted. Evicting one would drop a
+   * reservation covering a send that is on the wire right now, which is the
+   * single worst thing this module can do; and refusing a new claim because
+   * the ledger is full would block first-ever sends, which is worse still.
+   * So a burst of concurrent sends may briefly carry the map past the cap, and
+   * those entries age out on the ordinary TTL.
+   */
   private evictOverflow(): void {
-    while (this.attempts.size > this.maxEntries) {
-      const oldest = this.attempts.keys().next();
-      if (oldest.done) return;
-      this.attempts.delete(oldest.value);
+    while (this.size() > this.maxEntries) {
+      let oldestKey: string | undefined;
+      let oldest: LedgerEntry | undefined;
+      for (const [fingerprint, entries] of this.attempts) {
+        for (const entry of entries) {
+          if (entry.state === 'in-flight') continue;
+          if (!oldest || (entry.settledAt ?? entry.startedAt) < (oldest.settledAt ?? oldest.startedAt)) {
+            oldest = entry;
+            oldestKey = fingerprint;
+          }
+        }
+      }
+      if (!oldest || oldestKey === undefined) return; // nothing evictable — all in flight
+      this.remove(oldestKey, oldest);
     }
   }
+}
+
+/**
+ * A stable id for a provider instance, used as the ledger namespace when the
+ * caller supplies no mailbox name.
+ *
+ * Without this, two mailboxes in one process with no `mailboxName` share the
+ * empty key: the second mailbox's first-ever send is refused and handed the
+ * FIRST mailbox's message id. A WeakMap keyed on the provider object gives
+ * each one its own namespace and holds no reference that would keep a
+ * disconnected provider alive.
+ *
+ * Lifetime assumption: one provider instance means one mailbox. A provider
+ * rebuilt for the same mailbox (a reconnect) starts a fresh namespace and
+ * loses protection for the window — which is why a caller that knows its
+ * mailbox name should always supply it, as the MCP server does.
+ */
+const providerNamespaces = new WeakMap<object, string>();
+let nextProviderNamespace = 1;
+
+export function providerNamespace(provider: object | undefined): string {
+  if (!provider) return '';
+  let namespace = providerNamespaces.get(provider);
+  if (namespace === undefined) {
+    namespace = `provider#${nextProviderNamespace++}`;
+    providerNamespaces.set(provider, namespace);
+  }
+  return namespace;
 }
 
 let defaultLedger: SendLedger | undefined;

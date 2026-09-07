@@ -602,9 +602,13 @@ stuck -- replays the same approved instruction, and the second call looks exactl
 first one.
 
 `send_email`, `reply_to_email`, and `send_draft` therefore record each dispatch in an
-in-process ledger, keyed by a digest of what would actually be delivered (mailbox,
+in-process ledger, keyed by a digest of the effective action inputs -- mailbox,
 recipients, subject, rendered body, attachment contents, and the reply parent or draft
-id). A repeat within the window is refused before the provider is touched:
+id. (Effective *inputs*, not final wire bytes: a provider may transform a message on
+the way out, and Graph for instance truncates a subject at 255 characters, so two
+different inputs can leave as identical mail. The guard catches a replayed tool call,
+which is what actually happens.) A repeat within the window is refused before the
+delivery is dispatched:
 
 | Code | Meaning | What to do |
 |------|---------|------------|
@@ -618,9 +622,16 @@ never blocked. Anything else, including a code from a provider we have not seen,
 as unresolved: a wrongly-held message costs one blocked resend, a wrongly-released one
 costs a duplicate in somebody's inbox.
 
-To send the same message again on purpose, pass `allow_duplicate: true`. Operators can
-change the window with `AGENT_EMAIL_DUPLICATE_SEND_WINDOW_MS` (default `900000`); `0`
-disables the guard entirely.
+To send the same message again on purpose, pass `allow_duplicate: true`. It is an
+unconditional per-request bypass -- a replay that also carries the flag dispatches
+again, because the flag asserts that a person decided on this send. The forced attempt
+is recorded alongside the earlier one rather than replacing it, so if the override is
+rejected the original delivery still refuses an ordinary replay.
+
+Records are scoped to a mailbox: `mailbox` when the caller supplies one, otherwise the
+provider instance. Operators can change the window with
+`AGENT_EMAIL_DUPLICATE_SEND_WINDOW_MS` (default `900000`); `0` disables the guard
+entirely.
 
 The ledger lives in the server process and in memory. It closes the replay window that
 actually happens -- a retry inside a running server -- and does not survive restarting

@@ -7,6 +7,7 @@ import {
   resetDefaultSendLedger,
   resolveDuplicateSendWindowMs,
   isDeliveryProvenUnsent,
+  providerNamespace,
   DEFAULT_DUPLICATE_SEND_WINDOW_MS,
   DUPLICATE_SEND_IN_FLIGHT,
   DUPLICATE_SEND_BLOCKED,
@@ -160,6 +161,96 @@ describe('email-write/Send Ledger', () => {
     expect(clocked.claim(FP).ok).toBe(true);
   });
 
+  // --- Attempt ownership. Every case below dispatched a duplicate before the
+  // claim callbacks were bound to the attempt that produced them.
+
+  it('Scenario: A stale settlement cannot overwrite a newer attempt', () => {
+    const slow = ledger.claim(FP);
+    const forced = ledger.claim(FP, { force: true });
+    if (forced.ok) forced.settle({ success: true, messageId: 'B-delivered' });
+    // The first attempt finally comes back, rejected. It must settle itself
+    // only — before this fix it deleted whichever record held the key.
+    if (slow.ok) slow.settle({ success: false, errorCode: 'INVALID_REQUEST' });
+
+    expect(ledger.peek(FP)).toMatchObject({ state: 'delivered', messageId: 'B-delivered' });
+    expect(ledger.claim(FP).ok).toBe(false);
+  });
+
+  it('a stale release cannot withdraw a newer attempt', () => {
+    const slow = ledger.claim(FP);
+    ledger.claim(FP, { force: true });
+    if (slow.ok) slow.release();
+
+    expect(ledger.peek(FP)).toMatchObject({ state: 'in-flight' });
+    expect(ledger.claim(FP).ok).toBe(false);
+  });
+
+  it('a rejected override does not erase the delivery it was overriding', () => {
+    // Sequential, no concurrency needed. A delivered; the deliberate duplicate
+    // was rejected; an ordinary replay must still be refused.
+    const first = ledger.claim(FP);
+    if (first.ok) first.settle({ success: true, messageId: 'A-delivered' });
+
+    const forced = ledger.claim(FP, { force: true });
+    if (forced.ok) forced.settle({ success: false, errorCode: 'INVALID_REQUEST' });
+
+    const replay = ledger.claim(FP);
+    expect(replay.ok).toBe(false);
+    if (!replay.ok) expect(replay.prior.messageId).toBe('A-delivered');
+  });
+
+  it('keeps a success that lands after its reservation was pruned', () => {
+    let now = 0;
+    const clocked = new SendLedger({ windowMs: 100, now: () => now });
+    const claim = clocked.claim(FP);
+
+    now = 101;
+    clocked.claim('unrelated'); // prunes the aged in-flight reservation
+    if (claim.ok) claim.settle({ success: true, messageId: 'late' });
+
+    // The delivery happened. Dropping the outcome because the reservation
+    // aged out would admit an immediate replay of a message just sent.
+    expect(clocked.peek(FP)).toMatchObject({ state: 'delivered', messageId: 'late' });
+    expect(clocked.claim(FP).ok).toBe(false);
+  });
+
+  it('never evicts an in-flight reservation to stay under the size cap', () => {
+    // Evicting a live reservation drops cover for a send that is on the wire.
+    const small = new SendLedger({ windowMs: 60_000, maxEntries: 2 });
+    small.claim('a');
+    small.claim('b');
+    small.claim('c');
+
+    expect(small.peek('a')).toMatchObject({ state: 'in-flight' });
+    expect(small.claim('a').ok).toBe(false);
+    expect(small.size()).toBe(3); // deliberately over cap rather than unsafe
+  });
+
+  it('evicts the oldest settled attempt first when over the cap', () => {
+    let now = 1000;
+    const small = new SendLedger({ windowMs: 60_000, maxEntries: 2, now: () => now });
+    for (const fp of ['a', 'b', 'c']) {
+      const claim = small.claim(fp);
+      if (claim.ok) claim.settle({ success: true, messageId: fp });
+      now += 10;
+    }
+    expect(small.size()).toBe(2);
+    expect(small.peek('a')).toBeUndefined();
+    expect(small.peek('c')).toBeDefined();
+  });
+
+  it('reports the strongest evidence when a fingerprint carries several attempts', () => {
+    const delivered = ledger.claim(FP);
+    if (delivered.ok) delivered.settle({ success: true, messageId: 'went-out' });
+    ledger.claim(FP, { force: true }); // still in flight
+
+    const replay = ledger.claim(FP);
+    expect(replay.ok).toBe(false);
+    // "already delivered as X" answers the caller's question more decisively
+    // than "something is in flight".
+    if (!replay.ok) expect(replay.prior).toMatchObject({ state: 'delivered', messageId: 'went-out' });
+  });
+
   it('force re-claims for a deliberate duplicate and re-arms against ITS replay', () => {
     const claim = ledger.claim(FP);
     if (claim.ok) claim.settle({ success: true, messageId: 'm1' });
@@ -193,23 +284,21 @@ describe('email-write/Send Ledger', () => {
     expect(ledger.claim(FP).ok).toBe(false);
   });
 
-  it('evicts oldest entries beyond the size cap', () => {
-    const small = new SendLedger({ windowMs: 60_000, maxEntries: 3 });
-    for (const fp of ['a', 'b', 'c', 'd']) {
-      const claim = small.claim(fp);
-      if (claim.ok) claim.settle({ success: true, messageId: fp });
-    }
-    expect(small.size()).toBe(3);
-    expect(small.peek('a')).toBeUndefined();
-    expect(small.peek('d')).toBeDefined();
-  });
-
   it('admits everything when the window is zero', () => {
     const off = new SendLedger({ windowMs: 0 });
     expect(off.enabled).toBe(false);
     const first = off.claim(FP);
     if (first.ok) first.settle({ success: true, messageId: 'm1' });
     expect(off.claim(FP).ok).toBe(true);
+  });
+});
+
+describe('email-write/Provider Namespace', () => {
+  it('gives each provider instance its own namespace and is stable per instance', () => {
+    const a = {}, b = {};
+    expect(providerNamespace(a)).toBe(providerNamespace(a));
+    expect(providerNamespace(a)).not.toBe(providerNamespace(b));
+    expect(providerNamespace(undefined)).toBe('');
   });
 });
 

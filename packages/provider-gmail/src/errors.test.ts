@@ -44,3 +44,39 @@ describe('provider-gmail/Gmail Error Classification', () => {
     expect(getErrorStatus({ code: '429' })).toBe(429);
   });
 });
+
+describe('provider-gmail/Gmail Transport Classification', () => {
+  it('names a delivery whose connection never opened as unreachable, not a generic error', () => {
+    // Provably no request bytes were written. The distinction is load-bearing:
+    // the duplicate-send guard releases a proven non-delivery and holds an
+    // ambiguous one, and it cannot release a generic PROVIDER_ERROR because
+    // that code also covers failures that are not proven. Matches what the
+    // Graph provider already reports for the same condition.
+    const error = gmailProviderError(
+      Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+      'delivery',
+    );
+
+    expect(error.code).toBe('PROVIDER_UNREACHABLE');
+    expect(error.recoverable).toBe(false);
+  });
+
+  it('still reports an ambiguous delivery transport failure as unknown', () => {
+    const error = gmailProviderError(
+      Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+      'delivery',
+    );
+
+    expect(error.code).toBe('SEND_STATUS_UNKNOWN');
+  });
+
+  it('leaves non-delivery transport failures on the generic recoverable code', () => {
+    const error = gmailProviderError(
+      Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+      'idempotent-read',
+    );
+
+    expect(error.code).toBe('PROVIDER_ERROR');
+    expect(error.recoverable).toBe(true);
+  });
+});

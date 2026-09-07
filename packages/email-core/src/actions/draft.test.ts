@@ -1787,6 +1787,21 @@ describe('email-write/Duplicate Delivery Guard (send_draft)', () => {
     expect(second.error!.code).toBe('DRAFT_LOOKUP_FAILED');
   });
 
+  it('keeps the original delivery record when a forced resend aborts before dispatch', async () => {
+    // Forcing a consumed draft fails at the lookup, which releases the forced
+    // claim. That release must not take the original delivery with it, or an
+    // ordinary replay reports DRAFT_LOOKUP_FAILED instead of naming the
+    // message that already went out.
+    const draftId = await makeDraft();
+    const first = await sendDraftAction.run(ctx, { draft_id: draftId });
+    await sendDraftAction.run(ctx, { draft_id: draftId, allow_duplicate: true });
+
+    const replay = await sendDraftAction.run(ctx, { draft_id: draftId });
+
+    expect(replay.error!.code).toBe('DUPLICATE_SEND_BLOCKED');
+    expect(replay.messageId).toBe(first.messageId);
+  });
+
   it('lets allow_duplicate past the guard, leaving the real obstacle visible', async () => {
     // Sending consumes the draft, so a deliberate duplicate of a *draft* fails
     // on the draft being gone rather than on the guard. The flag bypasses the

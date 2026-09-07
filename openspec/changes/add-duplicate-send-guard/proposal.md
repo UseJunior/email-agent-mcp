@@ -39,8 +39,13 @@ current design has the state to notice.
   is safe and must not be blocked. Anything else — including an unrecognised code —
   is held as unresolved. The guard fails closed.
 - Add `allow_duplicate: true` to the three delivery actions as the deliberate escape
-  hatch. The guard is a wall against machine replay and a speed bump for a human who
-  has decided to send the same thing twice on purpose.
+  hatch. It is an unconditional per-request bypass: a replay that itself carries the
+  flag dispatches again, because the flag says a person decided on this send. It
+  admits an attempt *alongside* the existing records rather than replacing them, so a
+  rejected override cannot clear the delivery it was overriding.
+- Each attempt carries its own identity, and a claim's settle/release act only on the
+  attempt that produced them. Addressing the fingerprint alone let a slow attempt's
+  late rejection delete a newer attempt's successful record.
 - The guard is **on by default**, with no wiring required by an embedder. This is
   deliberate: `ActionContext.rateLimiter` is an optional injected interface that no
   shipped adapter ever constructs, so it is inert in production. A duplicate-send
@@ -58,8 +63,16 @@ current design has the state to notice.
 - Compatibility: additive. The new input field is optional and the new error codes are
   only reachable on a second identical call within the window, which previously
   delivered a duplicate.
-- Security: the ledger stores a salted digest of message content, never the content
-  itself, and never leaves the process.
+- Security: the ledger stores a SHA-256 digest of canonical message content, never
+  the content itself, and never leaves the process. The digest is unsalted — it is a
+  collision key, not a privacy control. (An earlier draft of this proposal said
+  "salted digest"; no salt was ever implemented, and the claim was wrong when
+  written. Adding one is a separate privacy decision, not a duplicate-detection
+  requirement.)
+- Namespace: the fingerprint is scoped by `ctx.mailboxName`, falling back to a
+  per-provider-instance id when the caller supplies none. Two mailboxes in one
+  process previously shared the empty key, so the second mailbox's first-ever send
+  was refused and handed the first mailbox's message id.
 - **Documented limitation:** the ledger is per-process and in-memory, so it does not
   survive an MCP server restart. It closes the replay window that actually occurs —
   the agent loop retrying inside a live server — and does not claim to close a

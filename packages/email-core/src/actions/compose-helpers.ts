@@ -14,6 +14,7 @@ import {
   computeSendFingerprint,
   duplicateSendError,
   getDefaultSendLedger,
+  providerNamespace,
 } from '../security/send-ledger.js';
 import type { SendClaim, SendFingerprintInput } from '../security/send-ledger.js';
 import type { EmailAddress, EmailMessage, OutboundAttachment } from '../types.js';
@@ -533,10 +534,14 @@ export function claimDelivery(
   allowDuplicate: boolean | undefined,
 ): DeliveryClaim {
   const ledger = ctx.sendLedger ?? getDefaultSendLedger();
+  // Namespace the fingerprint by mailbox. `mailboxName` is optional on
+  // ActionContext, and two mailboxes sharing the process default ledger under
+  // an empty key would collide — the second mailbox's first send refused, and
+  // handed the first mailbox's message id. Fall back to the provider instance.
   const fingerprint = computeSendFingerprint({
     ...fingerprintInput,
     action: actionName,
-    mailbox: ctx.mailboxName,
+    mailbox: ctx.mailboxName ?? providerNamespace(ctx.provider),
   });
   const result = ledger.claim(fingerprint, { force: allowDuplicate === true });
   if (result.ok) return { claim: result };
