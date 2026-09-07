@@ -23,6 +23,9 @@ import {
   DraftPreviewSchema,
   PreviewErrorSchema,
   pathSandbox,
+  claimDelivery,
+  settleClaimFromThrow,
+  AllowDuplicateSchema,
 } from './compose-helpers.js';
 
 const SendEmailInput = z.object({
@@ -41,6 +44,7 @@ const SendEmailInput = z.object({
   attachments: z.array(AttachmentInputSchema).optional()
     .describe('Files to attach. Each entry takes a sandboxed `path` or inline `base64`.'),
   scheduled_send_at: ScheduledSendAtSchema.optional(),
+  allow_duplicate: AllowDuplicateSchema.optional(),
 });
 
 const SendEmailOutput = z.object({
@@ -65,7 +69,7 @@ export const sendEmailAction: EmailAction<
   z.infer<typeof SendEmailOutput>
 > = {
   name: 'send_email',
-  description: 'Compose and send a new email. Gated by send allowlist. Draft mode bypasses allowlist. If a send fails with SEND_STATUS_UNKNOWN, the message may already have been delivered; do not resend without checking Sent Items.',
+  description: 'Compose and send a new email. Gated by send allowlist. Draft mode bypasses allowlist. If a send fails with SEND_STATUS_UNKNOWN, the message may already have been delivered; do not resend without checking Sent Items. An identical send repeated within the duplicate window is refused with a DUPLICATE_SEND_* code instead of delivering twice; pass allow_duplicate: true only when a human has decided to send the same message again.',
   input: SendEmailInput,
   output: SendEmailOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -201,12 +205,41 @@ export const sendEmailAction: EmailAction<
       attachments,
     };
 
+    // Reserve this delivery before touching the provider. Everything above
+    // this line can refuse the request without any chance of having sent it;
+    // everything below it can lose its acknowledgement, which is what a caller
+    // then replays.
+    const claimed = claimDelivery(
+      ctx,
+      'send_email',
+      {
+        to: parsed.to,
+        cc: parsed.cc,
+        subject: subject!,
+        body,
+        bodyHtml: outBodyHtml,
+        attachments,
+        scheduledSendAt,
+      },
+      input.allow_duplicate,
+    );
+    if ('duplicate' in claimed) return claimed.duplicate;
+    const { claim } = claimed;
+
     if (scheduledSendAt !== undefined) {
-      if (!ctx.provider.scheduleMessage) return scheduledSendNotSupportedError();
+      if (!ctx.provider.scheduleMessage) {
+        claim.settle({ success: false, errorCode: 'NOT_SUPPORTED' });
+        return scheduledSendNotSupportedError();
+      }
       try {
         // Do not retry the two-write draft→send operation as a unit: a lost
         // response after draft creation could otherwise queue a duplicate.
         const result = await ctx.provider.scheduleMessage(composeMessage, scheduledSendAt);
+        claim.settle({
+          success: result.success,
+          ...(result.messageId !== undefined ? { messageId: result.messageId } : {}),
+          ...(result.error?.code !== undefined ? { errorCode: result.error.code } : {}),
+        });
         if (
           ctx.rateLimiter
           && (result.success || result.error?.code === 'SCHEDULE_SEND_STATUS_UNKNOWN')
@@ -225,6 +258,7 @@ export const sendEmailAction: EmailAction<
           } : undefined,
         };
       } catch (err) {
+        settleClaimFromThrow(claim, err);
         return handleProviderError(err, 'SCHEDULE_SEND_FAILED');
       }
     }
@@ -237,6 +271,12 @@ export const sendEmailAction: EmailAction<
     // error instead (mirrors the scheduled-send branch above).
     try {
       const result = await ctx.provider.sendMessage(composeMessage);
+
+      claim.settle({
+        success: result.success,
+        ...(result.messageId !== undefined ? { messageId: result.messageId } : {}),
+        ...(result.error?.code !== undefined ? { errorCode: result.error.code } : {}),
+      });
 
       if (ctx.rateLimiter) {
         ctx.rateLimiter.recordUsage('send_email');
@@ -253,6 +293,7 @@ export const sendEmailAction: EmailAction<
         } : undefined,
       };
     } catch (err) {
+      settleClaimFromThrow(claim, err);
       const handled = handleProviderError(err, 'SEND_STATUS_UNKNOWN');
       if (ctx.rateLimiter && handled.error.code === 'SEND_STATUS_UNKNOWN') {
         ctx.rateLimiter.recordUsage('send_email');

@@ -1,6 +1,7 @@
 // Action registry — single source of truth for all email actions
 import { z } from 'zod';
 import type { EmailProvider } from '../providers/provider.js';
+import type { SendLedger } from '../security/send-ledger.js';
 import { listAttachmentsAction, downloadAttachmentAction } from './attachments.js';
 import { getThreadAction } from './conversation.js';
 import { createDraftAction, sendDraftAction, updateDraftAction } from './draft.js';
@@ -30,6 +31,14 @@ export interface ActionContext {
   deleteEnabled?: boolean;
   hardDeleteAllowed?: boolean;
   rateLimiter?: RateLimiter;
+  /**
+   * Duplicate-delivery guard. Optional only so tests can inject an isolated
+   * ledger — when absent the delivery actions fall back to the process default
+   * rather than skipping the check, because a guard an embedder has to wire is
+   * a guard that is off (see `rateLimiter` above, which no shipped adapter
+   * constructs).
+   */
+  sendLedger?: SendLedger;
 }
 
 export interface MailboxEntry {

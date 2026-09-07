@@ -10,6 +10,12 @@ import type { PathSandboxInput } from '../content/safe-path.js';
 import type { BodyFormat } from '../content/body-renderer.js';
 import { parseAddressList } from '../utils/address.js';
 import { validateAttachment, sanitizeFilename } from './attachments.js';
+import {
+  computeSendFingerprint,
+  duplicateSendError,
+  getDefaultSendLedger,
+} from '../security/send-ledger.js';
+import type { SendClaim, SendFingerprintInput } from '../security/send-ledger.js';
 import type { EmailAddress, EmailMessage, OutboundAttachment } from '../types.js';
 
 // --- Error shape used by all actions ---
@@ -491,4 +497,69 @@ export function handleProviderError(err: unknown, fallbackCode: string) {
       recoverable: false,
     },
   };
+}
+
+// --- claimDelivery ---
+
+/**
+ * The deliberate-duplicate escape hatch, shared by every delivery action.
+ *
+ * Worded for the agent reading the tool schema: the guard exists because an
+ * agent replaying a lost turn is the common case, so the flag has to read as a
+ * human decision rather than a retry knob.
+ */
+export const AllowDuplicateSchema = z.boolean()
+  .describe('Bypass the duplicate-delivery guard for this request. The guard refuses an identical delivery repeated within the duplicate window (default 15 minutes) so a replayed tool call cannot send the same message twice. Set true ONLY when a person has decided to deliberately send the same message again — never as a way to retry a call that failed.');
+
+export type DeliveryClaim =
+  | { claim: SendClaim }
+  | { duplicate: { success: false; messageId?: string; error: ActionError } };
+
+/**
+ * Reserve this delivery in the send ledger before touching the provider.
+ *
+ * Call AFTER every pre-dispatch gate (mailbox, allowlist, rate limit) and
+ * IMMEDIATELY BEFORE the provider call, so the reserved window is exactly the
+ * window in which an acknowledgement can be lost.
+ *
+ * On a collision the prior attempt's `messageId` is surfaced at the top level
+ * even though `success` is false: the caller asked whether this message went
+ * out, and the honest answer includes which message it already is.
+ */
+export function claimDelivery(
+  ctx: ActionContext,
+  actionName: string,
+  fingerprintInput: Omit<SendFingerprintInput, 'action' | 'mailbox'>,
+  allowDuplicate: boolean | undefined,
+): DeliveryClaim {
+  const ledger = ctx.sendLedger ?? getDefaultSendLedger();
+  const fingerprint = computeSendFingerprint({
+    ...fingerprintInput,
+    action: actionName,
+    mailbox: ctx.mailboxName,
+  });
+  const result = ledger.claim(fingerprint, { force: allowDuplicate === true });
+  if (result.ok) return { claim: result };
+  return {
+    duplicate: {
+      success: false,
+      ...(result.prior.messageId !== undefined ? { messageId: result.prior.messageId } : {}),
+      error: duplicateSendError(result.prior, actionName),
+    },
+  };
+}
+
+/**
+ * Settle a claim from a thrown provider error.
+ *
+ * Only a classified ProviderError carries a code we can reason about. An
+ * unclassified throw is settled with no code at all, which the ledger holds as
+ * unresolved — the fail-closed direction, because a throw after dispatch is
+ * exactly the case where we cannot prove the message did not go out.
+ */
+export function settleClaimFromThrow(claim: SendClaim, err: unknown): void {
+  claim.settle({
+    success: false,
+    ...(isProviderError(err) ? { errorCode: err.code } : {}),
+  });
 }

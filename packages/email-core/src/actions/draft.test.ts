@@ -8,6 +8,7 @@ import { sendEmailAction } from './send.js';
 import { replyToEmailAction } from './reply.js';
 import { buildDraftPreview, PREVIEW_BODY_LIMIT } from './compose-helpers.js';
 import { ProviderError } from '../providers/provider.js';
+import { SendLedger } from '../security/send-ledger.js';
 import type { ActionContext } from './registry.js';
 import type { EmailMessage } from '../types.js';
 
@@ -21,6 +22,10 @@ beforeEach(async () => {
   await mkdir(testDir, { recursive: true });
   ctx = {
     provider,
+    // A fresh ledger per test. Without it the process-default ledger is shared
+    // across cases, and two tests sending the same message collide as
+    // duplicates — which is the guard working, not a test bug.
+    sendLedger: new SendLedger(),
     sendAllowlist: { entries: ['*@allowed.com'] },
     safeDir: testDir,
   };
@@ -1709,5 +1714,91 @@ describe('email-write/Reply Scope Control', () => {
       expect.any(String),
       expect.objectContaining({ replyAll: false }),
     );
+  });
+});
+
+describe('email-write/Duplicate Delivery Guard (send_draft)', () => {
+  async function makeDraft(): Promise<string> {
+    const draft = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Draft to Send',
+      body: 'Body',
+    });
+    return draft.draftId!;
+  }
+
+  it('Scenario: Replayed draft send reports the duplicate, not a stale draft lookup', async () => {
+    const draftId = await makeDraft();
+
+    const first = await sendDraftAction.run(ctx, { draft_id: draftId });
+    expect(first.success).toBe(true);
+
+    const replay = await sendDraftAction.run(ctx, { draft_id: draftId });
+    expect(replay.error!.code).toBe('DUPLICATE_SEND_BLOCKED');
+    expect(replay.messageId).toBe(first.messageId);
+  });
+
+  it('does not block a different draft', async () => {
+    const a = await makeDraft();
+    const b = await makeDraft();
+
+    expect((await sendDraftAction.run(ctx, { draft_id: a })).success).toBe(true);
+    expect((await sendDraftAction.run(ctx, { draft_id: b })).success).toBe(true);
+  });
+
+  it('allows a resend after a failure that proves the draft was not delivered', async () => {
+    const draftId = await makeDraft();
+    let calls = 0;
+    const realSendDraft = provider.sendDraft.bind(provider);
+    provider.sendDraft = async (id: string) => {
+      calls++;
+      if (calls === 1) throw new ProviderError('INVALID_REQUEST', 'rejected', 'microsoft', false);
+      return realSendDraft(id);
+    };
+
+    expect((await sendDraftAction.run(ctx, { draft_id: draftId })).error!.code).toBe('INVALID_REQUEST');
+    expect((await sendDraftAction.run(ctx, { draft_id: draftId })).success).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  it('holds the draft after an ambiguous failure rather than letting a replay resend it', async () => {
+    const draftId = await makeDraft();
+    let calls = 0;
+    provider.sendDraft = async () => {
+      calls++;
+      throw new ProviderError('SEND_STATUS_UNKNOWN', 'response lost', 'test', false);
+    };
+
+    expect((await sendDraftAction.run(ctx, { draft_id: draftId })).error!.code).toBe('SEND_STATUS_UNKNOWN');
+    const replay = await sendDraftAction.run(ctx, { draft_id: draftId });
+
+    expect(calls).toBe(1);
+    expect(replay.error!.code).toBe('DUPLICATE_SEND_UNRESOLVED');
+  });
+
+  it('releases the reservation when the draft lookup fails before dispatch', async () => {
+    // The claim is taken before the lookup, so a lookup failure must release
+    // it — otherwise a typo in a draft id would poison that id for 15 minutes
+    // and report a duplicate that never happened.
+    const first = await sendDraftAction.run(ctx, { draft_id: 'no-such-draft' });
+    const second = await sendDraftAction.run(ctx, { draft_id: 'no-such-draft' });
+
+    expect(first.error!.code).toBe('DRAFT_LOOKUP_FAILED');
+    expect(second.error!.code).toBe('DRAFT_LOOKUP_FAILED');
+  });
+
+  it('lets allow_duplicate past the guard, leaving the real obstacle visible', async () => {
+    // Sending consumes the draft, so a deliberate duplicate of a *draft* fails
+    // on the draft being gone rather than on the guard. The flag bypasses the
+    // duplicate check; it does not conjure back a message that no longer
+    // exists, and the error the caller sees says which of those happened.
+    const draftId = await makeDraft();
+    await sendDraftAction.run(ctx, { draft_id: draftId });
+
+    const forced = await sendDraftAction.run(ctx, { draft_id: draftId, allow_duplicate: true });
+
+    expect(forced.success).toBe(false);
+    expect(forced.error!.code).toBe('DRAFT_LOOKUP_FAILED');
+    expect(forced.error!.code).not.toMatch(/^DUPLICATE_SEND_/);
   });
 });

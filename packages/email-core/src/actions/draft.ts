@@ -24,6 +24,9 @@ import {
   DraftPreviewSchema,
   PreviewErrorSchema,
   pathSandbox,
+  claimDelivery,
+  settleClaimFromThrow,
+  AllowDuplicateSchema,
 } from './compose-helpers.js';
 
 // --- Shared schemas ---
@@ -211,6 +214,7 @@ const SendDraftInput = z.object({
   draft_id: z.string(),
   mailbox: z.string().optional(),
   scheduled_send_at: ScheduledSendAtSchema.optional(),
+  allow_duplicate: AllowDuplicateSchema.optional(),
 });
 
 const SendDraftOutput = z.object({
@@ -232,7 +236,7 @@ export const sendDraftAction: EmailAction<
   z.infer<typeof SendDraftOutput>
 > = {
   name: 'send_draft',
-  description: 'Send a previously created draft. Enforces send allowlist before sending. Rate-limited. If a send fails with SEND_STATUS_UNKNOWN, the message may already have been delivered; do not resend without checking Sent Items.',
+  description: 'Send a previously created draft. Enforces send allowlist before sending. Rate-limited. If a send fails with SEND_STATUS_UNKNOWN, the message may already have been delivered; do not resend without checking Sent Items. Sending the same draft id twice within the duplicate window is refused with a DUPLICATE_SEND_* code instead of delivering twice; pass allow_duplicate: true only when a human has decided to send it again.',
   input: SendDraftInput,
   output: SendDraftOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -253,6 +257,24 @@ export const sendDraftAction: EmailAction<
       if (!ctx.provider.scheduleDraft) return scheduledSendNotSupportedError();
     }
 
+    // Reserve this delivery before ANY other work — see claimDelivery.
+    //
+    // A draft id IS the fingerprint here: the same draft sent twice is the same
+    // message twice. The claim goes ahead of the draft lookup deliberately,
+    // because a provider that consumed the draft on the first send makes the
+    // second lookup fail — and "cannot verify draft recipients" is a
+    // misleading answer to "did this already go out?". Every bail-out between
+    // here and dispatch releases the claim, so nothing that provably did not
+    // send can block the corrected call.
+    const claimed = claimDelivery(
+      ctx,
+      'send_draft',
+      { draftId: input.draft_id, scheduledSendAt },
+      input.allow_duplicate,
+    );
+    if ('duplicate' in claimed) return claimed.duplicate;
+    const { claim } = claimed;
+
     // Fetch draft to check recipients against allowlist (fail closed)
     let draftMessage;
     try {
@@ -261,6 +283,7 @@ export const sendDraftAction: EmailAction<
         { operation: 'idempotent-read' },
       );
     } catch (err) {
+      claim.release();
       return {
         success: false,
         error: {
@@ -280,6 +303,7 @@ export const sendDraftAction: EmailAction<
       ...(draftMessage.bcc?.map(a => a.email) ?? []),
     ];
     if (recipients.length === 0) {
+      claim.release();
       return {
         success: false,
         error: { code: 'NO_RECIPIENTS', message: 'Draft has no recipients', recoverable: false },
@@ -288,6 +312,7 @@ export const sendDraftAction: EmailAction<
 
     const allowlistError = checkSendAllowlist(recipients, ctx.sendAllowlist);
     if (allowlistError) {
+      claim.release();
       return {
         success: false,
         error: { code: 'ALLOWLIST_BLOCKED', message: allowlistError, recoverable: false },
@@ -297,6 +322,7 @@ export const sendDraftAction: EmailAction<
     // Check rate limit
     const rateLimitError = checkRateLimit(ctx.rateLimiter, 'send_draft');
     if (rateLimitError) {
+      claim.release();
       return rateLimitError;
     }
 
@@ -304,6 +330,11 @@ export const sendDraftAction: EmailAction<
       if (scheduledSendAt !== undefined) {
         // Capability presence was checked before draft lookup above.
         const result = await ctx.provider.scheduleDraft!(input.draft_id, scheduledSendAt);
+        claim.settle({
+          success: result.success,
+          ...(result.messageId !== undefined ? { messageId: result.messageId } : {}),
+          ...(result.error?.code !== undefined ? { errorCode: result.error.code } : {}),
+        });
         if (
           ctx.rateLimiter
           && (result.success || result.error?.code === 'SCHEDULE_SEND_STATUS_UNKNOWN')
@@ -330,6 +361,12 @@ export const sendDraftAction: EmailAction<
       // deliver duplicates. Fail fast instead.
       const result = await ctx.provider.sendDraft(input.draft_id);
 
+      claim.settle({
+        success: result.success,
+        ...(result.messageId !== undefined ? { messageId: result.messageId } : {}),
+        ...(result.error?.code !== undefined ? { errorCode: result.error.code } : {}),
+      });
+
       if (ctx.rateLimiter) {
         ctx.rateLimiter.recordUsage('send_draft');
       }
@@ -345,6 +382,7 @@ export const sendDraftAction: EmailAction<
         } : undefined,
       };
     } catch (err) {
+      settleClaimFromThrow(claim, err);
       const handled = handleProviderError(err, 'SEND_STATUS_UNKNOWN');
       if (ctx.rateLimiter && handled.error.code === 'SEND_STATUS_UNKNOWN') {
         ctx.rateLimiter.recordUsage('send_draft');

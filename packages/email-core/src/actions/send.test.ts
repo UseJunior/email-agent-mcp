@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { MockEmailProvider } from '../testing/mock-provider.js';
 import { sendEmailAction } from './send.js';
 import { ProviderError } from '../providers/provider.js';
+import { SendLedger, resetDefaultSendLedger } from '../security/send-ledger.js';
 import type { ActionContext } from './registry.js';
 
 let provider: MockEmailProvider;
@@ -17,6 +18,10 @@ beforeEach(async () => {
   await mkdir(testDir, { recursive: true });
   ctx = {
     provider,
+    // A fresh ledger per test. Without it the process-default ledger is shared
+    // across cases, and two tests sending the same message collide as
+    // duplicates — which is the guard working, not a test bug.
+    sendLedger: new SendLedger(),
     sendAllowlist: { entries: ['*@allowed.com'] },
     safeDir: testDir,
   };
@@ -697,5 +702,199 @@ describe('email-write/Send Address Parsing', () => {
     expect(result.error!.code).toBe('INVALID_ADDRESS');
     expect(result.error!.message).toContain('cc[1]');
     expect(provider.getDrafts().size).toBe(0);
+  });
+});
+
+describe('email-write/Duplicate Delivery Guard', () => {
+  const MESSAGE = {
+    to: 'alice@allowed.com',
+    subject: 'Quarterly update',
+    body: 'Numbers attached.',
+  };
+
+  it('Scenario: Replay after successful delivery is blocked', async () => {
+    const first = await sendEmailAction.run(ctx, MESSAGE);
+    expect(first.success).toBe(true);
+
+    const replay = await sendEmailAction.run(ctx, MESSAGE);
+
+    expect(replay.success).toBe(false);
+    expect(replay.error!.code).toBe('DUPLICATE_SEND_BLOCKED');
+    expect(replay.error!.recoverable).toBe(false);
+    // The caller asked whether this went out; the honest answer names which
+    // message it already is.
+    expect(replay.messageId).toBe(first.messageId);
+    // The provider was touched exactly once, which is the whole point.
+    expect(provider.getSentMessages()).toHaveLength(1);
+  });
+
+  it('Scenario: Replay after ambiguous outcome is blocked', async () => {
+    let calls = 0;
+    provider.sendMessage = async () => {
+      calls++;
+      throw new ProviderError('SEND_STATUS_UNKNOWN', 'response lost', 'test', false);
+    };
+
+    const first = await sendEmailAction.run(ctx, MESSAGE);
+    expect(first.error!.code).toBe('SEND_STATUS_UNKNOWN');
+
+    const replay = await sendEmailAction.run(ctx, MESSAGE);
+
+    expect(calls).toBe(1);
+    expect(replay.error!.code).toBe('DUPLICATE_SEND_UNRESOLVED');
+    expect(replay.error!.message).toContain('Sent Items');
+  });
+
+  it('Scenario: Concurrent identical send is blocked while in flight', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let calls = 0;
+    provider.sendMessage = async () => {
+      calls++;
+      await gate;
+      return { success: true, messageId: 'concurrent-1' };
+    };
+
+    const inFlight = sendEmailAction.run(ctx, MESSAGE);
+    // Second call arrives before the first has returned — the lost-ack replay
+    // in its most literal form.
+    const second = await sendEmailAction.run(ctx, MESSAGE);
+    release();
+    const first = await inFlight;
+
+    expect(first.success).toBe(true);
+    expect(second.error!.code).toBe('DUPLICATE_SEND_IN_FLIGHT');
+    expect(calls).toBe(1);
+  });
+
+  it('Scenario: Resend after a proven rejection is allowed', async () => {
+    let calls = 0;
+    provider.sendMessage = async () => {
+      calls++;
+      if (calls === 1) {
+        // 4xx-derived: the provider received AND rejected it, so nothing was
+        // delivered and a resend must not be blocked.
+        throw new ProviderError('INVALID_REQUEST', 'ErrorInvalidRecipients', 'microsoft', false);
+      }
+      return { success: true, messageId: 'retry-ok' };
+    };
+
+    const rejected = await sendEmailAction.run(ctx, MESSAGE);
+    expect(rejected.error!.code).toBe('INVALID_REQUEST');
+
+    const resend = await sendEmailAction.run(ctx, MESSAGE);
+    expect(resend.success).toBe(true);
+    expect(resend.messageId).toBe('retry-ok');
+    expect(calls).toBe(2);
+  });
+
+  it('Scenario: Unrecognized failure code is held as unresolved', async () => {
+    let calls = 0;
+    provider.sendMessage = async () => {
+      calls++;
+      throw new ProviderError('SOME_FUTURE_PROVIDER_CODE', 'who knows', 'test', false);
+    };
+
+    await sendEmailAction.run(ctx, MESSAGE);
+    const replay = await sendEmailAction.run(ctx, MESSAGE);
+
+    expect(calls).toBe(1);
+    expect(replay.error!.code).toBe('DUPLICATE_SEND_UNRESOLVED');
+  });
+
+  it('Scenario: A different message is not blocked', async () => {
+    // Negative control: a guard that blocks everything is not a guard. If this
+    // test ever passes for the wrong reason, the ones above prove nothing.
+    await sendEmailAction.run(ctx, MESSAGE);
+
+    const otherBody = await sendEmailAction.run(ctx, { ...MESSAGE, body: 'Numbers attached!' });
+    const otherRecipient = await sendEmailAction.run(ctx, { ...MESSAGE, to: 'bob@allowed.com' });
+    const otherSubject = await sendEmailAction.run(ctx, { ...MESSAGE, subject: 'Quarterly update v2' });
+
+    expect(otherBody.success).toBe(true);
+    expect(otherRecipient.success).toBe(true);
+    expect(otherSubject.success).toBe(true);
+    expect(provider.getSentMessages()).toHaveLength(4);
+  });
+
+  it('Scenario: Explicit duplicate override delivers', async () => {
+    await sendEmailAction.run(ctx, MESSAGE);
+    const forced = await sendEmailAction.run(ctx, { ...MESSAGE, allow_duplicate: true });
+
+    expect(forced.success).toBe(true);
+    expect(provider.getSentMessages()).toHaveLength(2);
+
+    // The deliberate duplicate re-arms the guard against its own replay.
+    const replay = await sendEmailAction.run(ctx, MESSAGE);
+    expect(replay.error!.code).toBe('DUPLICATE_SEND_BLOCKED');
+    expect(provider.getSentMessages()).toHaveLength(2);
+  });
+
+  it('Scenario: Guard disabled by window of zero', async () => {
+    ctx.sendLedger = new SendLedger({ windowMs: 0 });
+
+    await sendEmailAction.run(ctx, MESSAGE);
+    const replay = await sendEmailAction.run(ctx, MESSAGE);
+
+    expect(replay.success).toBe(true);
+    expect(provider.getSentMessages()).toHaveLength(2);
+  });
+
+  it('Scenario: Guard is active without embedder wiring', async () => {
+    // The production path: the MCP adapter builds an ActionContext with no
+    // sendLedger, so the actions must fall back to the process default rather
+    // than skipping the check. ActionContext.rateLimiter is the cautionary
+    // example — an optional interface no shipped adapter constructs, so the
+    // limit it describes does not exist in the product.
+    resetDefaultSendLedger();
+    try {
+      const unwired: ActionContext = {
+        provider,
+        sendAllowlist: { entries: ['*@allowed.com'] },
+        safeDir: testDir,
+      };
+
+      const first = await sendEmailAction.run(unwired, MESSAGE);
+      const replay = await sendEmailAction.run(unwired, MESSAGE);
+
+      expect(first.success).toBe(true);
+      expect(replay.error!.code).toBe('DUPLICATE_SEND_BLOCKED');
+      expect(provider.getSentMessages()).toHaveLength(1);
+    } finally {
+      resetDefaultSendLedger();
+    }
+  });
+
+  it('Scenario: A bail-out before dispatch does not block the corrected call', async () => {
+    // An allowlist refusal never touched the provider, so it must not leave a
+    // record that blocks the corrected send.
+    const blocked = await sendEmailAction.run(ctx, { ...MESSAGE, to: 'stranger@elsewhere.com' });
+    expect(blocked.error!.code).toBe('ALLOWLIST_BLOCKED');
+
+    const allowed = await sendEmailAction.run(ctx, MESSAGE);
+    expect(allowed.success).toBe(true);
+  });
+
+  it('does not guard the draft path — creating a draft delivers nothing', async () => {
+    const first = await sendEmailAction.run(ctx, { ...MESSAGE, draft: true });
+    const second = await sendEmailAction.run(ctx, { ...MESSAGE, draft: true });
+
+    expect(first.success).toBe(true);
+    expect(second.success).toBe(true);
+    expect(provider.getDrafts().size).toBe(2);
+  });
+
+  it('guards a scheduled send, and separately from the same message sent now', async () => {
+    const at = new Date(Date.now() + 3600_000).toISOString();
+
+    const scheduled = await sendEmailAction.run(ctx, { ...MESSAGE, scheduled_send_at: at });
+    expect(scheduled.success).toBe(true);
+
+    const replay = await sendEmailAction.run(ctx, { ...MESSAGE, scheduled_send_at: at });
+    expect(replay.error!.code).toBe('DUPLICATE_SEND_BLOCKED');
+
+    // Same bytes, different delivery time — a different decision, not a replay.
+    const immediate = await sendEmailAction.run(ctx, MESSAGE);
+    expect(immediate.success).toBe(true);
   });
 });
