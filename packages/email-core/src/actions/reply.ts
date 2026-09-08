@@ -16,6 +16,9 @@ import {
   DraftPreviewSchema,
   PreviewErrorSchema,
   pathSandbox,
+  claimDelivery,
+  settleClaimFromThrow,
+  AllowDuplicateSchema,
 } from './compose-helpers.js';
 
 const ReplyToEmailInput = z.object({
@@ -34,6 +37,7 @@ const ReplyToEmailInput = z.object({
     .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true.'),
   attachments: z.array(AttachmentInputSchema).optional()
     .describe('Files to attach. Each entry takes a sandboxed `path` or inline `base64`.'),
+  allow_duplicate: AllowDuplicateSchema.optional(),
 });
 
 const ReplyToEmailOutput = z.object({
@@ -117,7 +121,7 @@ export const replyToEmailAction: EmailAction<
   z.infer<typeof ReplyToEmailOutput>
 > = {
   name: 'reply_to_email',
-  description: 'Reply to an email within an existing thread. Default reply_all=true cc\'s the original thread; pass reply_all=false to reply only to the sender. Send path validates all effective recipients against the send allowlist; draft path bypasses. If a send fails with SEND_STATUS_UNKNOWN, the message may already have been delivered; do not resend without checking Sent Items.',
+  description: 'Reply to an email within an existing thread. Default reply_all=true cc\'s the original thread; pass reply_all=false to reply only to the sender. Send path validates all effective recipients against the send allowlist; draft path bypasses. If a send fails with SEND_STATUS_UNKNOWN, the message may already have been delivered; do not resend without checking Sent Items. An identical reply repeated within the duplicate window is refused with a DUPLICATE_SEND_* code instead of delivering twice; pass allow_duplicate: true only when a human has decided to send the same reply again.',
   input: ReplyToEmailInput,
   output: ReplyToEmailOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -223,6 +227,25 @@ export const replyToEmailAction: EmailAction<
       return rateLimitError;
     }
 
+    // Reserve this delivery before touching the provider — see claimDelivery.
+    // The draft branch above deliberately does not claim: creating a draft
+    // delivers nothing, so a repeat is not a duplicate send.
+    const claimed = claimDelivery(
+      ctx,
+      'reply_to_email',
+      {
+        cc: parsed.cc,
+        body: bodyPlain,
+        bodyHtml,
+        attachments,
+        parentMessageId: input.message_id,
+        replyAll: input.reply_all,
+      },
+      input.allow_duplicate,
+    );
+    if ('duplicate' in claimed) return claimed.duplicate;
+    const { claim } = claimed;
+
     try {
       // Exactly one provider attempt — replies deliver mail through
       // non-idempotent provider endpoints with no idempotency key, so an
@@ -233,6 +256,12 @@ export const replyToEmailAction: EmailAction<
         bodyHtml,
         replyAll: input.reply_all,
         attachments,
+      });
+
+      claim.settle({
+        success: result.success,
+        ...(result.messageId !== undefined ? { messageId: result.messageId } : {}),
+        ...(result.error?.code !== undefined ? { errorCode: result.error.code } : {}),
       });
 
       if (ctx.rateLimiter) {
@@ -250,6 +279,7 @@ export const replyToEmailAction: EmailAction<
         } : undefined,
       };
     } catch (err) {
+      settleClaimFromThrow(claim, err);
       const handled = handleProviderError(err, 'SEND_STATUS_UNKNOWN');
       if (ctx.rateLimiter && handled.error.code === 'SEND_STATUS_UNKNOWN') {
         ctx.rateLimiter.recordUsage('reply_to_email');

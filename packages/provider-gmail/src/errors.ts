@@ -72,6 +72,15 @@ export function gmailProviderError(
   }
 
   const dispatched = classifyTransportError(err) === 'dispatched-or-unknown';
-  const code = operation === 'delivery' && dispatched ? 'SEND_STATUS_UNKNOWN' : 'PROVIDER_ERROR';
+  // A delivery whose connection never opened provably wrote no request bytes,
+  // so name it as such rather than folding it into the generic PROVIDER_ERROR.
+  // The distinction is load-bearing downstream: the duplicate-send guard
+  // releases a proven non-delivery and holds an ambiguous one, and a generic
+  // code cannot be released because it also describes failures that are not
+  // proven. This mirrors what the Graph provider already reports for the same
+  // transport condition.
+  const code = operation === 'delivery'
+    ? (dispatched ? 'SEND_STATUS_UNKNOWN' : 'PROVIDER_UNREACHABLE')
+    : 'PROVIDER_ERROR';
   return new ProviderError(code, message, provider, operation !== 'delivery' && !dispatched);
 }

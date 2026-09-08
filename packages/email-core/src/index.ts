@@ -70,6 +70,31 @@ export {
   SendRateLimiter,
 } from './security/send-allowlist.js';
 export { WatchedAllowlist } from './security/watched-allowlist.js';
+export {
+  SendLedger,
+  computeSendFingerprint,
+  duplicateSendError,
+  getDefaultSendLedger,
+  resetDefaultSendLedger,
+  resolveDuplicateSendWindowMs,
+  isDeliveryProvenUnsent,
+  DELIVERY_PROVEN_UNSENT_CODES,
+  DEFAULT_DUPLICATE_SEND_WINDOW_MS,
+  MAX_SEND_LEDGER_ENTRIES,
+  DUPLICATE_SEND_WINDOW_ENV,
+  DUPLICATE_SEND_IN_FLIGHT,
+  DUPLICATE_SEND_BLOCKED,
+  DUPLICATE_SEND_UNRESOLVED,
+} from './security/send-ledger.js';
+export type {
+  SendAttempt,
+  SendAttemptState,
+  SendClaim,
+  SendOutcome,
+  ClaimResult,
+  SendFingerprintInput,
+  SendLedgerOptions,
+} from './security/send-ledger.js';
 export { recordActionMetric, getMetrics, resetMetrics } from './metrics.js';
 export { htmlToMarkdown, transformEmailContent } from './content/sanitize.js';
 export { readEmailAction, READ_HTML_BODY_LIMIT } from './actions/read.js';

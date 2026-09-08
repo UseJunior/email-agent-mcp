@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { MockEmailProvider } from '../testing/mock-provider.js';
 import { replyToEmailAction } from './reply.js';
 import { ProviderError } from '../providers/provider.js';
+import { SendLedger } from '../security/send-ledger.js';
 import type { ActionContext } from './registry.js';
 import type { EmailMessage } from '../types.js';
 
@@ -24,6 +25,10 @@ beforeEach(() => {
   });
   ctx = {
     provider,
+    // A fresh ledger per test. Without it the process-default ledger is shared
+    // across cases, and two tests sending the same message collide as
+    // duplicates — which is the guard working, not a test bug.
+    sendLedger: new SendLedger(),
     mailboxName: 'work',
     allMailboxes: [
       { name: 'work', emailAddress: 'me@company.com', provider, providerType: 'microsoft', isDefault: true, status: 'connected' },
@@ -588,5 +593,43 @@ describe('email-write/Delivery Failure Handling', () => {
     expect(callCount).toBe(1);
     expect(result.success).toBe(false);
     expect(result.error!.code).toBe('SEND_STATUS_UNKNOWN');
+  });
+});
+
+describe('email-write/Duplicate Delivery Guard (reply)', () => {
+  const REPLY = { message_id: VALID_MSG_ID, body: 'Thanks!' };
+
+  it('blocks an identical reply replayed after delivery', async () => {
+    const first = await replyToEmailAction.run(ctx, REPLY);
+    expect(first.success).toBe(true);
+
+    const replay = await replyToEmailAction.run(ctx, REPLY);
+    expect(replay.error!.code).toBe('DUPLICATE_SEND_BLOCKED');
+    expect(replay.messageId).toBe(first.messageId);
+  });
+
+  it('does not block a reply whose body differs', async () => {
+    await replyToEmailAction.run(ctx, REPLY);
+    const different = await replyToEmailAction.run(ctx, { ...REPLY, body: 'Thanks so much!' });
+    expect(different.success).toBe(true);
+  });
+
+  it('separates reply-all from sender-only, which reach different recipients', async () => {
+    await replyToEmailAction.run(ctx, REPLY);
+    const senderOnly = await replyToEmailAction.run(ctx, { ...REPLY, reply_all: false });
+    expect(senderOnly.success).toBe(true);
+  });
+
+  it('does not guard the reply-draft path — a draft delivers nothing', async () => {
+    const first = await replyToEmailAction.run(ctx, { ...REPLY, draft: true });
+    const second = await replyToEmailAction.run(ctx, { ...REPLY, draft: true });
+    expect(first.success).toBe(true);
+    expect(second.success).toBe(true);
+  });
+
+  it('delivers again under an explicit allow_duplicate', async () => {
+    await replyToEmailAction.run(ctx, REPLY);
+    const forced = await replyToEmailAction.run(ctx, { ...REPLY, allow_duplicate: true });
+    expect(forced.success).toBe(true);
   });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { EmailProvider } from '../providers/provider.js';
+import { ProviderError } from '../providers/provider.js';
 import { MockEmailProvider } from '../testing/mock-provider.js';
 import { sendDraftAction } from './draft.js';
 import type { ActionContext, RateLimiter } from './registry.js';
@@ -240,6 +241,58 @@ describe('email-write/Provider-Held Scheduled Delivery', () => {
       error: { code: 'SCHEDULE_SEND_STATUS_UNKNOWN', recoverable: false },
     });
     expect(rateLimiter.recordUsage).toHaveBeenCalledWith('send_email');
+  });
+
+  it('reports an unclassified scheduling throw as ambiguous, not as a terminal failure', async () => {
+    // Scheduling is a two-write draft→send. A throw with no provider
+    // classification cannot prove the submission was rejected, so telling the
+    // caller SCHEDULE_SEND_FAILED invited exactly the duplicate the scheduled
+    // path is meant to avoid. handleProviderError already states this rule for
+    // every delivery operation.
+    const provider = new MockEmailProvider();
+    provider.scheduleMessage = vi.fn().mockRejectedValue(new Error('lost acknowledgement'));
+    const rateLimiter: RateLimiter = {
+      checkLimit: vi.fn().mockReturnValue({ allowed: true }),
+      recordUsage: vi.fn(),
+    };
+
+    const result = await sendEmailAction.run({
+      ...actionContext(provider),
+      rateLimiter,
+    }, {
+      to: 'alice@example.com',
+      subject: 'Unclassified scheduling throw',
+      body: 'Body',
+      scheduled_send_at: futureAt(),
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      error: { code: 'SCHEDULE_SEND_STATUS_UNKNOWN', recoverable: false },
+    });
+    expect(rateLimiter.recordUsage).toHaveBeenCalledWith('send_email');
+  });
+
+  it('preserves a provider-classified scheduling rejection as terminal', async () => {
+    // Negative control for the change above: a code the provider DID classify
+    // must survive unchanged, or the fix would have blurred the very
+    // distinction it exists to keep.
+    const provider = new MockEmailProvider();
+    provider.scheduleMessage = vi.fn().mockRejectedValue(
+      new ProviderError('SCHEDULE_SEND_FAILED', 'Graph rejected the send', 'microsoft', false),
+    );
+
+    const result = await sendEmailAction.run(actionContext(provider), {
+      to: 'alice@example.com',
+      subject: 'Classified scheduling rejection',
+      body: 'Body',
+      scheduled_send_at: futureAt(),
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      error: { code: 'SCHEDULE_SEND_FAILED', recoverable: false },
+    });
   });
 });
 
