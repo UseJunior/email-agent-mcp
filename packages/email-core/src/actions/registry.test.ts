@@ -22,6 +22,7 @@ const EXPECTED_ACTION_NAMES = [
   'list_scheduled_sends',
   'list_attachments',
   'download_attachment',
+  'download_message',
   'label_email',
   'flag_email',
   'mark_read',

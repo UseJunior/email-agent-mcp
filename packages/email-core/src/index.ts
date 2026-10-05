@@ -32,6 +32,7 @@ export type {
   EmailSubscriber,
   EmailCategorizer,
   EmailAttachmentHandler,
+  EmailRawMessageReader,
   EmailFolder,
   EmailFolderManager,
   InboxRule,
@@ -42,7 +43,7 @@ export type {
   AuthManager,
   DraftReplyStatus,
 } from './providers/provider.js';
-export { ProviderError, AttachmentNotSupportedError, AttachmentNotFoundError } from './providers/provider.js';
+export { ProviderError, AttachmentNotSupportedError, AttachmentNotFoundError, MessageNotFoundError } from './providers/provider.js';
 export {
   isProviderError,
   normalizeProviderError,
@@ -116,7 +117,7 @@ export {
   validateScheduledSendAt,
 } from './actions/scheduling.js';
 export { getThreadAction } from './actions/conversation.js';
-export { listAttachmentsAction, downloadAttachmentAction } from './actions/attachments.js';
+export { listAttachmentsAction, downloadAttachmentAction, downloadMessageAction } from './actions/attachments.js';
 export { labelEmailAction, flagEmailAction, markReadAction, deleteEmailAction } from './actions/label.js';
 export { moveToFolderAction } from './actions/move.js';
 export {

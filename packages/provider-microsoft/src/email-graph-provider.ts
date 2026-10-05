@@ -29,6 +29,7 @@ import type {
 import {
   AttachmentNotSupportedError,
   AttachmentNotFoundError,
+  MessageNotFoundError,
   ProviderError,
   classifyHttpStatus,
   classifyTransportError,
@@ -221,6 +222,8 @@ export interface GraphApiClient {
   post(url: string, body?: unknown): Promise<{ id?: string; [key: string]: unknown }>;
   patch(url: string, body: unknown): Promise<void>;
   delete(url: string): Promise<void>;
+  /** GET a binary body (e.g. `/messages/{id}/$value`). Optional so test doubles need not implement it. */
+  getBytes?(url: string): Promise<Buffer>;
 }
 
 /** Delta query select fields for efficiency */
@@ -323,6 +326,18 @@ export class RealGraphApiClient implements GraphApiClient {
       throw await this.errorFrom(resp);
     }
     return resp.json() as Promise<{ value?: unknown[]; [key: string]: unknown }>;
+  }
+
+  async getBytes(url: string): Promise<Buffer> {
+    const token = await this.getToken();
+    const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
+    const resp = await this.fetchWithAuthRetry(fullUrl, {
+      headers: { Authorization: `Bearer ${token}`, Prefer: IMMUTABLE_ID_PREFER },
+    });
+    if (!resp.ok) {
+      throw await this.errorFrom(resp);
+    }
+    return Buffer.from(await resp.arrayBuffer());
   }
 
   async post(url: string, body?: unknown): Promise<{ id?: string; [key: string]: unknown }> {
@@ -674,6 +689,22 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       mimeType: response.contentType ?? 'application/octet-stream',
       size: response.size ?? content.length,
     };
+  }
+
+  // Raw RFC 822 MIME of the message as stored.
+  //   https://learn.microsoft.com/en-us/graph/outlook-get-mime-message
+  async getRawMessage(messageId: string): Promise<Buffer> {
+    if (typeof this.client.getBytes !== 'function') {
+      throw new Error('Graph client does not support binary GET');
+    }
+    try {
+      return await this.client.getBytes(`${this.basePath}/messages/${encodeGraphPathId(messageId)}/$value`);
+    } catch (err) {
+      if (err instanceof GraphApiError && err.status === 404) {
+        throw new MessageNotFoundError(`Message ${messageId} not found`);
+      }
+      throw err;
+    }
   }
 
   async applyLabels(messageId: string, labels: string[]): Promise<void> {

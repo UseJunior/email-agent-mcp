@@ -15,6 +15,7 @@ import type {
 import {
   ProviderError,
   AttachmentNotFoundError,
+  MessageNotFoundError,
   type EmailReader,
   type EmailSender,
   type EmailSubscriber,
@@ -34,6 +35,7 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSchedul
   private scheduledSends: ScheduledSend[] = [];
   private subscriptions: Map<string, (msg: EmailMessage) => void> = new Map();
   private attachmentData: Map<string, Buffer> = new Map();
+  private rawMessages: Map<string, Buffer> = new Map();
   private nextId = 1;
 
   // --- Setup helpers for tests ---
@@ -453,6 +455,17 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSchedul
     const msg = this.messages.find(m => m.id === messageId);
     if (!msg) throw new Error(`Message not found: ${messageId}`);
     return msg.attachments ?? [];
+  }
+
+  addRawMessage(messageId: string, raw: Buffer): void {
+    this.rawMessages.set(messageId, raw);
+  }
+
+  async getRawMessage(messageId: string): Promise<Buffer> {
+    this.maybeThrow();
+    const raw = this.rawMessages.get(messageId);
+    if (!raw) throw new MessageNotFoundError(`Message not found: ${messageId}`);
+    return raw;
   }
 
   async downloadAttachment(messageId: string, attachmentId: string): Promise<DownloadedAttachment> {

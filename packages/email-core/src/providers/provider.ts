@@ -66,6 +66,15 @@ export interface EmailAttachmentHandler {
   downloadAttachment(messageId: string, attachmentId: string): Promise<DownloadedAttachment>;
 }
 
+/**
+ * Raw RFC 822 export of a message exactly as the provider stores it (Graph
+ * `GET /messages/{id}/$value`, Gmail `format=raw`). Used by `download_message`
+ * to bank the as-received `.eml` for record-keeping.
+ */
+export interface EmailRawMessageReader {
+  getRawMessage(messageId: string): Promise<Buffer>;
+}
+
 export interface EmailFolder {
   id: string;
   displayName: string;
@@ -119,6 +128,7 @@ export type EmailProvider = EmailReader
   & Partial<EmailSubscriber>
   & Partial<EmailCategorizer>
   & Partial<EmailAttachmentHandler>
+  & Partial<EmailRawMessageReader>
   & Partial<EmailFolderManager>
   & Partial<EmailRuleManager>;
 
@@ -401,6 +411,16 @@ export class AttachmentNotFoundError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'AttachmentNotFoundError';
+  }
+}
+
+// Thrown by providers when the requested message does not exist (e.g. a 404
+// on the raw-MIME export). download_message remaps this to
+// { code: 'MESSAGE_NOT_FOUND' }.
+export class MessageNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MessageNotFoundError';
   }
 }
 

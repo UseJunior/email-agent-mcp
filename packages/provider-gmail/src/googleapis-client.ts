@@ -20,6 +20,11 @@ interface GmailMessagesApi {
     id: string;
     format: 'full';
   }): Promise<{ data?: GmailMessage }>;
+  get(args: {
+    userId: string;
+    id: string;
+    format: 'raw';
+  }): Promise<{ data?: { raw?: string | null } }>;
   attachments: {
     get(args: {
       userId: string;
@@ -188,6 +193,14 @@ export class GoogleapisGmailClient implements GmailApiClient {
       id: response.data.id,
       message: response.data.message,
     };
+  }
+
+  async getRawMessage(id: string): Promise<string> {
+    const response = await this.api.users.messages.get({ userId: 'me', id, format: 'raw' });
+    if (!response.data?.raw) {
+      throw new Error('Gmail API messages.get returned no raw payload');
+    }
+    return response.data.raw;
   }
 
   async getAttachment(messageId: string, attachmentId: string): Promise<{ data?: string; size?: number }> {

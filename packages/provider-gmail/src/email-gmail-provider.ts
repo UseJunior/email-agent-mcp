@@ -14,7 +14,7 @@ import type {
   OutboundAttachment,
   DraftReplyStatus,
 } from '@usejunior/email-core';
-import { AttachmentNotFoundError } from '@usejunior/email-core';
+import { AttachmentNotFoundError, MessageNotFoundError } from '@usejunior/email-core';
 import { gmailProviderError } from './errors.js';
 
 // Gmail label mapping
@@ -39,6 +39,8 @@ export interface GmailApiClient {
   getMessage(id: string): Promise<GmailMessage>;
   getDraft(draftId: string): Promise<{ id: string; message: GmailMessage }>;
   getAttachment(messageId: string, attachmentId: string): Promise<{ data?: string; size?: number }>;
+  /** Base64url RFC 822 bytes (`messages.get` with `format=raw`). Optional for older clients. */
+  getRawMessage?(id: string): Promise<string>;
   /**
    * Send a raw RFC 2822 message. Optional `threadId` routes the send into
    * an existing thread (used by reply flows). Existing implementations can
@@ -164,7 +166,7 @@ export class GmailEmailProvider {
       }
       throw err;
     }
-    const meta = findAttachmentMetadata(message.payload?.parts, attachmentId);
+    let meta = findAttachmentMetadata(message.payload?.parts, attachmentId);
 
     let content: Buffer;
     if (attachmentId.startsWith('part:')) {
@@ -187,6 +189,11 @@ export class GmailEmailProvider {
         throw new AttachmentNotFoundError(`Gmail attachment ${attachmentId} returned no data`);
       }
       content = Buffer.from(attachment.data, 'base64url');
+      // Gmail mints a fresh body.attachmentId on every messages.get, so the id
+      // a caller got from list_attachments usually no longer appears in the
+      // payload fetched above. Fall back to the one attachment part whose
+      // declared size matches the bytes; ambiguous matches stay unresolved.
+      meta ??= findAttachmentMetadataBySize(message.payload?.parts, attachment.size ?? content.length);
     }
 
     return {
@@ -195,6 +202,20 @@ export class GmailEmailProvider {
       mimeType: meta?.mimeType ?? 'application/octet-stream',
       size: content.length,
     };
+  }
+
+  async getRawMessage(messageId: string): Promise<Buffer> {
+    if (typeof this.client.getRawMessage !== 'function') {
+      throw new Error('Gmail client does not support raw message export');
+    }
+    try {
+      return Buffer.from(await this.client.getRawMessage(messageId), 'base64url');
+    } catch (err) {
+      if (isNotFoundError(err)) {
+        throw new MessageNotFoundError(`Gmail message ${messageId} not found`);
+      }
+      throw err;
+    }
   }
 
   async sendMessage(msg: ComposeMessage): Promise<SendResult> {
@@ -604,6 +625,27 @@ function findAttachmentMetadata(
   return {
     filename: deriveAttachmentFilename(found.part, found.path),
     mimeType: found.part.mimeType ?? 'application/octet-stream',
+  };
+}
+
+function findAttachmentMetadataBySize(
+  parts: GmailMessagePart[] | undefined,
+  size: number,
+): { filename: string; mimeType: string } | null {
+  const matches: Array<{ part: GmailMessagePart; path: string }> = [];
+  const walk = (list: GmailMessagePart[], pathPrefix: string): void => {
+    for (const [index, p] of list.entries()) {
+      const path = pathPrefix === '' ? String(index) : `${pathPrefix}.${index}`;
+      if (p.body?.attachmentId && p.body.size === size) matches.push({ part: p, path });
+      if (p.parts) walk(p.parts, path);
+    }
+  };
+  walk(parts ?? [], '');
+  if (matches.length !== 1) return null;
+  const [{ part, path }] = matches as [{ part: GmailMessagePart; path: string }];
+  return {
+    filename: deriveAttachmentFilename(part, path),
+    mimeType: part.mimeType ?? 'application/octet-stream',
   };
 }
 
