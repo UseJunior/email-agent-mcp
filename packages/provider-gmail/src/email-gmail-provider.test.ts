@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { GmailEmailProvider, type GmailApiClient } from './email-gmail-provider.js';
 import {
   AttachmentNotFoundError,
+  MessageNotFoundError,
   cancelScheduledSendAction,
   listScheduledSendsAction,
   sendDraftAction,
@@ -462,6 +463,46 @@ describe('provider-gmail/Attachment Retrieval', () => {
     expect(result.size).toBe(result.content.length);
   });
 
+  it('Scenario: downloadAttachment recovers filename by size when Gmail has rotated the attachment id', async () => {
+    const bytes = Buffer.from('%PDF-1.7 signed');
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue({
+        id: 'msg-1', threadId: 't-1',
+        payload: { headers: [], parts: [
+          { mimeType: 'text/plain', body: { data: 'aGk', size: 2 }, headers: [] },
+          { mimeType: 'application/pdf', filename: 'Signed.pdf', body: { attachmentId: 'fresh-id', size: bytes.length }, headers: [] },
+          { mimeType: 'image/png', filename: 'logo.png', body: { attachmentId: 'other-id', size: 999 }, headers: [] },
+        ] },
+      }),
+      getAttachment: vi.fn().mockResolvedValue({ data: bytes.toString('base64url'), size: bytes.length }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const result = await provider.downloadAttachment('msg-1', 'stale-id-from-list');
+
+    expect(result.filename).toBe('Signed.pdf');
+    expect(result.mimeType).toBe('application/pdf');
+  });
+
+  it('Scenario: downloadAttachment leaves metadata unresolved when the size match is ambiguous', async () => {
+    const bytes = Buffer.from('same');
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue({
+        id: 'msg-1', threadId: 't-1',
+        payload: { headers: [], parts: [
+          { mimeType: 'application/pdf', filename: 'a.pdf', body: { attachmentId: 'x', size: 4 }, headers: [] },
+          { mimeType: 'application/pdf', filename: 'b.pdf', body: { attachmentId: 'y', size: 4 }, headers: [] },
+        ] },
+      }),
+      getAttachment: vi.fn().mockResolvedValue({ data: bytes.toString('base64url'), size: 4 }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const result = await provider.downloadAttachment('msg-1', 'stale');
+
+    expect(result.filename).toBe('stale');
+  });
+
   it('Scenario: downloadAttachment falls back to inline part data for synthetic ids', async () => {
     const client = createMockGmailClient({
       getMessage: vi.fn().mockResolvedValue({
@@ -566,6 +607,26 @@ describe('provider-gmail/Attachment Retrieval', () => {
 
     await expect(provider.downloadAttachment('msg-deleted', 'part:0'))
       .rejects.toBeInstanceOf(AttachmentNotFoundError);
+  });
+
+  it('Scenario: getRawMessage decodes the base64url format=raw payload byte-for-byte (#169)', async () => {
+    const raw = Buffer.from('Subject: Signed\r\n\r\n\xff\xfe binary-ish body', 'latin1');
+    const client = createMockGmailClient({
+      getRawMessage: vi.fn().mockResolvedValue(raw.toString('base64url')),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    expect((await provider.getRawMessage('msg-1')).equals(raw)).toBe(true);
+    expect(client.getRawMessage).toHaveBeenCalledWith('msg-1');
+  });
+
+  it('Scenario: getRawMessage maps Gmail 404 to MessageNotFoundError', async () => {
+    const client = createMockGmailClient({
+      getRawMessage: vi.fn().mockRejectedValue({ code: 404 }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.getRawMessage('gone')).rejects.toBeInstanceOf(MessageNotFoundError);
   });
 
   it('Scenario: downloadAttachment propagates non-404 errors unchanged (action layer maps to PROVIDER_UNAVAILABLE)', async () => {

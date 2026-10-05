@@ -44,7 +44,7 @@ export interface PathSandbox {
 export type PathSandboxInput = string | PathSandbox | undefined;
 
 /** True when `target` is `base` itself or a descendant of it. */
-function isWithin(base: string, target: string): boolean {
+export function isWithin(base: string, target: string): boolean {
   if (target === base) return true;
   const rel = relative(base, target);
   return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
@@ -56,7 +56,7 @@ function isWithin(base: string, target: string): boolean {
  * dropped from the authorization set rather than falling back to its literal
  * path, so an unresolvable root never authorizes a read.
  */
-async function canonicalize(dir: string): Promise<string | null> {
+export async function canonicalize(dir: string): Promise<string | null> {
   try {
     return await realpath(dir);
   } catch {
@@ -105,7 +105,7 @@ export function parseAllowedDirs(
 }
 
 /** Normalize the sandbox shorthand into an ordered, deduplicated root list. */
-function rootsOf(sandbox: PathSandboxInput): string[] {
+export function rootsOf(sandbox: PathSandboxInput): string[] {
   const { safeDir, allowedDirs } =
     typeof sandbox === 'string' ? { safeDir: sandbox, allowedDirs: undefined } : (sandbox ?? {});
 
@@ -222,7 +222,7 @@ export async function assertPathInSafeDir(
  * gave no indication that configuration could permit the path, leaving callers
  * to guess (or to stage confidential files inside the working directory).
  */
-function rootsHint(roots: string[]): string {
+export function rootsHint(roots: string[]): string {
   const tried = roots.length === 1 ? roots[0] : `tried: ${roots.join(', ')}`;
   return ` (${tried}); set ${ALLOWED_DIRS_ENV} to allow other directories`;
 }

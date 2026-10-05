@@ -76,7 +76,7 @@ gemini extensions install https://github.com/UseJunior/email-agent-mcp
 
 ## Tool Reference
 
-Agent Email exposes 26 MCP tools:
+Agent Email exposes 27 MCP tools:
 
 | Tool | Description | Type |
 |------|-------------|------|
@@ -87,7 +87,8 @@ Agent Email exposes 26 MCP tools:
 | `get_mailbox_status` | Connection status and warnings | read |
 | `get_thread` | Full conversation context | read |
 | `list_attachments` | List attachment metadata for an email | read |
-| `download_attachment` | Download a file attachment as base64 | read |
+| `download_attachment` | Download a file attachment as base64, or save it to a sandboxed directory with `save_to` | read |
+| `download_message` | Save a whole message as a raw `.eml` file to a sandboxed directory | read |
 | `send_email` | Send new email (allowlist-gated) | write |
 | `reply_to_email` | Reply with RFC threading | write |
 | `create_draft` | Create email draft | write |

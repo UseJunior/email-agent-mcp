@@ -201,7 +201,7 @@ you control the grant.
 
 ### Tools
 
-The `full` profile exposes 26 MCP tools; `observe` omits every tool whose action
+The `full` profile exposes 27 MCP tools; `observe` omits every tool whose action
 is marked as mailbox-mutating:
 
 | Tool | Description | Type |
@@ -213,7 +213,8 @@ is marked as mailbox-mutating:
 | `get_mailbox_status` | Connection status and warnings | read |
 | `get_thread` | Full conversation context | read |
 | `list_attachments` | List attachment metadata for an email | read |
-| `download_attachment` | Download a file attachment as base64 | read |
+| `download_attachment` | Download a file attachment as base64, or save it to a sandboxed directory with `save_to` | read |
+| `download_message` | Save a whole message as a raw `.eml` file to a sandboxed directory | read |
 | `send_email` | Send new email (allowlist-gated) | write |
 | `reply_to_email` | Reply within thread (allowlist-gated on send) | write |
 | `create_draft` | Create email draft | write |
@@ -436,6 +437,39 @@ directory *inside* an allowed root between the two can still redirect the read;
 only allowlist roots whose ancestors are not writable by untrusted users. The
 final file is opened with `O_NOFOLLOW`, so the file itself cannot be swapped for
 a symlink after validation.
+
+### Saving attachments and messages to disk
+
+`download_attachment` returns inline base64 by default (5 MB default cap, 25 MB
+ceiling). Pass `save_to` to have the server write the file instead. You get back
+only metadata, so large attachments (screen recordings, audio, big PDFs) never
+pass through the agent's context:
+
+```json
+{ "message_id": "…", "attachment_id": "…", "save_to": "/Users/you/Downloads/records" }
+```
+
+```json
+{ "success": true, "path": "/Users/you/Downloads/records/Signed_Agreement.pdf",
+  "filename": "Signed_Agreement.pdf", "original_filename": "Signed Agreement.pdf",
+  "mimeType": "application/pdf", "size": 782957, "sha256": "…" }
+```
+
+`download_message` writes a message as received, as raw RFC 822 MIME (Graph
+`/$value`, Gmail `format=raw`), to `<subject>.eml` and returns the same
+metadata. Use it to keep a record copy next to the attachments.
+
+`save_to` names a **directory** and resolves exactly like `body_file` and
+`attachments[].path`. Relative paths resolve against `EMAIL_MCP_SAFE_DIR`, and
+`AGENT_EMAIL_ALLOWED_DIRS` roots need absolute paths. `..`, a leading `~`, and
+symlinks that escape the sandbox are rejected. Missing subdirectories are
+created. An existing file is never overwritten: a name collision gets a numeric
+suffix (`report.pdf`, `report-1.pdf`, …). Files are created with mode `0600`.
+`size` and `sha256` describe the exact bytes written, which can differ slightly
+from the size `list_attachments` reports, since providers count MIME
+overhead. With `save_to`, the default and ceiling for `max_size_mb` are 150 MB.
+An inline download over the cap fails with `ATTACHMENT_TOO_LARGE` and a hint
+to use `save_to`.
 
 ## Provider Support
 

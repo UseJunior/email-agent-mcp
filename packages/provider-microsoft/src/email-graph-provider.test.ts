@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { GraphEmailProvider, GraphApiError, RealGraphApiClient, simplifySearchQuery, type GraphApiClient } from './email-graph-provider.js';
-import { AttachmentNotSupportedError, AttachmentNotFoundError } from '@usejunior/email-core';
+import { AttachmentNotSupportedError, AttachmentNotFoundError, MessageNotFoundError } from '@usejunior/email-core';
 
 // Linux CI runners do not provide libsecret, so auth imports must not load the real cache plugin.
 vi.mock('@azure/identity-cache-persistence', () => ({
@@ -547,6 +547,25 @@ describe('provider-microsoft/Attachment Download', () => {
     const provider = new GraphEmailProvider(client);
 
     await expect(provider.downloadAttachment('msg-1', 'att-x')).rejects.toBeInstanceOf(GraphApiError);
+  });
+
+  it('Scenario: getRawMessage fetches /$value bytes for the encoded message id (#169)', async () => {
+    const raw = Buffer.from('MIME-Version: 1.0\r\nSubject: Signed\r\n\r\nbody');
+    const getBytes = vi.fn().mockResolvedValue(raw);
+    const provider = new GraphEmailProvider(createMockClient({ getBytes }));
+
+    const result = await provider.getRawMessage('AAMk/msg+id=');
+
+    expect(result.equals(raw)).toBe(true);
+    expect(getBytes).toHaveBeenCalledWith(expect.stringMatching(/\/messages\/AAMk%2Fmsg%2Bid%3D\/\$value$/));
+  });
+
+  it('Scenario: getRawMessage maps Graph 404 to MessageNotFoundError', async () => {
+    const provider = new GraphEmailProvider(createMockClient({
+      getBytes: vi.fn().mockRejectedValue(new GraphApiError(404, '{"error":{"code":"ErrorItemNotFound"}}')),
+    }));
+
+    await expect(provider.getRawMessage('gone')).rejects.toBeInstanceOf(MessageNotFoundError);
   });
 
   it('Scenario: downloadAttachment rejects malformed base64 in contentBytes', async () => {
@@ -2210,6 +2229,28 @@ describe('provider-microsoft/Graph API Client', () => {
     );
 
     vi.unstubAllGlobals();
+  });
+});
+
+describe('provider-microsoft/RealGraphApiClient getBytes', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('returns the response body as raw bytes with auth and immutable-id headers', async () => {
+    const bytes = new Uint8Array([0x46, 0x72, 0x6f, 0x6d, 0xff]);
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200, arrayBuffer: async () => bytes.buffer,
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const client = new RealGraphApiClient(async () => 'token-123');
+    const result = await client.getBytes('/me/messages/msg-1/$value');
+
+    expect(Buffer.from(bytes).equals(result)).toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith('https://graph.microsoft.com/v1.0/me/messages/msg-1/$value', {
+      headers: { Authorization: 'Bearer token-123', Prefer: 'IdType="ImmutableId"' },
+    });
   });
 });
 

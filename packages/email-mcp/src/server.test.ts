@@ -1,11 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { deleteEmailAction, EMAIL_ACTIONS, sendEmailAction } from '@usejunior/email-core';
+import { deleteEmailAction, downloadAttachmentAction, EMAIL_ACTIONS, sendEmailAction } from '@usejunior/email-core';
 import {
   actionsToMcpTools,
   handleToolCall,
@@ -283,6 +283,34 @@ describe('mcp-transport/stdio Transport', () => {
     expect(Buffer.from(resourceContent.resource.blob!, 'base64').equals(PAYLOAD)).toBe(true);
   });
 
+  it('Scenario: download_attachment with save_to returns metadata only — no resource blob, no base64 (#169)', async () => {
+    const workDir = await realpath(await mkdtemp(join(tmpdir(), 'mcp-save-to-')));
+    try {
+      const PAYLOAD = Buffer.from('%PDF-1.7 e-signed record');
+      const provider = {
+        downloadAttachment: async () => ({
+          content: PAYLOAD, filename: 'Signed Agreement.pdf', mimeType: 'application/pdf', size: PAYLOAD.length,
+        }),
+      };
+
+      const result = await handleToolCall(
+        [downloadAttachmentAction as unknown as EmailActionDef],
+        { provider, safeDir: workDir },
+        'download_attachment',
+        { message_id: 'msg-1', attachment_id: 'att-1', save_to: 'records' },
+      );
+
+      expect(result.content).toHaveLength(1);
+      const text = (result.content[0] as { text: string }).text;
+      expect(text).not.toContain(PAYLOAD.toString('base64'));
+      const metadata = JSON.parse(text);
+      expect(metadata.path).toBe(join(workDir, 'records', 'Signed_Agreement.pdf'));
+      expect((await readFile(metadata.path)).equals(PAYLOAD)).toBe(true);
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+    }
+  });
+
   it('Scenario: download_attachment failure case still uses single text envelope', async () => {
     const downloadActions: EmailActionDef[] = [
       {
@@ -429,8 +457,8 @@ describe('mcp-transport/Lazy Provider State', () => {
     // No init has been triggered — state is still 'pending'.
     const actions = await buildLazyActions(state, noAllowlist);
 
-    // 5 state-aware tools + 21 derived email-core actions = 26 tools, no auth performed.
-    expect(actions.length).toBe(26);
+    // 5 state-aware tools + 22 derived email-core actions = 27 tools, no auth performed.
+    expect(actions.length).toBe(27);
     expect(state.status).toBe('pending');
     expect(state.initPromise).toBeNull();
     expect(state.mailboxes).toEqual([]);
@@ -440,6 +468,7 @@ describe('mcp-transport/Lazy Provider State', () => {
     expect(tools.map(t => t.name)).toContain('get_mailbox_status');
     expect(tools.map(t => t.name)).toContain('list_attachments');
     expect(tools.map(t => t.name)).toContain('download_attachment');
+    expect(tools.map(t => t.name)).toContain('download_message');
     expect(tools.map(t => t.name)).toContain('send_email');
     expect(tools.map(t => t.name)).toContain('list_scheduled_sends');
     expect(tools.map(t => t.name)).toContain('cancel_scheduled_send');

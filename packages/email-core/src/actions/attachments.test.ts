@@ -1,6 +1,10 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { MockEmailProvider } from '../testing/mock-provider.js';
-import { listAttachmentsAction, downloadAttachmentAction, detectMimeType, validateAttachment, sanitizeFilename, ZIP_CONTAINER_TYPES } from './attachments.js';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { listAttachmentsAction, downloadAttachmentAction, downloadMessageAction, detectMimeType, validateAttachment, sanitizeFilename, ZIP_CONTAINER_TYPES } from './attachments.js';
 import { AttachmentNotSupportedError, AttachmentNotFoundError } from '../providers/provider.js';
 import type { ActionContext } from './registry.js';
 
@@ -244,6 +248,181 @@ describe('email-attachments/Download Attachment', () => {
 
     expect(result.success).toBe(true);
     expect(downloadSpy).toHaveBeenCalledWith('msg-inline', PART_ID);
+  });
+});
+
+describe('email-attachments/Save Attachment To Disk (#169)', () => {
+  let workDir: string;
+  let saveCtx: ActionContext;
+  const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
+
+  beforeEach(async () => {
+    workDir = await realpath(await mkdtemp(join(tmpdir(), 'dl-save-')));
+    saveCtx = { provider, safeDir: workDir };
+  });
+
+  afterEach(async () => {
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  function addAttachment(id: string, filename: string, mimeType: string, bytes: Buffer) {
+    provider.addMessage({
+      id: `msg-${id}`,
+      hasAttachments: true,
+      attachments: [{ id, filename, mimeType, size: bytes.length, isInline: false }],
+    });
+    provider.addAttachmentData(`msg-${id}`, id, bytes);
+  }
+
+  it('Scenario: inline response is unchanged when save_to is omitted', async () => {
+    const bytes = Buffer.from('%PDF-1.4 inline');
+    addAttachment('a1', 'inline.pdf', 'application/pdf', bytes);
+    const result = await downloadAttachmentAction.run(saveCtx, { message_id: 'msg-a1', attachment_id: 'a1' });
+    expect(result.base64).toBe(bytes.toString('base64'));
+    expect(result.path).toBeUndefined();
+    expect(await readdir(workDir)).toEqual([]);
+  });
+
+  it('Scenario: a 15 MB video saved with save_to matches SHA-256 and returns metadata only', async () => {
+    const bytes = Buffer.alloc(15 * 1024 * 1024, 7);
+    addAttachment('vid', 'Screen Recording.mov', 'video/quicktime', bytes);
+
+    const result = await downloadAttachmentAction.run(saveCtx, {
+      message_id: 'msg-vid',
+      attachment_id: 'vid',
+      save_to: 'attachments',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.base64).toBeUndefined();
+    expect(result.path).toBe(join(workDir, 'attachments', 'Screen_Recording.mov'));
+    expect(result.mimeType).toBe('video/quicktime');
+    const onDisk = await readFile(result.path!);
+    expect(result.size).toBe(onDisk.length);
+    expect(result.sha256).toBe(sha(onDisk));
+    expect(onDisk.equals(bytes)).toBe(true);
+  });
+
+  it('Scenario: inline download above the cap is refused with a save_to hint', async () => {
+    addAttachment('big', 'big.bin', 'application/octet-stream', Buffer.alloc(6 * 1024 * 1024));
+    const result = await downloadAttachmentAction.run(saveCtx, { message_id: 'msg-big', attachment_id: 'big' });
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('ATTACHMENT_TOO_LARGE');
+    expect(result.error?.message).toMatch(/save_to/);
+    expect(result.error?.recoverable).toBe(true);
+    expect(result.base64).toBeUndefined();
+  });
+
+  it('Scenario: inline max_size_mb above the inline ceiling requires save_to', async () => {
+    addAttachment('c1', 'c.pdf', 'application/pdf', Buffer.from('x'));
+    const result = await downloadAttachmentAction.run(saveCtx, {
+      message_id: 'msg-c1', attachment_id: 'c1', max_size_mb: 100,
+    });
+    expect(result.error?.code).toBe('INVALID_ARGUMENT');
+  });
+
+  it('Scenario: save_to honours an explicit max_size_mb', async () => {
+    addAttachment('d1', 'd.bin', 'application/octet-stream', Buffer.alloc(2 * 1024 * 1024));
+    const result = await downloadAttachmentAction.run(saveCtx, {
+      message_id: 'msg-d1', attachment_id: 'd1', save_to: '.', max_size_mb: 1,
+    });
+    expect(result.error?.code).toBe('ATTACHMENT_TOO_LARGE');
+    expect(result.error?.recoverable).toBe(false);
+    expect(await readdir(workDir)).toEqual([]);
+  });
+
+  it('Scenario: collisions are suffixed, never overwritten', async () => {
+    addAttachment('e1', 'Signed.pdf', 'application/pdf', Buffer.from('%PDF one'));
+    const first = await downloadAttachmentAction.run(saveCtx, { message_id: 'msg-e1', attachment_id: 'e1', save_to: '.' });
+    const second = await downloadAttachmentAction.run(saveCtx, { message_id: 'msg-e1', attachment_id: 'e1', save_to: '.' });
+    expect(first.filename).toBe('Signed.pdf');
+    expect(second.filename).toBe('Signed-1.pdf');
+  });
+
+  it('Scenario: caller filename is sanitized and cannot escape the directory', async () => {
+    addAttachment('f1', 'x.pdf', 'application/pdf', Buffer.from('%PDF'));
+    const result = await downloadAttachmentAction.run(saveCtx, {
+      message_id: 'msg-f1', attachment_id: 'f1', save_to: 'out', filename: '../../etc/passwd',
+    });
+    expect(result.success).toBe(true);
+    expect(result.path!.startsWith(join(workDir, 'out') + '/')).toBe(true);
+    expect(result.filename).not.toContain('/');
+  });
+
+  it('Scenario: filename without save_to is rejected', async () => {
+    addAttachment('g1', 'g.pdf', 'application/pdf', Buffer.from('%PDF'));
+    const result = await downloadAttachmentAction.run(saveCtx, { message_id: 'msg-g1', attachment_id: 'g1', filename: 'x.pdf' });
+    expect(result.error?.code).toBe('INVALID_ARGUMENT');
+  });
+
+  it('Scenario: path confinement errors surface before any download', async () => {
+    const spy = vi.spyOn(provider, 'downloadAttachment');
+    const result = await downloadAttachmentAction.run(saveCtx, {
+      message_id: 'msg-x', attachment_id: 'x', save_to: '/etc',
+    });
+    expect(result.error?.code).toBe('PATH_TRAVERSAL');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: provider errors in save mode map like inline mode', async () => {
+    vi.spyOn(provider, 'downloadAttachment').mockRejectedValue(new AttachmentNotFoundError('gone'));
+    const result = await downloadAttachmentAction.run(saveCtx, { message_id: 'm', attachment_id: 'a', save_to: '.' });
+    expect(result.error?.code).toBe('ATTACHMENT_NOT_FOUND');
+    expect(await readdir(workDir)).toEqual([]);
+  });
+});
+
+describe('email-attachments/Download Message (#169)', () => {
+  let workDir: string;
+  let saveCtx: ActionContext;
+  const RAW = Buffer.from('From: a@example.com\r\nSubject: Signed\r\n\r\nbody\r\n');
+
+  beforeEach(async () => {
+    workDir = await realpath(await mkdtemp(join(tmpdir(), 'dl-msg-')));
+    saveCtx = { provider, safeDir: workDir };
+  });
+
+  afterEach(async () => {
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  it('Scenario: writes the as-received MIME named after the subject', async () => {
+    provider.addMessage({ id: 'm1', subject: 'Completed: Agreement v2.1' });
+    provider.addRawMessage('m1', RAW);
+
+    const result = await downloadMessageAction.run(saveCtx, { message_id: 'm1', save_to: 'records' });
+
+    expect(result.success).toBe(true);
+    expect(result.filename).toBe('Completed_Agreement_v2.1.eml');
+    expect(result.mimeType).toBe('message/rfc822');
+    const onDisk = await readFile(result.path!);
+    expect(onDisk.equals(RAW)).toBe(true);
+    expect(result.sha256).toBe(createHash('sha256').update(RAW).digest('hex'));
+    expect(result.size).toBe(RAW.length);
+  });
+
+  it('Scenario: an explicit filename always ends in .eml', async () => {
+    provider.addRawMessage('m2', RAW);
+    const result = await downloadMessageAction.run(saveCtx, { message_id: 'm2', save_to: '.', filename: 'record copy' });
+    expect(result.filename).toBe('record_copy.eml');
+  });
+
+  it('Scenario: missing message maps to MESSAGE_NOT_FOUND and writes nothing', async () => {
+    const result = await downloadMessageAction.run(saveCtx, { message_id: 'nope', save_to: '.' });
+    expect(result.error?.code).toBe('MESSAGE_NOT_FOUND');
+    expect(await readdir(workDir)).toEqual([]);
+  });
+
+  it('Scenario: NOT_SUPPORTED when the provider has no raw export', async () => {
+    const stubCtx: ActionContext = { provider: {} as never, safeDir: workDir };
+    const result = await downloadMessageAction.run(stubCtx, { message_id: 'm', save_to: '.' });
+    expect(result.error?.code).toBe('NOT_SUPPORTED');
+  });
+
+  it('Scenario: save_to outside the sandbox is rejected', async () => {
+    provider.addRawMessage('m3', RAW);
+    const result = await downloadMessageAction.run(saveCtx, { message_id: 'm3', save_to: '../elsewhere' });
+    expect(result.error?.code).toBe('PATH_TRAVERSAL');
   });
 });
 

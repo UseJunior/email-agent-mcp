@@ -2,7 +2,7 @@
 import { z } from 'zod';
 import type { EmailProvider } from '../providers/provider.js';
 import type { SendLedger } from '../security/send-ledger.js';
-import { listAttachmentsAction, downloadAttachmentAction } from './attachments.js';
+import { listAttachmentsAction, downloadAttachmentAction, downloadMessageAction } from './attachments.js';
 import { getThreadAction } from './conversation.js';
 import { createDraftAction, sendDraftAction, updateDraftAction } from './draft.js';
 import { listFoldersAction, createFolderAction, deleteFolderAction } from './folders.js';
@@ -26,6 +26,7 @@ export interface ActionContext {
   /**
    * Extra absolute roots that caller-supplied `body_file` / attachment paths
    * may also resolve within, beyond `safeDir` (see AGENT_EMAIL_ALLOWED_DIRS).
+   * `save_to` destinations for downloaded files resolve under the same roots.
    */
   allowedDirs?: readonly string[];
   deleteEnabled?: boolean;
@@ -92,6 +93,7 @@ export const EMAIL_ACTIONS: readonly EmailAction<any, any>[] = [
   // Attachments
   listAttachmentsAction,
   downloadAttachmentAction,
+  downloadMessageAction,
   // Triage
   labelEmailAction,
   flagEmailAction,

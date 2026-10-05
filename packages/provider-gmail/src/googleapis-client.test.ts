@@ -207,6 +207,23 @@ describe('provider-gmail/GoogleapisGmailClient', () => {
     await expect(client.getMessage('m-1')).rejects.toThrow('incomplete message payload');
   });
 
+  it('Scenario: getRawMessage requests format=raw and returns the raw payload', async () => {
+    const api = createMockApi();
+    api.users.messages.get.mockResolvedValueOnce({ data: { raw: 'UmF3' } });
+    const client = createClient(api);
+
+    await expect(client.getRawMessage('m-1')).resolves.toBe('UmF3');
+    expect(api.users.messages.get).toHaveBeenCalledWith({ userId: 'me', id: 'm-1', format: 'raw' });
+  });
+
+  it('Scenario: getRawMessage rejects a response with no raw payload', async () => {
+    const api = createMockApi();
+    api.users.messages.get.mockResolvedValueOnce({ data: {} });
+    const client = createClient(api);
+
+    await expect(client.getRawMessage('m-1')).rejects.toThrow('no raw payload');
+  });
+
   it('Scenario: getAttachment requests Gmail attachment bytes', async () => {
     const api = createMockApi();
     const client = createClient(api);
