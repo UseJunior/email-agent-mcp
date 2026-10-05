@@ -155,13 +155,24 @@ export function toDiskFilename(name: string, fallback: string, forcedExt?: strin
   // "Agreement v2.1" keeps its ".1".
   const rawExt = forcedExt === undefined ? extname(name) : '';
   const ext = forcedExt ?? rawExt.replace(/[^A-Za-z0-9.]/g, '').slice(0, 16);
-  const stem = (rawExt ? name.slice(0, -rawExt.length) : name)
+  const collapsed = (rawExt ? name.slice(0, -rawExt.length) : name)
     .replace(/[^A-Za-z0-9._\- ]/g, '_')
     .replace(/\s+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^[._]+|_+$/g, '')
-    .slice(0, 150);
+    .replace(/_+/g, '_');
+  const stem = trimEdges(collapsed).slice(0, 150);
   return (stem || fallback) + (ext === '.' ? '' : ext);
+}
+
+/**
+ * Drop leading `.`/`_` and trailing `_`. A linear scan rather than an anchored
+ * regex such as `/_+$/`, which backtracks polynomially on long `_` runs.
+ */
+function trimEdges(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && (value[start] === '.' || value[start] === '_')) start++;
+  while (end > start && value[end - 1] === '_') end--;
+  return value.slice(start, end);
 }
 
 /**
