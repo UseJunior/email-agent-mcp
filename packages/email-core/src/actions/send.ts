@@ -103,8 +103,22 @@ export const sendEmailAction: EmailAction<
       return { success: false, error: fields.error };
     }
 
-    const { to, cc, subject, draft, format, forceBlack } = fields;
+    const { to, cc, bcc, subject, draft, format, forceBlack } = fields;
     let { body } = fields;
+
+    // send_email has no bcc input, and its allowlist gate covers to/cc only. A
+    // body_file shared with create_draft may still carry `bcc:` frontmatter;
+    // refuse rather than silently send without the Bcc the file asked for.
+    if (bcc !== undefined && bcc.length > 0) {
+      return {
+        success: false,
+        error: {
+          code: 'BCC_NOT_SUPPORTED',
+          message: 'send_email does not support bcc, but the body_file frontmatter sets it. Use create_draft (which accepts bcc) and then send_draft.',
+          recoverable: true,
+        },
+      };
+    }
 
     // Resolve attachments (sandboxed path reads + validation)
     const attResult = await resolveAttachments(input.attachments, pathSandbox(ctx));

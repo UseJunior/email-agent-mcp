@@ -1817,3 +1817,197 @@ describe('email-write/Duplicate Delivery Guard (send_draft)', () => {
     expect(forced.error!.code).not.toMatch(/^DUPLICATE_SEND_/);
   });
 });
+
+describe('email-write/Draft Bcc Recipients (issue #214)', () => {
+  const addIntroThread = () => provider.addMessage({
+    id: 'intro-msg',
+    subject: 'Intro: Alice <> Bob',
+    from: { email: 'introducer@allowed.com' },
+    to: [{ email: 'me@company.com' }, { email: 'bob@allowed.com' }],
+    receivedAt: '2024-01-01T00:00:00Z',
+    isRead: true,
+    hasAttachments: false,
+  });
+
+  it('Scenario: New draft with bcc', async () => {
+    const createSpy = vi.spyOn(provider, 'createDraft');
+
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      bcc: ['Audit Desk <audit@allowed.com>'],
+      subject: 'With bcc',
+      body: 'Hello',
+    });
+
+    expect(result.success).toBe(true);
+    expect(createSpy.mock.calls[0]![0].bcc).toEqual([{ name: 'Audit Desk', email: 'audit@allowed.com' }]);
+    expect(result.preview?.bcc).toEqual([{ name: 'Audit Desk', email: 'audit@allowed.com' }]);
+    expect(result).not.toHaveProperty('warnings');
+  });
+
+  it('Scenario: Omitted bcc sends no bcc to the provider', async () => {
+    const createSpy = vi.spyOn(provider, 'createDraft');
+
+    await createDraftAction.run(ctx, { to: 'alice@allowed.com', subject: 'No bcc', body: 'Hello' });
+
+    expect(createSpy.mock.calls[0]![0].bcc).toBeUndefined();
+  });
+
+  it('Scenario: Reply-all draft moves the introducer to bcc', async () => {
+    addIntroThread();
+    const draftSpy = vi.spyOn(provider, 'createReplyDraft');
+
+    const result = await createDraftAction.run(ctx, {
+      reply_to: 'intro-msg',
+      to: 'bob@allowed.com',
+      bcc: ['introducer@allowed.com'],
+      body: 'Thanks for the intro (moving you to bcc).',
+    });
+
+    expect(result.success).toBe(true);
+    expect(draftSpy.mock.calls[0]![2]!.bcc).toEqual([{ email: 'introducer@allowed.com' }]);
+    expect(result.preview?.to?.map(a => a.email)).toEqual(['bob@allowed.com']);
+    expect(result.preview?.bcc?.map(a => a.email)).toEqual(['introducer@allowed.com']);
+  });
+
+  it('Scenario: Reply draft bcc removes the address from the derived recipients', async () => {
+    addIntroThread();
+
+    const result = await createDraftAction.run(ctx, {
+      reply_to: 'intro-msg',
+      reply_all: false,
+      bcc: ['Introducer@Allowed.com'],
+      body: 'Moving you to bcc.',
+    });
+
+    expect(result.success).toBe(true);
+    // The derived To was only the introducer, now hidden on Bcc.
+    expect(result.preview?.to ?? []).toEqual([]);
+    expect(result.preview?.bcc?.map(a => a.email)).toEqual(['Introducer@Allowed.com']);
+  });
+
+  it('Scenario: Bcc address also listed on to or cc is rejected', async () => {
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      cc: ['bob@allowed.com'],
+      bcc: ['BOB@allowed.com'],
+      subject: 'Conflict',
+      body: 'Hello',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatchObject({ code: 'BCC_RECIPIENT_CONFLICT', recoverable: true });
+    expect(provider.getDrafts().size).toBe(0);
+  });
+
+  it('Scenario: Invalid bcc address is rejected', async () => {
+    const result = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      bcc: ['not-an-address'],
+      subject: 'Bad bcc',
+      body: 'Hello',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('INVALID_ADDRESS');
+    expect(result.error?.message).toContain('bcc[0]');
+  });
+
+  it('Scenario: Bcc from body_file frontmatter', async () => {
+    await writeFile(join(testDir, 'bcc.md'), `---
+to: alice@allowed.com
+bcc: audit@allowed.com, legal@allowed.com
+subject: Frontmatter bcc
+---
+Body here`);
+
+    const result = await createDraftAction.run(ctx, { body_file: 'bcc.md' });
+
+    expect(result.success).toBe(true);
+    expect(result.preview?.bcc?.map(a => a.email)).toEqual(['audit@allowed.com', 'legal@allowed.com']);
+  });
+
+  it('Scenario: send_email refuses bcc frontmatter instead of dropping it', async () => {
+    await writeFile(join(testDir, 'send-bcc.md'), `---
+to: alice@allowed.com
+bcc: audit@allowed.com
+subject: Frontmatter bcc
+---
+Body here`);
+
+    const result = await sendEmailAction.run(ctx, { body_file: 'send-bcc.md' });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('BCC_NOT_SUPPORTED');
+    expect(provider.getSentMessages()).toHaveLength(0);
+  });
+
+  it('Scenario: update_draft sets, keeps, and clears bcc', async () => {
+    const created = await createDraftAction.run(ctx, { to: 'alice@allowed.com', subject: 'Update bcc', body: 'Hello' });
+    const id = created.draftId!;
+
+    const set = await updateDraftAction.run(ctx, { draft_id: id, bcc: ['audit@allowed.com'] });
+    expect(set.success).toBe(true);
+    expect(set.preview?.bcc?.map(a => a.email)).toEqual(['audit@allowed.com']);
+
+    const kept = await updateDraftAction.run(ctx, { draft_id: id, subject: 'Renamed' });
+    expect(kept.preview?.bcc?.map(a => a.email)).toEqual(['audit@allowed.com']);
+
+    const cleared = await updateDraftAction.run(ctx, { draft_id: id, bcc: [] });
+    expect(cleared.preview?.bcc ?? []).toEqual([]);
+  });
+
+  it('Scenario: update_draft warns when a bcc recipient is still on to or cc', async () => {
+    const created = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      cc: ['introducer@allowed.com'],
+      subject: 'Warn',
+      body: 'Hello',
+    });
+
+    const result = await updateDraftAction.run(ctx, { draft_id: created.draftId!, bcc: ['introducer@allowed.com'] });
+
+    expect(result.success).toBe(true);
+    expect(result.warnings).toEqual([expect.objectContaining({ code: 'BCC_RECIPIENT_ALSO_VISIBLE' })]);
+    expect(result.warnings![0]!.message).toContain('introducer@allowed.com');
+  });
+
+  it('Scenario: update_draft rejects a bcc that conflicts with to or cc in the same call', async () => {
+    const created = await createDraftAction.run(ctx, { to: 'alice@allowed.com', subject: 'Conflict', body: 'Hello' });
+
+    const result = await updateDraftAction.run(ctx, {
+      draft_id: created.draftId!,
+      to: 'alice@allowed.com',
+      bcc: ['alice@allowed.com'],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('BCC_RECIPIENT_CONFLICT');
+  });
+
+  it('Scenario: send_draft blocks a draft whose bcc set via create_draft is not allowlisted', async () => {
+    const created = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com',
+      bcc: ['hidden@blocked.com'],
+      subject: 'Gate bcc',
+      body: 'Hello',
+    });
+    expect(created.success).toBe(true);
+
+    const sent = await sendDraftAction.run(ctx, { draft_id: created.draftId! });
+
+    expect(sent.success).toBe(false);
+    expect(sent.error?.code).toBe('ALLOWLIST_BLOCKED');
+  });
+
+  it('Scenario: send_draft blocks a reply draft whose bcc set via update_draft is not allowlisted', async () => {
+    addIntroThread();
+    const created = await createDraftAction.run(ctx, { reply_to: 'intro-msg', body: 'Hi' });
+    await updateDraftAction.run(ctx, { draft_id: created.draftId!, bcc: ['hidden@blocked.com'] });
+
+    const sent = await sendDraftAction.run(ctx, { draft_id: created.draftId! });
+
+    expect(sent.success).toBe(false);
+    expect(sent.error?.code).toBe('ALLOWLIST_BLOCKED');
+  });
+});

@@ -18,6 +18,8 @@ import {
   checkRateLimit,
   handleProviderError,
   parseRecipients,
+  checkBccOverlap,
+  bccVisibleWarning,
   buildDraftPreview,
   resolveAttachments,
   AttachmentInputSchema,
@@ -56,6 +58,8 @@ const CreateDraftInput = z.object({
   to: z.string().or(z.array(z.string())).optional()
     .describe('Recipient address(es). Required for a new draft; optional with reply_to set, where recipients are derived from the parent message. When supplied alongside reply_to it replaces the provider-derived To rather than adding to it, so the draft is addressed to exactly these recipients. Under reply_all, thread participants displaced from the To line move to Cc rather than being dropped; pass reply_all=false to address the reply to these recipients alone.'),
   cc: z.array(z.string()).optional(),
+  bcc: z.array(z.string()).optional()
+    .describe('Bcc recipient address(es). With reply_to set, these are added to the reply and removed from the provider-derived To/Cc, so a thread participant can be moved to Bcc. An address may not appear on both bcc and to/cc. The send allowlist applies to bcc at send_draft time.'),
   subject: z.string().optional(),
   body: z.string().optional(),
   body_file: z.string().optional()
@@ -79,7 +83,7 @@ export const createDraftAction: EmailAction<
   z.infer<typeof DraftOutput>
 > = {
   name: 'create_draft',
-  description: 'Create an email draft. Supports body_file with YAML frontmatter. Use reply_to for threaded reply drafts, where to and subject are derived from the parent message and may be omitted; pass reply_all=false with reply_to to draft a sender-only reply.',
+  description: 'Create an email draft with to/cc/bcc recipients. Supports body_file with YAML frontmatter (to, cc, bcc, subject, reply_to, format). Use reply_to for threaded reply drafts, where to and subject are derived from the parent message and may be omitted; pass reply_all=false with reply_to to draft a sender-only reply.',
   input: CreateDraftInput,
   output: DraftOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -96,7 +100,7 @@ export const createDraftAction: EmailAction<
       return { success: false, error: fields.error };
     }
 
-    const { to, cc, subject, replyTo, format, forceBlack } = fields;
+    const { to, cc, bcc, subject, replyTo, format, forceBlack } = fields;
     let { body } = fields;
 
     // Resolve attachments (sandboxed path reads + validation)
@@ -119,10 +123,15 @@ export const createDraftAction: EmailAction<
     const recipients = to === undefined ? undefined : (Array.isArray(to) ? to : [to]);
 
     // Parse name-address strings into {name, email} once before any provider call.
-    const parsed = parseRecipients({ to: recipients, cc });
+    const parsed = parseRecipients({ to: recipients, cc, bcc });
     if ('error' in parsed) {
       return { success: false, error: parsed.error };
     }
+    const bccError = checkBccOverlap(parsed);
+    if (bccError) {
+      return { success: false, error: bccError };
+    }
+    const parsedBcc = parsed.bcc.length > 0 ? parsed.bcc : undefined;
 
     // Drafts bypass allowlist — enforcement happens at send_draft time
 
@@ -161,6 +170,9 @@ export const createDraftAction: EmailAction<
           // from the parent message under `reply_all` (issue #192).
           to: parsed.to.length > 0 ? parsed.to : undefined,
           cc: parsed.cc,
+          // Providers also strip these addresses from the derived To/Cc, so
+          // "moving you to bcc" on a reply-all works without restating `to`.
+          bcc: parsedBcc,
           bodyHtml: outBodyHtml,
           attachments: attachments.length > 0 ? attachments : undefined,
           replyAll: input.reply_all,
@@ -170,10 +182,12 @@ export const createDraftAction: EmailAction<
             authoredOnly: !input.include_quoted,
           })
           : {};
+        const bccWarning = bccVisibleWarning(previewResult.preview);
         return {
           success: result.success,
           draftId: result.draftId,
           ...previewResult,
+          ...(bccWarning ? { warnings: [bccWarning] } : {}),
           error: result.error ? { code: result.error.code, message: result.error.message, recoverable: result.error.recoverable } : undefined,
         };
       } catch (err) {
@@ -186,6 +200,7 @@ export const createDraftAction: EmailAction<
       const result = await ctx.provider.createDraft({
         to: parsed.to,
         cc: parsed.cc,
+        bcc: parsedBcc,
         subject: subject!,
         body,
         bodyHtml: outBodyHtml,
@@ -196,10 +211,12 @@ export const createDraftAction: EmailAction<
           authoredOnly: !input.include_quoted,
         })
         : {};
+      const bccWarning = bccVisibleWarning(previewResult.preview);
       return {
         success: result.success,
         draftId: result.draftId,
         ...previewResult,
+        ...(bccWarning ? { warnings: [bccWarning] } : {}),
         error: result.error ? { code: result.error.code, message: result.error.message, recoverable: result.error.recoverable } : undefined,
       };
     } catch (err) {
@@ -398,6 +415,8 @@ const UpdateDraftInput = z.object({
   draft_id: z.string(),
   to: z.string().or(z.array(z.string())).optional(),
   cc: z.array(z.string()).optional(),
+  bcc: z.array(z.string()).optional()
+    .describe('Bcc recipient address(es). Replaces the draft\'s Bcc line; pass [] to clear it, omit to keep it. An address may not appear on both bcc and to/cc. The send allowlist applies to bcc at send_draft time.'),
   subject: z.string().optional(),
   body: z.string().optional(),
   body_file: z.string().optional()
@@ -420,7 +439,7 @@ export const updateDraftAction: EmailAction<
   z.infer<typeof DraftOutput>
 > = {
   name: 'update_draft',
-  description: 'Update a draft email. Body edits are refused for reply drafts; non-reply body edits require replace_body=true and replace the body wholesale. Subject, recipients, and attachments remain editable. Allowlist is enforced at send_draft time, not here.',
+  description: 'Update a draft email. Body edits are refused for reply drafts; non-reply body edits require replace_body=true and replace the body wholesale. Subject, recipients (to/cc/bcc), and attachments remain editable. Allowlist is enforced at send_draft time, not here.',
   input: UpdateDraftInput,
   output: DraftOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -445,7 +464,7 @@ export const updateDraftAction: EmailAction<
       return { success: false, error: fields.error };
     }
 
-    const { to, cc, subject, format, forceBlack } = fields;
+    const { to, cc, bcc, subject, format, forceBlack } = fields;
     let { body } = fields;
     const hasBodyEdit = input.body !== undefined || input.body_file !== undefined;
 
@@ -490,16 +509,22 @@ export const updateDraftAction: EmailAction<
 
     // Build partial update — parse name-address strings only for fields the caller actually provided.
     const partial: Partial<import('../types.js').ComposeMessage> = {};
-    if (to !== undefined || cc !== undefined) {
+    if (to !== undefined || cc !== undefined || bcc !== undefined) {
       const parsed = parseRecipients({
         to: to !== undefined ? (Array.isArray(to) ? to : [to]) : undefined,
         cc,
+        bcc,
       });
       if ('error' in parsed) {
         return { success: false, error: parsed.error };
       }
+      const bccError = checkBccOverlap(parsed);
+      if (bccError) {
+        return { success: false, error: bccError };
+      }
       if (to !== undefined) partial.to = parsed.to;
       if (cc !== undefined) partial.cc = parsed.cc;
+      if (bcc !== undefined) partial.bcc = parsed.bcc;
     }
     if (subject) partial.subject = subject;
 
@@ -538,16 +563,22 @@ export const updateDraftAction: EmailAction<
           authoredOnly: !input.include_quoted,
         })
         : {};
+      const warnings: Array<{ code: string; message: string }> = [];
+      if (result.success && subject !== undefined && isReplyDraft) {
+        warnings.push({
+          code: 'REPLY_SUBJECT_THREADING_WARNING',
+          message: 'Changing a reply draft subject may break threading in clients that group messages by subject.',
+        });
+      }
+      // The caller may set bcc without restating the draft's To/Cc, so the
+      // overlap check above cannot see the persisted lines — check the read-back.
+      const bccWarning = bccVisibleWarning(previewResult.preview);
+      if (bccWarning) warnings.push(bccWarning);
       return {
         success: result.success,
         draftId: result.draftId,
         ...previewResult,
-        ...(result.success && subject !== undefined && isReplyDraft
-          ? { warnings: [{
-            code: 'REPLY_SUBJECT_THREADING_WARNING',
-            message: 'Changing a reply draft subject may break threading in clients that group messages by subject.',
-          }] }
-          : {}),
+        ...(warnings.length > 0 ? { warnings } : {}),
         error: result.error ? { code: result.error.code, message: result.error.message, recoverable: result.error.recoverable } : undefined,
       };
     } catch (err) {

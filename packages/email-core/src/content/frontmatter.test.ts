@@ -63,6 +63,25 @@ Body.`;
     expect(result.frontmatter!.to).toEqual(['alice@a.com', 'bob@b.com', 'carol@c.com']);
   });
 
+  it('parses comma-separated bcc field into array (issue #214)', () => {
+    const content = `---
+to: alice@a.com
+bcc: audit@a.com, "Legal Desk" <legal@a.com>
+---
+Body.`;
+
+    const result = parseFrontmatter(content);
+    expect(result.frontmatter!.bcc).toEqual(['audit@a.com', '"Legal Desk" <legal@a.com>']);
+  });
+
+  it('parses a single bcc value as a string (issue #214)', () => {
+    const result = parseFrontmatter(`---
+bcc: audit@a.com
+---
+Body.`);
+    expect(result.frontmatter!.bcc).toBe('audit@a.com');
+  });
+
   it('parses draft: false as boolean false', () => {
     const content = `---
 to: alice@example.com
