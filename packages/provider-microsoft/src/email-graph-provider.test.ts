@@ -2983,3 +2983,77 @@ describe('provider-microsoft/Outbound Attachments', () => {
     expect(attCalls).toHaveLength(1);
   });
 });
+
+describe('provider-microsoft/Reply Draft Bcc (issue #214)', () => {
+  it('Scenario: bcc removes the address from Graph derived To and Cc', async () => {
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse({
+        toRecipients: [
+          { emailAddress: { address: 'introducer@corp.com' } },
+          { emailAddress: { address: 'bob@corp.com' } },
+        ],
+        ccRecipients: [{ emailAddress: { address: 'carol@corp.com' } }],
+      })),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createReplyDraft('msg-1', 'reply', {
+      bcc: [{ email: 'Introducer@corp.com' }],
+    });
+
+    const patch = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]![1] as {
+      toRecipients?: Array<{ emailAddress: { address: string } }>;
+      ccRecipients?: Array<{ emailAddress: { address: string } }>;
+      bccRecipients?: Array<{ emailAddress: { address: string } }>;
+    };
+    expect(patch.toRecipients?.map(r => r.emailAddress.address)).toEqual(['bob@corp.com']);
+    expect(patch.ccRecipients?.map(r => r.emailAddress.address)).toEqual(['carol@corp.com']);
+    expect(patch.bccRecipients?.map(r => r.emailAddress.address)).toEqual(['Introducer@corp.com']);
+  });
+
+  it('Scenario: bcc clears a Cc entry even when Cc becomes empty', async () => {
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse({
+        toRecipients: [{ emailAddress: { address: 'alice@corp.com' } }],
+        ccRecipients: [{ emailAddress: { address: 'introducer@corp.com' } }],
+      })),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createReplyDraft('msg-1', 'reply', {
+      bcc: [{ email: 'introducer@corp.com' }],
+    });
+
+    const patch = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]![1] as Record<string, unknown>;
+    // Graph's derived To had nobody to remove, so it is left untouched.
+    expect(patch).not.toHaveProperty('toRecipients');
+    expect(patch.ccRecipients).toEqual([]);
+  });
+
+  it('Scenario: bcc under explicit to keeps the displaced participant off Cc', async () => {
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValueOnce(quotedReplyResponse({
+        toRecipients: [
+          { emailAddress: { address: 'introducer@corp.com' } },
+          { emailAddress: { address: 'bob@corp.com' } },
+        ],
+        ccRecipients: [],
+      })),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await provider.createReplyDraft('msg-1', 'reply', {
+      to: [{ email: 'bob@corp.com' }],
+      bcc: [{ email: 'introducer@corp.com' }],
+    });
+
+    const patch = (client.patch as ReturnType<typeof vi.fn>).mock.calls[0]![1] as {
+      toRecipients?: Array<{ emailAddress: { address: string } }>;
+      ccRecipients?: Array<{ emailAddress: { address: string } }>;
+      bccRecipients?: Array<{ emailAddress: { address: string } }>;
+    };
+    expect(patch.toRecipients?.map(r => r.emailAddress.address)).toEqual(['bob@corp.com']);
+    expect(patch.ccRecipients ?? []).toEqual([]);
+    expect(patch.bccRecipients?.map(r => r.emailAddress.address)).toEqual(['introducer@corp.com']);
+  });
+});

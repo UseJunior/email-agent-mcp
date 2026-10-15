@@ -1263,8 +1263,20 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
     // mergeRecipients([], …) is reused only for its EmailAddress →
     // GraphRecipient conversion and case-insensitive dedupe.
     const hasExplicitTo = Boolean(opts?.to && opts.to.length > 0);
+
+    // Anyone on `bcc` comes off the visible lines Graph derived, so a thread
+    // participant can be moved to Bcc without restating the audience (issue
+    // #214). Bcc wins over a derived To/Cc.
+    const hidden = new Set((opts?.bcc ?? []).map(a => a.email.toLowerCase()));
+    const isVisible = (r: GraphRecipient): boolean =>
+      !hidden.has(r.emailAddress?.address?.toLowerCase() ?? '');
+
     if (hasExplicitTo) {
-      patch.toRecipients = mergeRecipients([], opts!.to!);
+      patch.toRecipients = mergeRecipients([], opts!.to!).filter(isVisible);
+    } else if (draftTo.some(r => !isVisible(r))) {
+      // Only touch toRecipients when something must come off it; otherwise
+      // Graph's derived To stands untouched, as before.
+      patch.toRecipients = draftTo.filter(isVisible);
     }
 
     // Replacing the To line must not silently drop anyone. On the reply-all
@@ -1283,8 +1295,8 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       })
       : [];
 
-    const ccMerged = mergeRecipients([...draftCc, ...displacedTo], opts?.cc ?? []);
-    if (ccMerged.length > 0) patch.ccRecipients = ccMerged;
+    const ccMerged = mergeRecipients([...draftCc, ...displacedTo], opts?.cc ?? []).filter(isVisible);
+    if (ccMerged.length > 0 || draftCc.some(r => !isVisible(r))) patch.ccRecipients = ccMerged;
 
     const bccMerged = mergeRecipients(draftBcc, opts?.bcc ?? []);
     if (bccMerged.length > 0) patch.bccRecipients = bccMerged;

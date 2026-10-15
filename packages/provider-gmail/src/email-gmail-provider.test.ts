@@ -924,6 +924,38 @@ describe('provider-gmail/Reply Drafts', () => {
     expect(raw).not.toContain('Subject: Re: Re:');
   });
 
+  it('Scenario: createReplyDraft emits Bcc and removes it from derived To/Cc (issue #214)', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(originalMessageMock()),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.createReplyDraft('msg-original', 'Moving Carol to bcc.', {
+      bcc: [{ email: 'CAROL@corp.com' }],
+    });
+
+    const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
+    expect(raw).toContain('Bcc: CAROL@corp.com');
+    expect(raw).toContain('To: "Alice" <alice@corp.com>');
+    expect(raw).toMatch(/^Cc: bob@corp\.com$/m);
+  });
+
+  it('Scenario: createReplyDraft omits an empty To when the sender moves to Bcc (issue #214)', async () => {
+    const client = createMockGmailClient({
+      getMessage: vi.fn().mockResolvedValue(originalMessageMock()),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.createReplyDraft('msg-original', 'Moving Alice to bcc.', {
+      bcc: [{ email: 'alice@corp.com' }],
+    });
+
+    const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
+    expect(raw).not.toMatch(/^To:/m);
+    expect(raw).toContain('Bcc: alice@corp.com');
+    expect(raw).toMatch(/Cc: .*bob@corp\.com.*carol@corp\.com/);
+  });
+
   it('Scenario: createReplyDraft returns structured DRAFT_FAILED on error', async () => {
     const client = createMockGmailClient({
       getMessage: vi.fn().mockResolvedValue(originalMessageMock()),

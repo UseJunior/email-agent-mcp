@@ -871,7 +871,9 @@ function multipartAsPart(subtype: 'alternative' | 'mixed', parts: MimePart[]): M
 function buildRawMessage(msg: ComposeMessage, opts: BuildRawOptions = {}): string {
   const headers: string[] = [];
   headers.push('MIME-Version: 1.0');
-  headers.push(`To: ${formatAddressList(msg.to)}`);
+  // A reply whose only original recipient moved to Bcc has no To line; an
+  // empty `To:` header is malformed, so omit it.
+  if (msg.to.length > 0) headers.push(`To: ${formatAddressList(msg.to)}`);
   if (msg.cc && msg.cc.length > 0) headers.push(`Cc: ${formatAddressList(msg.cc)}`);
   if (msg.bcc && msg.bcc.length > 0) headers.push(`Bcc: ${formatAddressList(msg.bcc)}`);
   headers.push(`Subject: ${escapeHeader(msg.subject)}`);
@@ -936,8 +938,23 @@ function buildRawMessage(msg: ComposeMessage, opts: BuildRawOptions = {}): strin
  * there is nothing to preserve — narrowing to an explicit recipient set is the
  * point. With `to` absent or empty, both the To and the Cc are computed exactly
  * as they were before the option existed.
+ *
+ * Anyone on `opts.bcc` is removed from the resulting To and Cc, so a thread
+ * participant can be moved to Bcc ("moving you to bcc") without restating the
+ * rest of the audience (issue #214). Bcc wins over a derived visible line.
  */
 function resolveReplyRecipients(
+  original: EmailMessage,
+  opts?: ReplyOptions,
+): { to: EmailAddress[]; cc: EmailAddress[] } {
+  const hidden = new Set((opts?.bcc ?? []).map(a => a.email.toLowerCase()));
+  const visible = (list: EmailAddress[]): EmailAddress[] =>
+    list.filter(a => !hidden.has(a.email.toLowerCase()));
+  const { to, cc } = resolveVisibleReplyRecipients(original, opts);
+  return { to: visible(to), cc: visible(cc) };
+}
+
+function resolveVisibleReplyRecipients(
   original: EmailMessage,
   opts?: ReplyOptions,
 ): { to: EmailAddress[]; cc: EmailAddress[] } {

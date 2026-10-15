@@ -6,6 +6,7 @@ import { BODY_FORMATS } from './body-renderer.js';
 export interface FrontmatterFields {
   to?: string | string[];
   cc?: string | string[];
+  bcc?: string | string[];
   subject?: string;
   reply_to?: string;
   draft?: boolean;
@@ -13,7 +14,7 @@ export interface FrontmatterFields {
   force_black?: boolean;
 }
 
-const KNOWN_KEYS = new Set(['to', 'cc', 'subject', 'reply_to', 'draft', 'format', 'force_black']);
+const KNOWN_KEYS = new Set(['to', 'cc', 'bcc', 'subject', 'reply_to', 'draft', 'format', 'force_black']);
 
 export function parseFrontmatter(
   content: string,
@@ -56,7 +57,7 @@ export function parseFrontmatter(
       value = value.slice(1, -1);
     }
 
-    if (key === 'to' || key === 'cc') {
+    if (key === 'to' || key === 'cc' || key === 'bcc') {
       const parts = value.split(',').map(s => s.trim()).filter(Boolean);
       fields[key] = parts.length === 1 ? parts[0]! : parts;
     } else if (key === 'draft') {

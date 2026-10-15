@@ -1,5 +1,6 @@
 // Mock email provider for testing — implements all capability interfaces in-memory
 import type {
+  EmailAddress,
   EmailMessage,
   EmailThread,
   ComposeMessage,
@@ -329,11 +330,16 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSchedul
       throw new Error(`Message not found: ${messageId}`);
     }
     const draftId = `draft-${this.nextId++}`;
+    // Mirror both real providers: anyone on opts.bcc comes off To/Cc.
+    const hidden = new Set((opts?.bcc ?? []).map(a => a.email.toLowerCase()));
+    const visible = (list: EmailAddress[] | undefined) =>
+      list?.filter(a => !hidden.has(a.email.toLowerCase()));
     this.drafts.set(draftId, {
       // Mirror both real providers: an explicit opts.to replaces the derived
       // recipient; absent it, the reply is addressed to the original sender.
-      to: opts?.to && opts.to.length > 0 ? opts.to : [original.from],
-      cc: opts?.cc,
+      to: visible(opts?.to && opts.to.length > 0 ? opts.to : [original.from])!,
+      cc: visible(opts?.cc),
+      bcc: opts?.bcc,
       subject: `Re: ${original.subject}`,
       body,
       bodyHtml: opts?.bodyHtml,
@@ -361,6 +367,7 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSchedul
       ...existing,
       ...(msg.to !== undefined && { to: msg.to }),
       ...(msg.cc !== undefined && { cc: msg.cc }),
+      ...(msg.bcc !== undefined && { bcc: msg.bcc }),
       ...(msg.subject !== undefined && { subject: msg.subject }),
       ...(msg.body !== undefined && { body: msg.body }),
       ...(msg.bodyHtml !== undefined && { bodyHtml: msg.bodyHtml }),

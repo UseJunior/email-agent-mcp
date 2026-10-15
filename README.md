@@ -303,8 +303,10 @@ force_black: false
 <p>The body starts after the closing delimiter.</p>
 ```
 
-Recognized keys are `to`, `cc`, `subject`, `reply_to`, `draft`, `format`, and
-`force_black` (`draft: true` turns a `send_email` call into a draft save). A
+Recognized keys are `to`, `cc`, `bcc`, `subject`, `reply_to`, `draft`, `format`,
+and `force_black` (`draft: true` turns a `send_email` call into a draft save).
+`bcc` applies to `create_draft` and `update_draft`; `send_email` refuses a body
+file that sets it rather than sending without the Bcc. A
 frontmatter value overrides the same-named tool parameter. Frontmatter is
 parsed only from `.md` files, and the file extension never selects the format —
 without an explicit `format` tool parameter, even a `.html` body file gets the

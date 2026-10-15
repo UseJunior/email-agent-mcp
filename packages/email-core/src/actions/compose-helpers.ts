@@ -66,6 +66,7 @@ export interface ComposeFields {
   body: string;
   to?: string | string[];
   cc?: string[];
+  bcc?: string[];
   subject?: string;
   replyTo?: string;
   draft?: boolean;
@@ -87,6 +88,7 @@ export async function resolveComposeFields(
     body_file?: string;
     to?: string | string[];
     cc?: string[];
+    bcc?: string[];
     subject?: string;
     reply_to?: string;
     draft?: boolean;
@@ -99,6 +101,7 @@ export async function resolveComposeFields(
   let body: string | undefined;
   let to = input.to;
   let cc = input.cc;
+  let bcc = input.bcc;
   let subject = input.subject;
   let replyTo = input.reply_to;
   let draft = input.draft;
@@ -117,6 +120,7 @@ export async function resolveComposeFields(
       const fm = bodyResult.frontmatter;
       if (fm.to !== undefined) to = fm.to;
       if (fm.cc !== undefined) cc = Array.isArray(fm.cc) ? fm.cc : [fm.cc];
+      if (fm.bcc !== undefined) bcc = Array.isArray(fm.bcc) ? fm.bcc : [fm.bcc];
       if (fm.subject !== undefined) subject = fm.subject;
       if (fm.reply_to !== undefined) replyTo = fm.reply_to;
       if (fm.draft !== undefined) draft = fm.draft;
@@ -132,7 +136,7 @@ export async function resolveComposeFields(
     };
   }
 
-  return { body: body ?? '', to, cc, subject, replyTo, draft, format, forceBlack };
+  return { body: body ?? '', to, cc, bcc, subject, replyTo, draft, format, forceBlack };
 }
 
 // --- Outbound attachments ---
@@ -282,31 +286,67 @@ export function checkRateLimit(
 // --- parseRecipients ---
 
 export type ParsedRecipients =
-  | { to: EmailAddress[]; cc: EmailAddress[] }
+  | { to: EmailAddress[]; cc: EmailAddress[]; bcc: EmailAddress[] }
   | { error: ActionError };
 
-export function parseRecipients(input: { to?: string[]; cc?: string[] }): ParsedRecipients {
-  const toResult = parseAddressList(input.to, 'to');
-  if (!toResult.ok) {
-    return {
-      error: {
-        code: 'INVALID_ADDRESS',
-        message: `${toResult.field}[${toResult.index}] invalid address: "${toResult.value}"`,
-        recoverable: false,
-      },
-    };
+export function parseRecipients(
+  input: { to?: string[]; cc?: string[]; bcc?: string[] },
+): ParsedRecipients {
+  const lists: Record<'to' | 'cc' | 'bcc', EmailAddress[]> = { to: [], cc: [], bcc: [] };
+  for (const field of ['to', 'cc', 'bcc'] as const) {
+    const result = parseAddressList(input[field], field);
+    if (!result.ok) {
+      return {
+        error: {
+          code: 'INVALID_ADDRESS',
+          message: `${result.field}[${result.index}] invalid address: "${result.value}"`,
+          recoverable: false,
+        },
+      };
+    }
+    lists[field] = result.addresses;
   }
-  const ccResult = parseAddressList(input.cc, 'cc');
-  if (!ccResult.ok) {
-    return {
-      error: {
-        code: 'INVALID_ADDRESS',
-        message: `${ccResult.field}[${ccResult.index}] invalid address: "${ccResult.value}"`,
-        recoverable: false,
-      },
-    };
-  }
-  return { to: toResult.addresses, cc: ccResult.addresses };
+  return lists;
+}
+
+/** Bcc addresses that also appear on To or Cc, compared case-insensitively. */
+function bccOverlap(
+  recipients: { to?: EmailAddress[]; cc?: EmailAddress[]; bcc?: EmailAddress[] },
+): string[] {
+  const visible = new Set([...(recipients.to ?? []), ...(recipients.cc ?? [])].map(a => a.email.toLowerCase()));
+  return (recipients.bcc ?? []).filter(a => visible.has(a.email.toLowerCase())).map(a => a.email);
+}
+
+/**
+ * Reject a compose call that names the same address on Bcc and on To or Cc.
+ * Bcc exists to hide a recipient from the others; listing them visibly too
+ * defeats that silently, so the caller must pick one (issue #214).
+ */
+export function checkBccOverlap(
+  recipients: { to?: EmailAddress[]; cc?: EmailAddress[]; bcc?: EmailAddress[] },
+): ActionError | null {
+  const overlap = bccOverlap(recipients);
+  if (overlap.length === 0) return null;
+  return {
+    code: 'BCC_RECIPIENT_CONFLICT',
+    message: `Listed on bcc and also on to/cc: ${overlap.join(', ')}. Name each recipient on one line only.`,
+    recoverable: true,
+  };
+}
+
+/**
+ * Warn when a persisted draft still shows a Bcc recipient on To or Cc — e.g.
+ * update_draft set bcc without restating the draft's existing To/Cc.
+ */
+export function bccVisibleWarning(
+  preview: DraftPreview | undefined,
+): { code: string; message: string } | undefined {
+  const overlap = preview ? bccOverlap(preview) : [];
+  if (overlap.length === 0) return undefined;
+  return {
+    code: 'BCC_RECIPIENT_ALSO_VISIBLE',
+    message: `The draft lists ${overlap.join(', ')} on bcc and also on to/cc, so they are not hidden. Restate to/cc without them to keep the bcc hidden.`,
+  };
 }
 
 // --- Draft preview ---
