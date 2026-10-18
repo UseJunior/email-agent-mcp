@@ -4,7 +4,7 @@
 
 The Gmail provider SHALL implement `deleteMessage` for drafts only, using `users.drafts.delete`, which the default `gmail.compose` scope authorizes. It SHALL accept either a draft id or the id of the draft's message, resolving a message id to its draft id through `users.drafts.list` across every page. A Gmail draft delete SHALL be permanent regardless of `hard_delete`, because Gmail has no trash for drafts, and SHALL NOT call any `gmail.modify` endpoint.
 
-A message that exists but is not a draft SHALL be refused with a non-recoverable `NOT_SUPPORTED` error stating that only drafts can be deleted with the current scopes and that sent or received mail would need `gmail.modify`. An id that names nothing, or a DRAFT-labelled message absent from `drafts.list`, SHALL raise `MessageNotFoundError`. `drafts.delete` failures SHALL be classified as Gmail provider errors. A Gmail client without draft deletion SHALL report `NOT_SUPPORTED`.
+A message that exists but is not a draft SHALL be refused with a non-recoverable `NOT_SUPPORTED` error stating that only drafts can be deleted with the current scopes and that sent or received mail would need `gmail.modify`. An id that names nothing, or a DRAFT-labelled message absent from `drafts.list`, SHALL raise `MessageNotFoundError`; so SHALL a non-draft id on a client without `drafts.list`, which can resolve only draft ids. A `drafts.delete` 404 for a draft that resolved immediately before SHALL count as a successful delete, because the draft is already gone (for example after the client retried a DELETE whose first attempt succeeded). Other `drafts.delete` failures SHALL be classified as Gmail provider errors. A Gmail client without draft deletion SHALL report `NOT_SUPPORTED`.
 
 A Gmail draft delete SHALL remain behind the existing delete policy: it requires `AGENT_EMAIL_DELETE_ENABLED=true` and `user_explicitly_requested_deletion: true`, and a caller-supplied `hard_delete: true` still requires `AGENT_EMAIL_HARD_DELETE_ENABLED=true`. It SHALL NOT otherwise require the hard-delete gate.
 
@@ -39,6 +39,14 @@ A Gmail draft delete SHALL remain behind the existing delete policy: it requires
 #### Scenario: drafts.delete failures are classified as provider errors
 - **WHEN** `drafts.delete` fails with an HTTP error
 - **THEN** `deleteMessage` raises a Gmail `ProviderError`
+
+#### Scenario: A drafts.delete 404 after resolution counts as deleted
+- **WHEN** the draft resolves but `drafts.delete` returns 404
+- **THEN** `deleteMessage` succeeds
+
+#### Scenario: Gmail client without drafts.list resolves only draft ids
+- **WHEN** the concrete Gmail client has no `listDrafts` and the id is not a draft id
+- **THEN** `deleteMessage` raises `MessageNotFoundError` without reading the message
 
 #### Scenario: Gmail client without drafts.delete reports NOT_SUPPORTED
 - **WHEN** the concrete Gmail client has no `deleteDraft`

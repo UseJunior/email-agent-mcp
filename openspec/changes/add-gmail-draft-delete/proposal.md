@@ -15,5 +15,5 @@
 
 ## Impact
 
-- Affected specs: `provider-gmail`, `email-categorize`
+- Affected specs: `provider-gmail`, `email-categorize`, `email-security` (Delete Policy carve-out for never-delivered items a provider cannot trash)
 - Affected code: `provider-gmail` (provider, googleapis client, errors), `email-core` (`delete_email`, `update_draft` description), README

@@ -1808,6 +1808,27 @@ describe('provider-gmail/Draft Deletion', () => {
     expect(result.error?.message).toContain('gmail.modify');
   });
 
+  it('Scenario: A drafts.delete 404 after resolution counts as deleted', async () => {
+    // googleapis retries a DELETE after a 5xx; if the first attempt already
+    // removed the draft, the retry sees 404.
+    const client = draftClient({ deleteDraft: vi.fn().mockRejectedValue(notFound()) });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.deleteMessage('msg-draft-1')).resolves.toBeUndefined();
+    expect(client.deleteDraft).toHaveBeenCalledWith('r-target');
+  });
+
+  it('Scenario: Gmail client without drafts.list resolves only draft ids', async () => {
+    const client = draftClient();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (client as any).listDrafts;
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.deleteMessage('msg-draft-1')).rejects.toBeInstanceOf(MessageNotFoundError);
+    expect(client.getMessage).not.toHaveBeenCalled();
+    expect(client.deleteDraft).not.toHaveBeenCalled();
+  });
+
   it('Scenario: update_draft accepts a Gmail draft message id', async () => {
     const client = draftClient();
     const provider = new GmailEmailProvider(client);

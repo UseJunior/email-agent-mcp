@@ -15,7 +15,7 @@ import type {
   DraftReplyStatus,
 } from '@usejunior/email-core';
 import { AttachmentNotFoundError, MessageNotFoundError, ProviderError } from '@usejunior/email-core';
-import { gmailProviderError, isMissingOrInvalidIdError } from './errors.js';
+import { getErrorStatus, gmailProviderError, isMissingOrInvalidIdError } from './errors.js';
 
 // Gmail label mapping
 const FOLDER_TO_LABEL: Record<string, string> = {
@@ -148,7 +148,9 @@ export class GmailEmailProvider {
     try {
       return await this.client.getDraft(id);
     } catch (err) {
-      if (!isMissingOrInvalidIdError(err) || !this.client.listDrafts) throw err;
+      if (!isMissingOrInvalidIdError(err)) throw err;
+      // Without drafts.list only draft ids resolve, so a miss is final.
+      if (!this.client.listDrafts) throw new MessageNotFoundError(`Gmail draft ${id} not found`);
     }
 
     let message: GmailMessage;
@@ -521,7 +523,10 @@ export class GmailEmailProvider {
     try {
       await this.client.deleteDraft(draft.id);
     } catch (err) {
-      if (isMissingOrInvalidIdError(err)) throw new MessageNotFoundError(`Gmail draft ${draft.id} not found`);
+      // The draft resolved a moment ago, so a 404 here means it is already
+      // gone — typically because googleapis retried a DELETE whose first
+      // attempt succeeded but returned 5xx. The caller's goal is met.
+      if (getErrorStatus(err) === 404) return;
       throw gmailProviderError(err, 'idempotent-write');
     }
   }
