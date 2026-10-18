@@ -14,8 +14,8 @@ import type {
   OutboundAttachment,
   DraftReplyStatus,
 } from '@usejunior/email-core';
-import { AttachmentNotFoundError, MessageNotFoundError } from '@usejunior/email-core';
-import { gmailProviderError } from './errors.js';
+import { AttachmentNotFoundError, MessageNotFoundError, ProviderError } from '@usejunior/email-core';
+import { getErrorStatus, gmailProviderError, isMissingOrInvalidIdError } from './errors.js';
 
 // Gmail label mapping
 const FOLDER_TO_LABEL: Record<string, string> = {
@@ -63,6 +63,19 @@ export interface GmailApiClient {
    * falls back to a structured NOT_SUPPORTED error when this is missing.
    */
   updateDraft?(draftId: string, raw: string, threadId?: string): Promise<{ id: string; message: { id: string; threadId: string } }>;
+  /**
+   * One page of `drafts.list`. Used to map a draft's message id back to its
+   * draft id. Optional so older concrete clients keep type-checking; without
+   * it only draft ids resolve.
+   */
+  listDrafts?(opts?: { maxResults?: number; pageToken?: string }): Promise<{ drafts: Array<{ id: string; messageId?: string }>; nextPageToken?: string }>;
+  /**
+   * Permanently delete a draft (`drafts.delete`, authorized by
+   * `gmail.compose`). Gmail has no trash for drafts. Optional so older
+   * concrete clients keep type-checking; `deleteMessage` reports
+   * NOT_SUPPORTED when it is missing.
+   */
+  deleteDraft?(draftId: string): Promise<void>;
 }
 
 interface GmailMessagePart {
@@ -120,8 +133,46 @@ export class GmailEmailProvider {
   }
 
   async getDraft(draftId: string): Promise<EmailMessage> {
-    const draft = await this.client.getDraft(draftId);
+    const draft = await this.findDraft(draftId);
+    if (!draft) throw new MessageNotFoundError(`Gmail message ${draftId} is not a draft`);
     return mapGmailMessage(draft.message);
+  }
+
+  /**
+   * Fetch a draft by its draft id (`r…`) or by the id of its message, which
+   * is what `list_emails(folder: "drafts")`, `read_email`, and `get_thread`
+   * report. Returns undefined when the id names a message that is not a
+   * draft; throws MessageNotFoundError when it names nothing.
+   */
+  private async findDraft(id: string): Promise<{ id: string; message: GmailMessage } | undefined> {
+    try {
+      return await this.client.getDraft(id);
+    } catch (err) {
+      if (!isMissingOrInvalidIdError(err)) throw err;
+      // Without drafts.list only draft ids resolve, so a miss is final.
+      if (!this.client.listDrafts) throw new MessageNotFoundError(`Gmail draft ${id} not found`);
+    }
+
+    let message: GmailMessage;
+    try {
+      message = await this.client.getMessage(id);
+    } catch (err) {
+      if (isMissingOrInvalidIdError(err)) throw new MessageNotFoundError(`Gmail message ${id} not found`);
+      throw err;
+    }
+    if (!message.labelIds?.includes('DRAFT')) return undefined;
+
+    let pageToken: string | undefined;
+    do {
+      const page = await this.client.listDrafts!({ maxResults: 500, pageToken });
+      const match = page.drafts.find(draft => draft.messageId === message.id);
+      if (match) return { id: match.id, message };
+      pageToken = page.nextPageToken;
+    } while (pageToken);
+
+    // DRAFT-labelled but absent from drafts.list: it was sent or deleted
+    // between the two reads.
+    throw new MessageNotFoundError(`No Gmail draft found for message ${id}`);
   }
 
   async searchMessages(query: string, _folder?: string, limit?: number, offset?: number): Promise<EmailMessage[]> {
@@ -344,7 +395,13 @@ export class GmailEmailProvider {
       // current draft, merge the partial over it, and re-upload. Preserve
       // threading headers from the original draft so edits don't silently
       // lose thread association.
-      const draftResource = await this.client.getDraft(draftId);
+      const draftResource = await this.findDraft(draftId);
+      if (!draftResource) {
+        return {
+          success: false,
+          error: { code: 'NOT_A_DRAFT', message: `Gmail message ${draftId} is not a draft`, recoverable: false },
+        };
+      }
       const current = mapGmailMessage(draftResource.message);
       const draftOrigin = getRecognizedDraftOrigin(
         getHeader(draftResource.message, DRAFT_ORIGIN_HEADER),
@@ -400,7 +457,7 @@ export class GmailEmailProvider {
         draftOrigin,
       });
 
-      const result = await this.client.updateDraft(draftId, raw, current.threadId);
+      const result = await this.client.updateDraft(draftResource.id, raw, current.threadId);
       return { success: true, draftId: result.id };
     } catch (err) {
       return {
@@ -415,7 +472,8 @@ export class GmailEmailProvider {
   }
 
   async getDraftReplyStatus(draftId: string): Promise<DraftReplyStatus> {
-    const draftResource = await this.client.getDraft(draftId);
+    const draftResource = await this.findDraft(draftId);
+    if (!draftResource) return 'indeterminate';
     const draft = mapGmailMessage(draftResource.message);
     if (draft.isDraft !== true) return 'indeterminate';
 
@@ -432,6 +490,45 @@ export class GmailEmailProvider {
     }
 
     return draft.inReplyTo && draft.inReplyTo.trim().length > 0 ? 'reply' : 'indeterminate';
+  }
+
+  /**
+   * Delete a draft, by draft id or by its message id. Drafts are the only
+   * thing the default `gmail.readonly` + `gmail.compose` grant can delete
+   * (`drafts.delete`); trashing or deleting sent or received mail needs
+   * `gmail.modify`, which Agent Email does not request. Gmail has no trash for
+   * drafts, so the delete is permanent whatever `hard` says.
+   */
+  async deleteMessage(messageId: string, _hard?: boolean): Promise<void> {
+    if (!this.client.deleteDraft) {
+      throw new ProviderError('NOT_SUPPORTED', 'Gmail client does not support draft deletion', 'gmail', false);
+    }
+
+    let draft: { id: string; message: GmailMessage } | undefined;
+    try {
+      draft = await this.findDraft(messageId);
+    } catch (err) {
+      if (err instanceof MessageNotFoundError) throw err;
+      throw gmailProviderError(err, 'idempotent-read');
+    }
+    if (!draft) {
+      throw new ProviderError(
+        'NOT_SUPPORTED',
+        'Only drafts can be deleted with the current Gmail scopes (gmail.readonly + gmail.compose). Trashing or deleting sent or received mail requires gmail.modify, which Agent Email does not request.',
+        'gmail',
+        false,
+      );
+    }
+
+    try {
+      await this.client.deleteDraft(draft.id);
+    } catch (err) {
+      // The draft resolved a moment ago, so a 404 here means it is already
+      // gone — typically because googleapis retried a DELETE whose first
+      // attempt succeeded but returned 5xx. The caller's goal is met.
+      if (getErrorStatus(err) === 404) return;
+      throw gmailProviderError(err, 'idempotent-write');
+    }
   }
 
   // NemoClaw egress domains

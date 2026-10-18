@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { MockEmailProvider } from '../testing/mock-provider.js';
 import { labelEmailAction, flagEmailAction, markReadAction, deleteEmailAction } from './label.js';
 import type { ActionContext } from './registry.js';
+import { MessageNotFoundError, ProviderError } from '../providers/provider.js';
 
 let provider: MockEmailProvider;
 let ctx: ActionContext;
@@ -147,5 +148,38 @@ describe('email-categorize/Delete Policy', () => {
 
     expect(result.success).toBe(false);
     expect(result.error!.message).toContain('Email deletion is disabled');
+  });
+});
+
+describe('email-categorize/Delete Provider Errors', () => {
+  const enabledCtx = (deleteMessage: () => Promise<void>): ActionContext =>
+    ({ provider: { deleteMessage }, deleteEnabled: true } as unknown as ActionContext);
+  const request = { id: 'msg123', user_explicitly_requested_deletion: true, hard_delete: false };
+
+  it('Scenario: Provider refusal is returned as a structured error', async () => {
+    const result = await deleteEmailAction.run(
+      enabledCtx(() => Promise.reject(new ProviderError('NOT_SUPPORTED', 'Only drafts can be deleted', 'gmail', false))),
+      request,
+    );
+
+    expect(result).toEqual({
+      success: false,
+      error: { code: 'NOT_SUPPORTED', message: 'Only drafts can be deleted', recoverable: false },
+    });
+  });
+
+  it('Scenario: Unknown message id is returned as MESSAGE_NOT_FOUND', async () => {
+    const result = await deleteEmailAction.run(
+      enabledCtx(() => Promise.reject(new MessageNotFoundError('Gmail message msg123 not found'))),
+      request,
+    );
+
+    expect(result).toMatchObject({ success: false, error: { code: 'MESSAGE_NOT_FOUND', recoverable: false } });
+  });
+
+  it('Scenario: Unexpected delete failure falls back to DELETE_FAILED', async () => {
+    const result = await deleteEmailAction.run(enabledCtx(() => Promise.reject(new Error('boom'))), request);
+
+    expect(result).toMatchObject({ success: false, error: { code: 'DELETE_FAILED', message: 'boom' } });
   });
 });

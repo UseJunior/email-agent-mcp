@@ -235,14 +235,24 @@ is marked as mailbox-mutating:
 | `delete_inbox_rule` | Delete a server-side inbox rule (requires operator env + caller flag) (Microsoft 365) | destructive |
 
 This is a shared cross-provider tool surface. Although `label_email`,
-`flag_email`, `mark_read`, `move_to_folder`, and `delete_email` are advertised,
-the Gmail adapter intentionally does not implement those mutation capabilities.
-They fail closed before any Gmail mutation request: unsupported actions return
-`NOT_SUPPORTED`, while deletion can stop first at the default `DELETE_DISABLED`
-operator gate. The default `gmail.readonly` plus `gmail.compose` grant would not
-authorize those mutations either; do not add `gmail.modify` to try to make the
-tools available. They remain available only for providers whose adapters and
-grants support them.
+`flag_email`, `mark_read`, and `move_to_folder` are advertised, the Gmail
+adapter intentionally does not implement those mutation capabilities. They fail
+closed with `NOT_SUPPORTED` before any Gmail mutation request. The default
+`gmail.readonly` plus `gmail.compose` grant would not authorize those mutations
+either; do not add `gmail.modify` to try to make the tools available. They
+remain available only for providers whose adapters and grants support them.
+
+On Gmail, `delete_email` deletes **drafts only**, through `users.drafts.delete`,
+which `gmail.compose` authorizes. Pass either the draft id (`r…`) or the id of
+the draft's message (what `list_emails` with `folder: "drafts"` returns). The
+delete is permanent, because Gmail has no trash for drafts, but it still sits
+behind the same `AGENT_EMAIL_DELETE_ENABLED` gate and
+`user_explicitly_requested_deletion` flag; it does not need
+`AGENT_EMAIL_HARD_DELETE_ENABLED`. Deleting a sent or received Gmail message
+returns `NOT_SUPPORTED`, since it would need `gmail.modify`. `update_draft`
+likewise accepts either id on Gmail. Gmail gives a draft a new message id every
+time it is updated, while its draft id stays the same, so prefer the draft id
+(or list the drafts again) after an edit.
 
 Every row returned by `list_emails`, `search_emails`, and `get_thread`, and the
 `read_email` response, carries an always-present `isDraft` boolean. `isDraft: true`
@@ -520,8 +530,9 @@ https://www.googleapis.com/auth/gmail.compose
 `gmail.compose` manages drafts and sending but does not authorize
 `users.threads.get` or `users.messages.get`. The default grant does not include
 `gmail.modify`. Separately, the Gmail adapter intentionally leaves label
-changes, read-state changes, moves, trash, and delete operations unsupported,
-so those tools fail closed with `NOT_SUPPORTED`. Add both scopes to your OAuth
+changes, read-state changes, moves, trash, and deletion of sent or received
+mail unsupported, so those tools fail closed with `NOT_SUPPORTED`. Deleting a
+draft works under the default grant. Add both scopes to your OAuth
 consent screen.
 
 Deployments that explicitly set `GMAIL_OAUTH_SCOPES` must update it to the two
@@ -621,7 +632,7 @@ Agent Email ships with restrictive defaults that you loosen as needed:
 - **Send allowlist**: empty by default -- agents cannot send email until you add recipients
 - **Receive allowlist**: accepts all by default -- controls which senders trigger the watcher
 - **Delete disabled**: agents cannot delete email by default. Two gates must both be satisfied:
-  1. operator sets `AGENT_EMAIL_DELETE_ENABLED=true` in the email-agent-mcp process environment (and `AGENT_EMAIL_HARD_DELETE_ENABLED=true` for permanent deletion). Restart required after change.
+  1. operator sets `AGENT_EMAIL_DELETE_ENABLED=true` in the email-agent-mcp process environment (and `AGENT_EMAIL_HARD_DELETE_ENABLED=true` for permanent deletion). Restart required after change. Gmail can delete only drafts, and a draft delete is always permanent; it needs only `AGENT_EMAIL_DELETE_ENABLED`.
   2. the caller passes `user_explicitly_requested_deletion: true` on the tool call.
 - **Error sanitization**: API keys, file paths, and stack traces are redacted from error responses
 - **Body file sandboxing**: no `../` traversal, no symlinks, binary detection

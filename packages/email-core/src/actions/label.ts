@@ -2,6 +2,8 @@
 import { z } from 'zod';
 import type { EmailAction } from './registry.js';
 import { checkDeletePolicy, type DeletePolicy } from '../security/receive-allowlist.js';
+import { MessageNotFoundError } from '../providers/provider.js';
+import { handleProviderError } from './compose-helpers.js';
 
 const LabelEmailInput = z.object({
   id: z.string().optional(),
@@ -12,7 +14,12 @@ const LabelEmailInput = z.object({
 
 const LabelEmailOutput = z.object({
   success: z.boolean(),
-  error: z.object({ code: z.string(), message: z.string(), recoverable: z.boolean() }).optional(),
+  error: z.object({
+    code: z.string(),
+    message: z.string(),
+    recoverable: z.boolean(),
+    retryAfter: z.number().optional(),
+  }).optional(),
 });
 
 export const labelEmailAction: EmailAction<
@@ -88,7 +95,8 @@ export const markReadAction: EmailAction<z.infer<typeof MarkReadInput>, z.infer<
 
 // delete_email — disabled by default
 const DeleteEmailInput = z.object({
-  id: z.string(),
+  id: z.string()
+    .describe('Message id to delete. On Gmail this must be a draft: either its draft id or the id of its message. A Gmail draft gets a new message id on every update; its draft id stays stable.'),
   user_explicitly_requested_deletion: z.boolean(),
   hard_delete: z.boolean().optional().default(false),
   mailbox: z.string().optional(),
@@ -96,7 +104,9 @@ const DeleteEmailInput = z.object({
 
 export const deleteEmailAction: EmailAction<z.infer<typeof DeleteEmailInput>, z.infer<typeof LabelEmailOutput>> = {
   name: 'delete_email',
-  description: 'Delete an email (disabled by default, requires explicit configuration)',
+  description: 'Delete an email (disabled by default, requires explicit configuration). '
+    + 'On Gmail only drafts can be deleted under the default scopes, and a draft delete is permanent '
+    + '(Gmail has no trash for drafts); deleting sent or received Gmail mail returns NOT_SUPPORTED.',
   input: DeleteEmailInput,
   output: LabelEmailOutput,
   annotations: { readOnlyHint: false, destructiveHint: true },
@@ -114,7 +124,14 @@ export const deleteEmailAction: EmailAction<z.infer<typeof DeleteEmailInput>, z.
       return { success: false, error: { code: 'NOT_SUPPORTED', message: 'Provider does not support deletion', recoverable: false } };
     }
 
-    await ctx.provider.deleteMessage(input.id, input.hard_delete);
+    try {
+      await ctx.provider.deleteMessage(input.id, input.hard_delete);
+    } catch (err) {
+      if (err instanceof MessageNotFoundError) {
+        return { success: false, error: { code: 'MESSAGE_NOT_FOUND', message: err.message, recoverable: false } };
+      }
+      return handleProviderError(err, 'DELETE_FAILED');
+    }
     return { success: true };
   },
 };

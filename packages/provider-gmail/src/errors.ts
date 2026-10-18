@@ -26,6 +26,20 @@ export function getErrorMessage(err: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * True when Gmail rejected an id as unknown (404) or as the wrong kind of id
+ * (400 "Invalid id value", e.g. a draft id passed to `messages.get`). Callers
+ * use it to retry the lookup against the other id space.
+ */
+export function isMissingOrInvalidIdError(err: unknown): boolean {
+  const status = getErrorStatus(err);
+  if (status === 404) return true;
+  if (status !== 400) return false;
+
+  const message = getErrorMessage(err);
+  return typeof message === 'string' && /invalid id value/i.test(message);
+}
+
 function getErrorReason(err: unknown): string | undefined {
   const record = err as {
     errors?: Array<{ reason?: unknown }>;
