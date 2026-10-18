@@ -412,7 +412,8 @@ export const sendDraftAction: EmailAction<
 // --- update_draft ---
 
 const UpdateDraftInput = z.object({
-  draft_id: z.string(),
+  draft_id: z.string()
+    .describe('Draft to update. On Gmail either the draft id (r…) or the id of the draft\'s message, as list_emails(folder: "drafts") reports it.'),
   to: z.string().or(z.array(z.string())).optional(),
   cc: z.array(z.string()).optional(),
   bcc: z.array(z.string()).optional()

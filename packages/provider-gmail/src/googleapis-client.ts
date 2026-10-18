@@ -1,7 +1,7 @@
 import { gmail } from '@googleapis/gmail';
 import type { GmailAuthManager } from './auth.js';
 import type { GmailApiClient, GmailMessage } from './email-gmail-provider.js';
-import { getErrorMessage, getErrorStatus } from './errors.js';
+import { isMissingOrInvalidIdError } from './errors.js';
 
 interface MessageSummary {
   id?: string | null;
@@ -67,6 +67,15 @@ interface GmailDraftsApi {
     id: string;
     requestBody: { message: { raw: string; threadId?: string } };
   }): Promise<{ data?: GmailDraft }>;
+  list(args: {
+    userId: string;
+    maxResults?: number;
+    pageToken?: string;
+  }): Promise<{ data?: { drafts?: Array<{ id?: string | null; message?: MessageSummary | null }>; nextPageToken?: string | null } }>;
+  delete(args: {
+    userId: string;
+    id: string;
+  }): Promise<unknown>;
 }
 
 interface GmailThreadsApi {
@@ -108,15 +117,6 @@ function requireDraft(draft: GmailDraft | undefined, op: string): { id: string; 
       threadId: draft.message.threadId,
     },
   };
-}
-
-function shouldFallbackToDraftLookup(err: unknown): boolean {
-  const status = getErrorStatus(err);
-  if (status === 404) return true;
-  if (status !== 400) return false;
-
-  const message = getErrorMessage(err);
-  return typeof message === 'string' && /invalid id value/i.test(message);
 }
 
 export class GoogleapisGmailClient implements GmailApiClient {
@@ -166,7 +166,7 @@ export class GoogleapisGmailClient implements GmailApiClient {
 
       return response.data;
     } catch (err) {
-      if (!shouldFallbackToDraftLookup(err)) throw err;
+      if (!isMissingOrInvalidIdError(err)) throw err;
 
       const draft = await this.api.users.drafts.get({
         userId: 'me',
@@ -283,5 +283,24 @@ export class GoogleapisGmailClient implements GmailApiClient {
     });
 
     return requireDraft(response.data, 'drafts.update');
+  }
+
+  async listDrafts(opts: { maxResults?: number; pageToken?: string } = {}): Promise<{ drafts: Array<{ id: string; messageId?: string }>; nextPageToken?: string }> {
+    const response = await this.api.users.drafts.list({
+      userId: 'me',
+      maxResults: opts.maxResults,
+      pageToken: opts.pageToken,
+    });
+
+    return {
+      drafts: (response.data?.drafts ?? [])
+        .filter((draft): draft is { id: string; message?: MessageSummary | null } => !!draft.id)
+        .map(draft => ({ id: draft.id, messageId: draft.message?.id ?? undefined })),
+      nextPageToken: response.data?.nextPageToken ?? undefined,
+    };
+  }
+
+  async deleteDraft(draftId: string): Promise<void> {
+    await this.api.users.drafts.delete({ userId: 'me', id: draftId });
   }
 }

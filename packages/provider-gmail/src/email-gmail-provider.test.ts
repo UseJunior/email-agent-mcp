@@ -4,6 +4,7 @@ import {
   AttachmentNotFoundError,
   MessageNotFoundError,
   cancelScheduledSendAction,
+  deleteEmailAction,
   listScheduledSendsAction,
   sendDraftAction,
   sendEmailAction,
@@ -1624,5 +1625,221 @@ describe('provider-gmail/buildRawMessage attachments', () => {
     for (const line of raw.split('\r\n')) {
       expect(line.length).toBeLessThanOrEqual(76);
     }
+  });
+});
+
+describe('provider-gmail/Draft Deletion', () => {
+  const notFound = () => Object.assign(new Error('Requested entity was not found.'), { code: 404 });
+  const invalidId = () => Object.assign(new Error('Invalid id value'), { code: 400 });
+
+  function draftBackingMessage(id = 'msg-draft-1') {
+    return {
+      id,
+      threadId: 'thread-draft',
+      labelIds: ['DRAFT'],
+      payload: {
+        headers: [
+          { name: 'From', value: 'me@corp.com' },
+          { name: 'To', value: 'bob@corp.com' },
+          { name: 'Subject', value: 'Superseded draft' },
+        ],
+        body: { data: Buffer.from('Old body').toString('base64url') },
+      },
+    };
+  }
+
+  function draftClient(overrides: Partial<GmailApiClient> = {}) {
+    return createMockGmailClient({
+      // Message ids are not draft ids: drafts.get rejects them.
+      getDraft: vi.fn().mockRejectedValue(notFound()),
+      getMessage: vi.fn().mockResolvedValue(draftBackingMessage()),
+      listDrafts: vi.fn().mockResolvedValue({
+        drafts: [
+          { id: 'r-other', messageId: 'msg-other' },
+          { id: 'r-target', messageId: 'msg-draft-1' },
+        ],
+      }),
+      deleteDraft: vi.fn().mockResolvedValue(undefined),
+      ...overrides,
+    });
+  }
+
+  it('Scenario: Delete a Gmail draft by draft id', async () => {
+    const client = draftClient({
+      getDraft: vi.fn().mockResolvedValue({ id: 'r-target', message: draftBackingMessage() }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.deleteMessage('r-target', false);
+
+    expect(client.getDraft).toHaveBeenCalledWith('r-target');
+    expect(client.listDrafts).not.toHaveBeenCalled();
+    expect(client.deleteDraft).toHaveBeenCalledWith('r-target');
+  });
+
+  it('Scenario: Delete a Gmail draft by its message id', async () => {
+    const client = draftClient();
+    const provider = new GmailEmailProvider(client);
+
+    await provider.deleteMessage('msg-draft-1', false);
+
+    expect(client.getMessage).toHaveBeenCalledWith('msg-draft-1');
+    expect(client.deleteDraft).toHaveBeenCalledWith('r-target');
+    expect(client.deleteDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it('Scenario: Draft id resolution follows drafts.list pagination', async () => {
+    const listDrafts = vi.fn()
+      .mockResolvedValueOnce({ drafts: [{ id: 'r-other', messageId: 'msg-other' }], nextPageToken: 'page-2' })
+      .mockResolvedValueOnce({ drafts: [{ id: 'r-target', messageId: 'msg-draft-1' }] });
+    const client = draftClient({ getDraft: vi.fn().mockRejectedValue(invalidId()), listDrafts });
+    const provider = new GmailEmailProvider(client);
+
+    await provider.deleteMessage('msg-draft-1');
+
+    expect(listDrafts).toHaveBeenNthCalledWith(1, { maxResults: 500, pageToken: undefined });
+    expect(listDrafts).toHaveBeenNthCalledWith(2, { maxResults: 500, pageToken: 'page-2' });
+    expect(client.deleteDraft).toHaveBeenCalledWith('r-target');
+  });
+
+  it('Scenario: Deleting sent or received Gmail mail is not supported', async () => {
+    const client = draftClient({
+      getMessage: vi.fn().mockResolvedValue({ ...draftBackingMessage('msg-inbox'), labelIds: ['INBOX'] }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const err = await provider.deleteMessage('msg-inbox').catch((e: unknown) => e);
+
+    expect(err).toMatchObject({ code: 'NOT_SUPPORTED', recoverable: false });
+    expect((err as Error).message).toMatch(/only drafts can be deleted/i);
+    expect((err as Error).message).toContain('gmail.modify');
+    expect(client.listDrafts).not.toHaveBeenCalled();
+    expect(client.deleteDraft).not.toHaveBeenCalled();
+    expect(client.modifyMessage).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Deleting an unknown Gmail id reports not found', async () => {
+    const client = draftClient({ getMessage: vi.fn().mockRejectedValue(notFound()) });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.deleteMessage('nope')).rejects.toBeInstanceOf(MessageNotFoundError);
+    expect(client.deleteDraft).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: A DRAFT-labelled message missing from drafts.list reports not found', async () => {
+    const client = draftClient({ listDrafts: vi.fn().mockResolvedValue({ drafts: [] }) });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.deleteMessage('msg-draft-1')).rejects.toBeInstanceOf(MessageNotFoundError);
+    expect(client.deleteDraft).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Gmail draft delete ignores hard and is always permanent', async () => {
+    const client = draftClient();
+    const provider = new GmailEmailProvider(client);
+
+    await provider.deleteMessage('msg-draft-1', true);
+
+    expect(client.deleteDraft).toHaveBeenCalledWith('r-target');
+    expect(client.modifyMessage).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: drafts.delete failures are classified as provider errors', async () => {
+    const client = draftClient({
+      deleteDraft: vi.fn().mockRejectedValue(Object.assign(new Error('Backend Error'), { code: 503 })),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const err = await provider.deleteMessage('msg-draft-1').catch((e: unknown) => e);
+
+    expect(err).toMatchObject({ name: 'ProviderError', provider: 'gmail' });
+  });
+
+  it('Scenario: Gmail client without drafts.delete reports NOT_SUPPORTED', async () => {
+    const client = draftClient();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (client as any).deleteDraft;
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.deleteMessage('msg-draft-1')).rejects.toMatchObject({ code: 'NOT_SUPPORTED' });
+    expect(client.getDraft).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Gmail draft delete stays behind the delete policy gate', async () => {
+    const client = draftClient();
+    const provider = new GmailEmailProvider(client);
+    const request = { id: 'msg-draft-1', user_explicitly_requested_deletion: true, hard_delete: false };
+
+    const disabled = await deleteEmailAction.run({ provider } as never, request);
+    expect(disabled).toMatchObject({ success: false, error: { code: 'DELETE_DISABLED' } });
+
+    const noIntent = await deleteEmailAction.run(
+      { provider, deleteEnabled: true } as never,
+      { ...request, user_explicitly_requested_deletion: false },
+    );
+    expect(noIntent).toMatchObject({ success: false, error: { code: 'DELETE_DISABLED' } });
+
+    const hardWithoutGate = await deleteEmailAction.run(
+      { provider, deleteEnabled: true, hardDeleteAllowed: false } as never,
+      { ...request, hard_delete: true },
+    );
+    expect(hardWithoutGate).toMatchObject({ success: false, error: { code: 'DELETE_DISABLED' } });
+    expect(client.deleteDraft).not.toHaveBeenCalled();
+
+    // AGENT_EMAIL_DELETE_ENABLED alone is enough: a draft delete is permanent,
+    // but the draft was never sent.
+    const enabled = await deleteEmailAction.run({ provider, deleteEnabled: true } as never, request);
+    expect(enabled).toEqual({ success: true });
+    expect(client.deleteDraft).toHaveBeenCalledWith('r-target');
+  });
+
+  it('Scenario: delete_email on Gmail sent mail returns NOT_SUPPORTED', async () => {
+    const client = draftClient({
+      getMessage: vi.fn().mockResolvedValue({ ...draftBackingMessage('msg-sent'), labelIds: ['SENT'] }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const result = await deleteEmailAction.run(
+      { provider, deleteEnabled: true } as never,
+      { id: 'msg-sent', user_explicitly_requested_deletion: true, hard_delete: false },
+    );
+
+    expect(result).toMatchObject({ success: false, error: { code: 'NOT_SUPPORTED', recoverable: false } });
+    expect(result.error?.message).toContain('gmail.modify');
+  });
+
+  it('Scenario: update_draft accepts a Gmail draft message id', async () => {
+    const client = draftClient();
+    const provider = new GmailEmailProvider(client);
+
+    const result = await provider.updateDraft('msg-draft-1', { subject: 'Replacement subject' });
+
+    expect(result).toMatchObject({ success: true });
+    expect(client.updateDraft).toHaveBeenCalledWith('r-target', expect.any(String), 'thread-draft');
+    const raw = lastRaw(client.updateDraft as ReturnType<typeof vi.fn>, 1);
+    expect(raw).toContain('Subject: Replacement subject');
+    expect(raw).toContain('Old body');
+  });
+
+  it('Scenario: update_draft refuses a Gmail message that is not a draft', async () => {
+    const client = draftClient({
+      getMessage: vi.fn().mockResolvedValue({ ...draftBackingMessage('msg-sent'), labelIds: ['SENT'] }),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    const result = await provider.updateDraft('msg-sent', { subject: 'x' });
+
+    expect(result).toMatchObject({ success: false, error: { code: 'NOT_A_DRAFT' } });
+    expect(client.updateDraft).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Draft reply status resolves a Gmail draft message id', async () => {
+    const message = draftBackingMessage();
+    message.payload.headers.push({ name: 'X-Agent-Draft-Origin', value: 'non_reply' });
+    const client = draftClient({ getMessage: vi.fn().mockResolvedValue(message) });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('msg-draft-1')).resolves.toBe('non_reply');
+    await expect(provider.getDraft('msg-draft-1')).resolves.toMatchObject({ id: 'msg-draft-1', isDraft: true });
   });
 });

@@ -33,6 +33,17 @@ function createMockApi() {
         get: vi.fn().mockResolvedValue({ data: { id: 'd-1', message: message('m-draft', 't-draft') } }),
         send: vi.fn().mockResolvedValue({ data: { id: 'd-1', message: { id: 'm-sent-draft', threadId: 't-draft' } } }),
         update: vi.fn().mockResolvedValue({ data: { id: 'd-1', message: { id: 'm-updated-draft', threadId: 't-draft' } } }),
+        list: vi.fn().mockResolvedValue({
+          data: {
+            drafts: [
+              { id: 'd-1', message: { id: 'm-draft', threadId: 't-draft' } },
+              { id: null, message: { id: 'm-orphan' } },
+              { id: 'd-2' },
+            ],
+            nextPageToken: 'next',
+          },
+        }),
+        delete: vi.fn().mockResolvedValue({}),
       },
       threads: {
         get: vi.fn().mockResolvedValue({ data: { id: 't-1', messages: [message('m-1', 't-1')] } }),
@@ -317,6 +328,28 @@ describe('provider-gmail/GoogleapisGmailClient', () => {
       id: 'd-1',
       message: { id: 'm-updated-draft', threadId: 't-draft' },
     });
+  });
+
+  it('Scenario: listDrafts maps draft ids to their message ids', async () => {
+    const api = createMockApi();
+    const client = createClient(api);
+
+    const result = await client.listDrafts({ maxResults: 500, pageToken: 'page-1' });
+
+    expect(api.users.drafts.list).toHaveBeenCalledWith({ userId: 'me', maxResults: 500, pageToken: 'page-1' });
+    expect(result).toEqual({
+      drafts: [{ id: 'd-1', messageId: 'm-draft' }, { id: 'd-2', messageId: undefined }],
+      nextPageToken: 'next',
+    });
+  });
+
+  it('Scenario: deleteDraft uses Gmail drafts.delete', async () => {
+    const api = createMockApi();
+    const client = createClient(api);
+
+    await client.deleteDraft('d-1');
+
+    expect(api.users.drafts.delete).toHaveBeenCalledWith({ userId: 'me', id: 'd-1' });
   });
 
   it('Scenario: modifyMessage forwards label mutations', async () => {
