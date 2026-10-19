@@ -49,7 +49,7 @@ The system SHALL provide a receive allowlist that controls which inbound emails 
 
 ### Requirement: Delete Policy
 
-Delete SHALL be disabled by default. Two independent gates govern deletion: an operator-controlled env var (`AGENT_EMAIL_DELETE_ENABLED=true`) AND a per-call flag (`user_explicitly_requested_deletion: true`). Permanent deletion adds a third gate (`AGENT_EMAIL_HARD_DELETE_ENABLED=true`). All gates use strict-equality checks and accept only the literal string `'true'` to enable. Default to soft delete (move to Trash). No bulk delete.
+Delete SHALL be disabled by default. Two independent gates govern deletion: an operator-controlled env var (`AGENT_EMAIL_DELETE_ENABLED=true`) AND a per-call flag (`user_explicitly_requested_deletion: true`). Permanent deletion adds a third gate (`AGENT_EMAIL_HARD_DELETE_ENABLED=true`). All gates use strict-equality checks and accept only the literal string `'true'` to enable. Default to soft delete (move to Trash). Where a provider can only delete an item permanently and the item was never delivered — a Gmail draft, which Gmail cannot trash — the delete MAY proceed under the soft-delete gates alone; it SHALL still be refused when the caller passes `hard_delete: true` without `AGENT_EMAIL_HARD_DELETE_ENABLED=true`, and the provider SHALL document that the delete is permanent. Delivered mail on every provider keeps the soft-delete default. No bulk delete.
 
 #### Scenario: Disabled by default
 - **WHEN** `AGENT_EMAIL_DELETE_ENABLED` is unset or any value other than `'true'`
@@ -94,3 +94,4 @@ The system SHALL enforce configurable rate limits on outbound operations (max se
 #### Scenario: Rate limit exceeded
 - **WHEN** the agent exceeds the configured send rate
 - **THEN** the system returns an error with retry-after guidance
+
