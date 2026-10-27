@@ -1,4 +1,5 @@
 import { gmail } from '@googleapis/gmail';
+import { Readable } from 'node:stream';
 import type { GmailAuthManager } from './auth.js';
 import type { GmailApiClient, GmailMessage } from './email-gmail-provider.js';
 import { isMissingOrInvalidIdError } from './errors.js';
@@ -34,7 +35,8 @@ interface GmailMessagesApi {
   };
   send(args: {
     userId: string;
-    requestBody: { raw: string; threadId?: string };
+    requestBody: { raw?: string; threadId?: string };
+    media?: { mimeType: string; body: Readable };
   }): Promise<{ data?: MessageSummary }>;
   modify(args: {
     userId: string;
@@ -51,7 +53,8 @@ interface GmailDraft {
 interface GmailDraftsApi {
   create(args: {
     userId: string;
-    requestBody: { message: { raw: string; threadId?: string } };
+    requestBody: { message: { raw?: string; threadId?: string } };
+    media?: { mimeType: string; body: Readable };
   }): Promise<{ data?: GmailDraft }>;
   get(args: {
     userId: string;
@@ -65,7 +68,8 @@ interface GmailDraftsApi {
   update(args: {
     userId: string;
     id: string;
-    requestBody: { message: { raw: string; threadId?: string } };
+    requestBody: { message: { raw?: string; threadId?: string } };
+    media?: { mimeType: string; body: Readable };
   }): Promise<{ data?: GmailDraft }>;
   list(args: {
     userId: string;
@@ -96,6 +100,22 @@ interface GmailApiInstance {
 
 function buildRawRequest(raw: string, threadId?: string): { raw: string; threadId?: string } {
   return threadId ? { raw, threadId } : { raw };
+}
+
+const GMAIL_SIMPLE_RAW_LIMIT = 5 * 1024 * 1024;
+
+function buildMessageUpload(raw: string, threadId?: string): {
+  requestBody: { raw?: string; threadId?: string };
+  media?: { mimeType: string; body: Readable };
+} {
+  const mime = Buffer.from(raw, 'base64url');
+  if (mime.length <= GMAIL_SIMPLE_RAW_LIMIT) {
+    return { requestBody: buildRawRequest(raw, threadId) };
+  }
+  return {
+    requestBody: threadId ? { threadId } : {},
+    media: { mimeType: 'message/rfc822', body: Readable.from([mime]) },
+  };
 }
 
 function requireMessageSummary(summary: MessageSummary | undefined, op: string): { id: string; threadId: string } {
@@ -219,7 +239,7 @@ export class GoogleapisGmailClient implements GmailApiClient {
   async sendMessage(raw: string, threadId?: string): Promise<{ id: string; threadId: string }> {
     const response = await this.api.users.messages.send({
       userId: 'me',
-      requestBody: buildRawRequest(raw, threadId),
+      ...buildMessageUpload(raw, threadId),
     });
 
     return requireMessageSummary(response.data, 'messages.send');
@@ -254,11 +274,13 @@ export class GoogleapisGmailClient implements GmailApiClient {
   }
 
   async createDraft(raw: string, threadId?: string): Promise<{ id: string; message: { id: string; threadId: string } }> {
+    const upload = buildMessageUpload(raw, threadId);
     const response = await this.api.users.drafts.create({
       userId: 'me',
       requestBody: {
-        message: buildRawRequest(raw, threadId),
+        message: upload.requestBody,
       },
+      ...(upload.media ? { media: upload.media } : {}),
     });
 
     return requireDraft(response.data, 'drafts.create');
@@ -274,12 +296,14 @@ export class GoogleapisGmailClient implements GmailApiClient {
   }
 
   async updateDraft(draftId: string, raw: string, threadId?: string): Promise<{ id: string; message: { id: string; threadId: string } }> {
+    const upload = buildMessageUpload(raw, threadId);
     const response = await this.api.users.drafts.update({
       userId: 'me',
       id: draftId,
       requestBody: {
-        message: buildRawRequest(raw, threadId),
+        message: upload.requestBody,
       },
+      ...(upload.media ? { media: upload.media } : {}),
     });
 
     return requireDraft(response.data, 'drafts.update');

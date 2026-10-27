@@ -13,6 +13,7 @@ function createMockClient(overrides: Partial<GraphApiClient> = {}): GraphApiClie
     post: vi.fn().mockResolvedValue({ id: 'new-id' }),
     patch: vi.fn().mockResolvedValue(undefined),
     delete: vi.fn().mockResolvedValue(undefined),
+    putUploadChunk: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -2254,6 +2255,31 @@ describe('provider-microsoft/RealGraphApiClient getBytes', () => {
   });
 });
 
+describe('provider-microsoft/RealGraphApiClient upload chunks', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('PUTs an upload-session chunk with the exact content range and no bearer token', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 202 });
+    vi.stubGlobal('fetch', fetchMock);
+    const bytes = Buffer.from('chunk bytes');
+    const client = new RealGraphApiClient(async () => 'must-not-be-used');
+
+    await client.putUploadChunk('https://upload.example/session', bytes, 327680, 1000000);
+
+    expect(fetchMock).toHaveBeenCalledWith('https://upload.example/session', {
+      method: 'PUT',
+      headers: {
+        'Content-Length': String(bytes.length),
+        'Content-Range': `bytes 327680-${327680 + bytes.length - 1}/1000000`,
+        'Content-Type': 'application/octet-stream',
+      },
+      body: bytes,
+    });
+  });
+});
+
 describe('provider-microsoft/Graph API Auth Retry', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -2951,19 +2977,69 @@ describe('provider-microsoft/Outbound Attachments', () => {
     expect(body.contentBytes).toBe(PDF.toString('base64'));
   });
 
-  it('Scenario: an attachment over 3MB is rejected before any request', async () => {
-    const client = createMockClient();
+  it('Scenario: an attachment above the inline limit uses a draft upload session before send', async () => {
+    const client = createMockClient({
+      post: vi.fn(async (url: string) => url.endsWith('createUploadSession')
+        ? { uploadUrl: 'https://upload.example/session' }
+        : { id: 'new-id' }),
+    });
     const provider = new GraphEmailProvider(client);
 
     const result = await provider.sendMessage({
       to: [{ email: 'bob@corp.com' }],
-      subject: 'Too big',
+      subject: 'Large file',
       body: 'body',
       attachments: [{ filename: 'big.bin', content: Buffer.alloc(3 * 1024 * 1024 + 1), mimeType: 'application/octet-stream' }],
     });
 
+    expect(result.success).toBe(true);
+    const postCalls = (client.post as MockFn).mock.calls;
+    expect(postCalls[0]![0]).toMatch(/\/messages$/);
+    expect((postCalls[0]![1] as Record<string, unknown>)).not.toHaveProperty('attachments');
+    expect(postCalls[1]![0]).toContain('/attachments/createUploadSession');
+    expect(postCalls.at(-1)![0]).toContain('/messages/new-id/send');
+    expect(client.putUploadChunk).toHaveBeenCalled();
+  });
+
+  it('Scenario: upload-session chunks use contiguous byte ranges and 320 KiB multiples', async () => {
+    const content = Buffer.alloc(7 * 1024 * 1024 + 17);
+    const client = createMockClient({
+      post: vi.fn(async (url: string) => url.endsWith('createUploadSession')
+        ? { uploadUrl: 'https://upload.example/session' }
+        : { id: 'draft-large' }),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.createDraft({
+      to: [{ email: 'bob@corp.com' }], subject: 'Large', body: 'body',
+      attachments: [{ filename: 'large.bin', content, mimeType: 'application/octet-stream' }],
+    });
+
+    expect(result.success).toBe(true);
+    const chunks = (client.putUploadChunk as MockFn).mock.calls;
+    expect(chunks.length).toBeGreaterThan(1);
+    let expectedStart = 0;
+    for (const [, chunk, start, total] of chunks) {
+      expect(start).toBe(expectedStart);
+      expect(total).toBe(content.length);
+      if (start + chunk.length < total) expect(chunk.length % (320 * 1024)).toBe(0);
+      expectedStart += chunk.length;
+    }
+    expect(expectedStart).toBe(content.length);
+  });
+
+  it('Scenario: an attachment over 25 MB is rejected before any request', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+
+    const result = await provider.sendMessage({
+      to: [{ email: 'bob@corp.com' }], subject: 'Too big', body: 'body',
+      attachments: [{ filename: 'huge.bin', content: Buffer.alloc(25 * 1024 * 1024 + 1), mimeType: 'application/octet-stream' }],
+    });
+
     expect(result.success).toBe(false);
-    expect(result.error!.code).toBe('ATTACHMENT_TOO_LARGE_FOR_PROVIDER');
+    expect(result.error!.code).toBe('ATTACHMENT_TOO_LARGE');
+    expect(result.error!.message).toContain('25 MB');
     expect(client.post).not.toHaveBeenCalled();
   });
 

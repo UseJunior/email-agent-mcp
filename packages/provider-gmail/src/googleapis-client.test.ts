@@ -273,6 +273,25 @@ describe('provider-gmail/GoogleapisGmailClient', () => {
     await expect(client.sendMessage('raw-rfc822')).rejects.toThrow('incomplete message summary');
   });
 
+  it('Scenario: sendMessage uses raw MIME media upload above 5 MB', async () => {
+    const api = createMockApi();
+    const client = createClient(api);
+    const mime = Buffer.alloc(5 * 1024 * 1024 + 1, 7);
+
+    await client.sendMessage(mime.toString('base64url'), 't-large');
+
+    const args = api.users.messages.send.mock.calls[0]![0] as {
+      requestBody: { raw?: string; threadId?: string };
+      media?: { mimeType: string; body: AsyncIterable<Buffer | Uint8Array> };
+    };
+    expect(args.requestBody).toEqual({ threadId: 't-large' });
+    expect(args.requestBody.raw).toBeUndefined();
+    expect(args.media?.mimeType).toBe('message/rfc822');
+    const chunks: Buffer[] = [];
+    for await (const chunk of args.media!.body) chunks.push(Buffer.from(chunk));
+    expect(Buffer.concat(chunks).equals(mime)).toBe(true);
+  });
+
   it('Scenario: createDraft preserves thread association', async () => {
     const api = createMockApi();
     const client = createClient(api);
@@ -295,6 +314,21 @@ describe('provider-gmail/GoogleapisGmailClient', () => {
     const client = createClient(api);
 
     await expect(client.createDraft('raw-rfc822')).rejects.toThrow('incomplete draft payload');
+  });
+
+  it('Scenario: createDraft uses raw MIME media upload above 5 MB', async () => {
+    const api = createMockApi();
+    const client = createClient(api);
+    const mime = Buffer.alloc(5 * 1024 * 1024 + 1, 3);
+
+    await client.createDraft(mime.toString('base64url'), 't-large');
+
+    const args = api.users.drafts.create.mock.calls[0]![0] as {
+      requestBody: { message: { raw?: string; threadId?: string } };
+      media?: { mimeType: string };
+    };
+    expect(args.requestBody.message).toEqual({ threadId: 't-large' });
+    expect(args.media?.mimeType).toBe('message/rfc822');
   });
 
   it('Scenario: sendDraft uses Gmail drafts.send', async () => {
@@ -328,6 +362,21 @@ describe('provider-gmail/GoogleapisGmailClient', () => {
       id: 'd-1',
       message: { id: 'm-updated-draft', threadId: 't-draft' },
     });
+  });
+
+  it('Scenario: updateDraft uses raw MIME media upload above 5 MB', async () => {
+    const api = createMockApi();
+    const client = createClient(api);
+    const mime = Buffer.alloc(5 * 1024 * 1024 + 1, 5);
+
+    await client.updateDraft('d-1', mime.toString('base64url'), 't-large');
+
+    const args = api.users.drafts.update.mock.calls[0]![0] as {
+      requestBody: { message: { raw?: string; threadId?: string } };
+      media?: { mimeType: string };
+    };
+    expect(args.requestBody.message).toEqual({ threadId: 't-large' });
+    expect(args.media?.mimeType).toBe('message/rfc822');
   });
 
   it('Scenario: listDrafts maps draft ids to their message ids', async () => {

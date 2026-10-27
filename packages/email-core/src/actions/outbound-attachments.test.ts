@@ -166,6 +166,22 @@ describe('outbound-attachments/send_email', () => {
     expect(provider.getSentMessages()).toHaveLength(0);
   });
 
+  it('Scenario: oversize inline base64 (>25MB) returns ATTACHMENT_TOO_LARGE', async () => {
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com',
+      subject: 'Huge inline',
+      body: 'body',
+      attachments: [{
+        base64: Buffer.alloc(25 * 1024 * 1024 + 1).toString('base64'),
+        filename: 'huge.bin',
+      }],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error!.code).toBe('ATTACHMENT_TOO_LARGE');
+    expect(result.error!.message).toContain('25MB');
+  });
+
   it('Scenario: malformed base64 is rejected by the input schema', () => {
     const parsed = sendEmailAction.input.safeParse({
       to: 'alice@allowed.com',

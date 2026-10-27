@@ -157,6 +157,8 @@ Then widen or narrow with Gmail filters such as `older_than:5y`, `from:dmv`, `fi
 `attachments` array. Each entry is either a sandboxed file `path` or inline
 `base64`, with optional `filename` / `mimeType` overrides. Gmail builds a
 `multipart/mixed` MIME message; the 25MB per-file cap is enforced before send.
+Messages above 5MB automatically use Gmail's raw MIME media-upload path. This
+applies to direct sends, replies, and draft create/update operations.
 
 ## Current caveats
 

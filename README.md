@@ -398,8 +398,10 @@ inline `base64`, plus optional `filename` / `mimeType` overrides:
 }
 ```
 
-Files are capped at 25MB each; Microsoft Graph additionally caps inline sends
-at ~3MB total (larger files need an upload session — not yet supported). For
+Files are capped at 25MB each. Microsoft Graph automatically uses chunked
+upload sessions when a file does not fit its small inline request path; Gmail
+automatically uses raw MIME media upload when the message exceeds 5MB. Both
+strategies work for sends, replies, and draft create/update operations. For
 `update_draft`, omitting `attachments` preserves the draft's existing files;
 passing an array (even empty) replaces them.
 

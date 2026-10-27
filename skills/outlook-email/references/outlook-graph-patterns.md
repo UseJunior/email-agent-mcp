@@ -156,7 +156,7 @@ Default timezone to `America/New_York` unless the user specifies otherwise. Comm
 
 - **Reading**: `GET /me/messages/{id}/attachments` returns attachment metadata and content
 - **Drafting with attachments**: Include file paths in the draft; the MCP or API call handles upload
-- **Size limits**: Graph API accepts up to 4MB inline; larger files require an upload session
+- **Size limits**: Graph API accepts only small attachments inline; email-agent-mcp automatically uses an upload session for larger files up to its 25MB per-file limit
 
 ## 11. Composing Drafts via REST
 
