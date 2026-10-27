@@ -42,7 +42,7 @@ const SendEmailInput = z.object({
   force_black: z.boolean().optional()
     .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true. Ignored when format is "text".'),
   attachments: z.array(AttachmentInputSchema).optional()
-    .describe('Files to attach. Each entry takes a sandboxed `path` or inline `base64`.'),
+    .describe('Files to attach, maximum 25 MB per file. Each entry takes a sandboxed `path` or inline `base64`.'),
   scheduled_send_at: ScheduledSendAtSchema.optional(),
   allow_duplicate: AllowDuplicateSchema.optional(),
 });

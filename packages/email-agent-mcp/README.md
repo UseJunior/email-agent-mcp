@@ -117,7 +117,9 @@ equivalent operation.
 
 `send_email`, `reply_to_email`, `create_draft`, and `update_draft` accept an
 optional `attachments` array — each entry is a sandboxed file `path` or inline
-`base64`, with optional `filename` / `mimeType`. Files are capped at 25MB each.
+`base64`, with optional `filename` / `mimeType`. Files are capped at 25MB each;
+larger Graph attachments use upload sessions and Gmail messages above 5MB use
+raw MIME media upload automatically.
 
 Bodies cross the wire as markdown by default in both directions, because markdown
 is token-efficient. Both directions can opt out. The four compose tools above take

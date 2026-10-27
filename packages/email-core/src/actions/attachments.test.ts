@@ -479,6 +479,11 @@ describe('email-attachments/Attach Files to Outbound', () => {
 });
 
 describe('email-attachments/Size and Type Validation', () => {
+  it('Scenario: Attachment at the 25MB limit is accepted', () => {
+    const atLimit = Buffer.alloc(25 * 1024 * 1024);
+    expect(validateAttachment(atLimit, 'limit.bin').valid).toBe(true);
+  });
+
   it('Scenario: Oversized attachment rejected', () => {
     const oversized = Buffer.alloc(26 * 1024 * 1024); // 26MB
     const result = validateAttachment(oversized, 'big-file.pdf');

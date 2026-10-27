@@ -5,7 +5,7 @@ import type { RateLimiter, MailboxEntry, ActionContext } from './registry.js';
 import { isProviderError } from '../providers/provider.js';
 import type { EmailReader } from '../providers/provider.js';
 import { resolveBodyFile } from '../content/body-loader.js';
-import { resolveAttachmentFile } from '../content/attachment-loader.js';
+import { MAX_ATTACHMENT_SIZE, resolveAttachmentFile } from '../content/attachment-loader.js';
 import type { PathSandboxInput } from '../content/safe-path.js';
 import type { BodyFormat } from '../content/body-renderer.js';
 import { parseAddressList } from '../utils/address.js';
@@ -165,7 +165,7 @@ export const AttachmentInputSchema = z
     path: z.string().optional()
       .describe('Path to a file, sandboxed like body_file. Relative paths resolve against the working directory only; files in a directory the operator allowlisted via AGENT_EMAIL_ALLOWED_DIRS must be given as an ABSOLUTE path (a leading ~ is not expanded here).'),
     base64: z.string().optional()
-      .describe('Inline standard-base64-encoded file content. Alternative to path.'),
+      .describe('Inline standard-base64-encoded file content, maximum 25 MB decoded. Alternative to path.'),
     filename: z.string().optional()
       .describe('Attachment filename. Defaults to basename(path); REQUIRED when using base64.'),
     mimeType: z.string().optional()
@@ -222,6 +222,15 @@ export async function resolveAttachments(
     }
 
     const filename = sanitizeFilename(att.filename ?? defaultName);
+    if (content.length > MAX_ATTACHMENT_SIZE) {
+      return {
+        error: {
+          code: 'ATTACHMENT_TOO_LARGE',
+          message: `attachments[${index}]: Attachment exceeds maximum size of 25MB`,
+          recoverable: false,
+        },
+      };
+    }
     const validation = validateAttachment(content, filename, att.mimeType);
     if (!validation.valid) {
       return {

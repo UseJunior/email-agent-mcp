@@ -75,7 +75,7 @@ const CreateDraftInput = z.object({
   force_black: z.boolean().optional()
     .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true.'),
   attachments: z.array(AttachmentInputSchema).optional()
-    .describe('Files to attach. Each entry takes a sandboxed `path` or inline `base64`.'),
+    .describe('Files to attach, maximum 25 MB per file. Each entry takes a sandboxed `path` or inline `base64`.'),
 });
 
 export const createDraftAction: EmailAction<
@@ -432,7 +432,7 @@ const UpdateDraftInput = z.object({
   force_black: z.boolean().optional()
     .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true.'),
   attachments: z.array(AttachmentInputSchema).optional()
-    .describe('Files to attach. Omit to preserve the draft\'s existing attachments; provide an array (possibly empty) to replace them entirely.'),
+    .describe('Files to attach, maximum 25 MB per file. Omit to preserve the draft\'s existing attachments; provide an array (possibly empty) to replace them entirely.'),
 });
 
 export const updateDraftAction: EmailAction<

@@ -358,6 +358,27 @@ describe('provider-gmail/Draft Operations', () => {
     expect(raw).toContain('X-Agent-Draft-Origin: non_reply');
   });
 
+  it('Scenario: an outbound attachment over 25 MB is rejected before Gmail upload', async () => {
+    const client = createMockGmailClient();
+    const provider = new GmailEmailProvider(client);
+
+    const result = await provider.sendMessage({
+      to: [{ email: 'recipient@example.com' }],
+      subject: 'Too large',
+      body: 'body',
+      attachments: [{
+        filename: 'huge.bin',
+        content: Buffer.alloc(25 * 1024 * 1024 + 1),
+        mimeType: 'application/octet-stream',
+      }],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe('ATTACHMENT_TOO_LARGE');
+    expect(result.error?.message).toContain('25 MB');
+    expect(client.sendMessage).not.toHaveBeenCalled();
+  });
+
   it('Scenario: sendDraft calls Gmail API with draft ID', async () => {
     const client = createMockGmailClient();
     const provider = new GmailEmailProvider(client);

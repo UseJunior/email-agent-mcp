@@ -71,6 +71,7 @@ export const DELIVERY_PROVEN_UNSENT_CODES: ReadonlySet<string> = new Set([
   // with zero POSTs, an attachment upload failure leaves an unsent draft, and
   // a scheduled draft with no id was never given a deferred-send time.
   'REPLY_FAILED',
+  'ATTACHMENT_TOO_LARGE',
   'ATTACHMENT_TOO_LARGE_FOR_PROVIDER',
   'ATTACHMENT_UPLOAD_FAILED',
   'SCHEDULE_DRAFT_FAILED',

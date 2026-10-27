@@ -13,6 +13,7 @@ import type {
   DownloadedAttachment,
   OutboundAttachment,
   DraftReplyStatus,
+  EmailError,
 } from '@usejunior/email-core';
 import { AttachmentNotFoundError, MessageNotFoundError, ProviderError } from '@usejunior/email-core';
 import { getErrorStatus, gmailProviderError, isMissingOrInvalidIdError } from './errors.js';
@@ -31,8 +32,20 @@ const FOLDER_TO_LABEL: Record<string, string> = {
 
 // Matches Microsoft's SUBJECT_MAX_LENGTH — keeps cross-provider behaviour consistent.
 const SUBJECT_MAX_LENGTH = 255;
+const MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024;
 const DRAFT_ORIGIN_HEADER = 'X-Agent-Draft-Origin';
 type DraftOrigin = 'reply' | 'non_reply';
+
+function attachmentSizeError(attachments: OutboundAttachment[] | undefined): EmailError | undefined {
+  const oversized = attachments?.find(att => att.content.length > MAX_ATTACHMENT_SIZE);
+  if (!oversized) return undefined;
+  return {
+    code: 'ATTACHMENT_TOO_LARGE',
+    message: `Attachment "${oversized.filename}" is ${oversized.content.length} bytes; maximum size is 25 MB per attachment.`,
+    provider: 'gmail',
+    recoverable: false,
+  };
+}
 
 export interface GmailApiClient {
   listMessages(opts: { labelIds?: string[]; maxResults?: number; q?: string }): Promise<{ messages?: Array<{ id: string; threadId: string }>; resultSizeEstimate?: number }>;
@@ -270,6 +283,8 @@ export class GmailEmailProvider {
   }
 
   async sendMessage(msg: ComposeMessage): Promise<SendResult> {
+    const sizeError = attachmentSizeError(msg.attachments);
+    if (sizeError) return { success: false, error: sizeError };
     const raw = buildRawMessage(msg);
     try {
       const result = await this.client.sendMessage(raw, msg.threadId);
@@ -280,6 +295,8 @@ export class GmailEmailProvider {
   }
 
   async replyToMessage(messageId: string, body: string, opts?: ReplyOptions): Promise<SendResult> {
+    const sizeError = attachmentSizeError(opts?.attachments);
+    if (sizeError) return { success: false, error: sizeError };
     // Default reply-all: cc every other thread participant (matches Microsoft's
     // createReplyAll semantics). When opts.replyAll is explicitly false, reply
     // only to the original sender. Caller-supplied opts.cc/bcc layer on top
@@ -325,6 +342,8 @@ export class GmailEmailProvider {
   }
 
   async createDraft(msg: ComposeMessage): Promise<DraftResult> {
+    const sizeError = attachmentSizeError(msg.attachments);
+    if (sizeError) return { success: false, error: sizeError };
     const raw = buildRawMessage(msg, { draftOrigin: 'non_reply' });
     const result = await this.client.createDraft(raw, msg.threadId);
     return { success: true, draftId: result.id };
@@ -340,6 +359,8 @@ export class GmailEmailProvider {
   }
 
   async createReplyDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {
+    const sizeError = attachmentSizeError(opts?.attachments);
+    if (sizeError) return { success: false, error: sizeError };
     try {
       const original = await this.getMessage(messageId);
       // Drafts stay allowlist-exempt; send_draft re-reads the stored draft's
@@ -450,6 +471,9 @@ export class GmailEmailProvider {
         bodyHtml: msg.bodyHtml ?? current.bodyHtml,
         attachments,
       };
+
+      const sizeError = attachmentSizeError(attachments);
+      if (sizeError) return { success: false, draftId, error: sizeError };
 
       const raw = buildRawMessage(merged, {
         inReplyTo: current.inReplyTo,
