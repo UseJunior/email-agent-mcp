@@ -1,6 +1,6 @@
 {
   "name": "@usejunior/email-agent-mcp",
-  "version": "0.3.5",
+  "version": "0.4.0",
   "description": "Compatibility package for email-agent-mcp — use the unscoped package for new installations",
   "type": "module",
   "main": "./index.js",
@@ -15,7 +15,7 @@
     }
   },
   "dependencies": {
-    "email-agent-mcp": "0.3.5"
+    "email-agent-mcp": "0.4.0"
   },
   "engines": {
     "node": ">=20"
