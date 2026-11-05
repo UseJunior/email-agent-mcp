@@ -7,7 +7,7 @@ import { createDraftAction, sendDraftAction, updateDraftAction } from './draft.j
 import { sendEmailAction } from './send.js';
 import { replyToEmailAction } from './reply.js';
 import { buildDraftPreview, PREVIEW_BODY_LIMIT } from './compose-helpers.js';
-import { ProviderError } from '../providers/provider.js';
+import { MessageNotFoundError, ProviderError } from '../providers/provider.js';
 import { SendLedger } from '../security/send-ledger.js';
 import type { ActionContext } from './registry.js';
 import type { EmailMessage } from '../types.js';
@@ -663,6 +663,50 @@ describe('email-write/Update Draft', () => {
     });
 
     expect(result.error?.code).toBe('REPLY_DRAFT_BODY_IMMUTABLE');
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(provider.getDrafts().get(created.draftId!)!.body).toBe('Original');
+  });
+
+  it('Scenario: Missing draft during reply-status lookup returns MESSAGE_NOT_FOUND', async () => {
+    vi.spyOn(provider, 'getDraftReplyStatus').mockRejectedValueOnce(new MessageNotFoundError('Gmail draft r-gone not found'));
+    const updateSpy = vi.spyOn(provider, 'updateDraft');
+
+    const result = await updateDraftAction.run(ctx, { draft_id: 'r-gone', body: 'Replacement', replace_body: true });
+
+    expect(result).toMatchObject({ success: false, error: { code: 'MESSAGE_NOT_FOUND', recoverable: false } });
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: MessageNotFoundError from a duplicate email-core copy is still MESSAGE_NOT_FOUND', async () => {
+    const foreign = Object.assign(new Error('Draft gone not found'), { name: 'MessageNotFoundError' });
+    vi.spyOn(provider, 'getDraftReplyStatus').mockRejectedValueOnce(foreign);
+
+    const result = await updateDraftAction.run(ctx, { draft_id: 'gone', body: 'Replacement', replace_body: true });
+
+    expect(result).toMatchObject({ success: false, error: { code: 'MESSAGE_NOT_FOUND', recoverable: false } });
+  });
+
+  it('Scenario: Provider not-found code during reply-status lookup is preserved', async () => {
+    vi.spyOn(provider, 'getDraftReplyStatus').mockRejectedValueOnce(
+      new ProviderError('DRAFT_NOT_FOUND', 'Draft not found: x', 'mock', false),
+    );
+    const updateSpy = vi.spyOn(provider, 'updateDraft');
+
+    const result = await updateDraftAction.run(ctx, { draft_id: 'x', body: 'Replacement', replace_body: true });
+
+    expect(result.error?.code).toBe('DRAFT_NOT_FOUND');
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Failed reply-status lookup fails closed with DRAFT_STATUS_UNAVAILABLE', async () => {
+    const created = await createDraftAction.run(ctx, { to: 'alice@allowed.com', subject: 'Lookup fails', body: 'Original' });
+    vi.spyOn(provider, 'getDraftReplyStatus').mockRejectedValueOnce(new Error('socket hang up'));
+    const updateSpy = vi.spyOn(provider, 'updateDraft');
+
+    const result = await updateDraftAction.run(ctx, { draft_id: created.draftId!, body: 'Replacement', replace_body: true });
+
+    expect(result.error?.code).toBe('DRAFT_STATUS_UNAVAILABLE');
+    expect(result.error?.message).toContain('socket hang up');
     expect(updateSpy).not.toHaveBeenCalled();
     expect(provider.getDrafts().get(created.draftId!)!.body).toBe('Original');
   });
