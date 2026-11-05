@@ -113,7 +113,7 @@ function standard(md: string): string {
 }
 
 describe('email-write/Outlook List Style', () => {
-  it('Scenario: Indented sub-paragraphs render in Outlook\'s split-list shape', () => {
+  it("Scenario: Indented sub-paragraphs render in Outlook's split-list shape", () => {
     const html = outlook(OUTLOOK_REPRO_INDENTED);
     expect(html).toBe(OUTLOOK_REPRO_EXPECTED);
     expect([...html.matchAll(/<ol start="(\d+)">/g)].map(m => m[1])).toEqual(['1', '2', '3']);
@@ -129,7 +129,7 @@ describe('email-write/Outlook List Style', () => {
     expect(outlook(OUTLOOK_REPRO_UNINDENTED)).toBe(OUTLOOK_REPRO_EXPECTED);
   });
 
-  it('Scenario: A list\'s own start number is respected', () => {
+  it("Scenario: A list's own start number is respected", () => {
     const html = outlook('3. Third\n\n   a. sub\n\n4. Fourth\n');
     expect(html).toBe(
       '<ol start="3">\n<li><p>Third</p>\n</li>\n</ol>\n'
