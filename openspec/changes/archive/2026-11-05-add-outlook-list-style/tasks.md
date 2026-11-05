@@ -20,4 +20,4 @@
 - [x] Renderer tests: repro split shape, unindented parity, custom start, unchanged lists, nested lists, closing prose / restarted lists, default golden string, html/text ignored
 - [x] Action tests: each compose action threads `list_style`; frontmatter override
 - [x] `npm run build`, `npm run lint`, `npm run test:run`, `npm run check:spec-coverage`
-- [ ] Live Outlook draft smoke after merge
+- [x] Live Outlook draft smoke after merge (PR #231 smoke comment: split `<ol start>` 1,2,3 + 80px paragraphs survived Graph storage)
