@@ -27,6 +27,8 @@ import {
   settleClaimFromThrow,
   AllowDuplicateSchema,
   ListStyleSchema,
+  ActionWarningSchema,
+  outlookNestedListWarning,
 } from './compose-helpers.js';
 
 const SendEmailInput = z.object({
@@ -56,6 +58,7 @@ const SendEmailOutput = z.object({
   draftId: z.string().optional(),
   preview: DraftPreviewSchema.optional(),
   previewError: PreviewErrorSchema.optional(),
+  warnings: z.array(ActionWarningSchema).optional(),
   error: z.object({
     code: z.string(),
     message: z.string(),
@@ -166,6 +169,9 @@ export const sendEmailAction: EmailAction<
       outBodyHtml = truncateBody(outBodyHtml);
     }
     body = outBody;
+    // Outlook reorders content after a nested list inside an <li> (issue #227).
+    const listWarning = outlookNestedListWarning(outBodyHtml, format, listStyle);
+    const warnings = listWarning ? { warnings: [listWarning] } : {};
 
     // Draft workflow — skip allowlist check and rate limit
     if (draft) {
@@ -184,6 +190,7 @@ export const sendEmailAction: EmailAction<
         success: draftResult.success,
         draftId: draftResult.draftId,
         ...previewResult,
+        ...warnings,
         error: draftResult.error ? {
           code: draftResult.error.code,
           message: draftResult.error.message,
@@ -266,6 +273,7 @@ export const sendEmailAction: EmailAction<
           success: result.success,
           messageId: result.messageId,
           scheduledSendAt: result.scheduledSendAt,
+          ...warnings,
           error: result.error ? {
             code: result.error.code,
             message: result.error.message,
@@ -312,6 +320,7 @@ export const sendEmailAction: EmailAction<
       return {
         success: result.success,
         messageId: result.messageId,
+        ...warnings,
         error: result.error ? {
             code: result.error.code,
             message: result.error.message,

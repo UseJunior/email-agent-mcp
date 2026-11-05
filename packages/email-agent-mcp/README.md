@@ -130,8 +130,12 @@ Outlook dark mode does not hide the text. For numbered items with lettered
 sub-paragraphs that someone will edit in Outlook, pass `list_style: "outlook"`:
 the sub-paragraphs are emitted outside the list as `<p style="margin-left:80px">`
 between `<ol start="N">` segments — the shape Outlook itself saves — so indenting
-one does not renumber the list. Ignored for `html` and `text`; the default
-rendering is unchanged.
+one does not renumber the list. The same option moves a paragraph that follows
+an item's nested list out after the list, because Outlook's editor otherwise
+shows it above the nested list. Ignored for `html` and `text`; the default
+rendering is unchanged. If the stored or sent HTML still has content after a
+nested list inside an `<li>`, the response includes an
+`OUTLOOK_NESTED_LIST_REORDER` warning (your HTML is not rewritten).
 
 For `update_draft`, changing `body` or `body_file` requires
 `replace_body: true` and is allowed only for non-reply drafts. Reply draft

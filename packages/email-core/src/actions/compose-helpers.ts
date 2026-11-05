@@ -9,6 +9,7 @@ import { MAX_ATTACHMENT_SIZE, resolveAttachmentFile } from '../content/attachmen
 import type { PathSandboxInput } from '../content/safe-path.js';
 import type { BodyFormat, ListStyle } from '../content/body-renderer.js';
 import { LIST_STYLES } from '../content/body-renderer.js';
+import { findNestedListReorderHazards } from '../content/outlook-list-hazards.js';
 import { parseAddressList } from '../utils/address.js';
 import { validateAttachment, sanitizeFilename } from './attachments.js';
 import {
@@ -159,9 +160,76 @@ export const ListStyleSchema = z.enum(LIST_STYLES as [ListStyle, ...ListStyle[]]
     + 'segment is <ol start="N"> so numbering continues. Use it when the recipient will edit the message in '
     + 'Outlook: Tab on a sub-paragraph then indents it instead of demoting the numbered item above and '
     + 'renumbering the list. Either markdown habit works: sub-paragraphs indented under their item, or '
-    + 'unindented between items whose numbers continue (1., then 2.). Bullet lists, items with no '
-    + "sub-paragraphs, and items containing a nested list are unchanged. Ignored when format is 'html' or 'text'.",
+    + 'unindented between items whose numbers continue (1., then 2.). A paragraph that follows a nested '
+    + 'list inside an item (numbered or bulleted) is moved out after the list the same way, because '
+    + "Outlook's editor otherwise moves it above the nested list. Other bullet lists, items with no "
+    + "sub-paragraphs, and items ending in a nested list are unchanged. Ignored when format is 'html' or 'text'.",
   );
+
+// --- Warnings ---
+
+/** A non-fatal note on a successful (or attempted) compose call. */
+export const ActionWarningSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+});
+export type ActionWarning = z.infer<typeof ActionWarningSchema>;
+
+/** The defined warnings, or undefined when there are none (so the field can be omitted). */
+export function collectWarnings(...candidates: Array<ActionWarning | undefined>): ActionWarning[] | undefined {
+  const warnings = candidates.filter((w): w is ActionWarning => w !== undefined);
+  return warnings.length > 0 ? warnings : undefined;
+}
+
+const HAZARD_LIST_LIMIT = 3;
+
+/**
+ * Warn when the HTML a compose call stores or sends holds content after a
+ * nested list inside the same `<li>`, which Outlook's compose editor moves
+ * above the nested list when the message is opened for editing (issue #227).
+ * The HTML is never rewritten here — for `format: 'html'` the caller owns the
+ * markup — so the warning says how to fix it at the source.
+ *
+ * Pass the HTML exactly as it goes to the provider (after truncation). The
+ * check is advisory: if analysis fails for any reason, no warning is returned
+ * and the compose call proceeds.
+ */
+export function outlookNestedListWarning(
+  bodyHtml: string | undefined,
+  format: BodyFormat | undefined,
+  listStyle: ListStyle | undefined,
+): ActionWarning | undefined {
+  if (bodyHtml === undefined) return undefined;
+  let hazards: string[];
+  try {
+    hazards = findNestedListReorderHazards(bodyHtml);
+  } catch (err) {
+    console.error(`[email-core] nested-list check skipped: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
+  if (hazards.length === 0) return undefined;
+  const shown = hazards.slice(0, HAZARD_LIST_LIMIT).map(h => `"${h}"`).join(', ');
+  const more = hazards.length > HAZARD_LIST_LIMIT ? ` and ${hazards.length - HAZARD_LIST_LIMIT} more` : '';
+  const where = `${hazards.length} list item${hazards.length === 1 ? '' : 's'} (${shown}${more})`;
+  let fix: string;
+  if (format === 'html') {
+    fix = 'This HTML is passed through unchanged. To keep the order, close the <li> after its nested list and put the '
+      + 'following content after the enclosing list, e.g. as <p style="margin-left:80px">, then reopen the '
+      + 'list (with <ol start="N"> to continue numbering).';
+  } else if (listStyle === 'outlook') {
+    fix = "list_style 'outlook' moves out only paragraphs that follow a single nested list in a top-level item; "
+      + 'restructure these items (for example, end the item at its nested list and continue in a new paragraph).';
+  } else {
+    fix = "Pass list_style: 'outlook' to move paragraphs that follow a nested list out of the item in the shape "
+      + 'Outlook keeps.';
+  }
+  return {
+    code: 'OUTLOOK_NESTED_LIST_REORDER',
+    message: `In ${where}, content follows a nested list inside the same <li>. Outlook's compose editor moves `
+      + 'that content above the nested list when the message is opened for editing, and saves it in that order. '
+      + fix,
+  };
+}
 
 // --- Outbound attachments ---
 

@@ -2137,3 +2137,125 @@ ${LISTS_MD}`);
     expect(provider.getDrafts().get(overridden.draftId!)!.bodyHtml).not.toContain('margin-left:80px');
   });
 });
+
+describe('email-write/Outlook Nested List Warning', () => {
+  // Issue #227 minimal repro, verbatim.
+  const REPRO_HTML = `<ol>
+  <li>
+    <p><strong>ITEM 2 lead-in.</strong> Body ending with a colon:</p>
+    <ul><li>BULLET a;</li><li>BULLET b.</li></ul>
+    <p>AFTER-BULLETS paragraph. It should appear below the bullets.</p>
+  </li>
+</ol>`;
+  const REPRO_MD = '1. **ITEM 2 lead-in.** Body ending with a colon:\n\n   - BULLET a;\n   - BULLET b.\n\n'
+    + '   AFTER-BULLETS paragraph. It should appear below the bullets.\n';
+  const CLEAN_HTML = '<ol><li><p>lead</p><ul><li>a</li><li>b</li></ul></li><li><p>next</p></li></ol>';
+  const PARENT_ID = 'abc123def456ghi789jkl012';
+
+  const reorderWarning = (result: { warnings?: Array<{ code: string; message: string }> }) =>
+    result.warnings?.find(w => w.code === 'OUTLOOK_NESTED_LIST_REORDER');
+
+  function addParent(): void {
+    provider.addMessage({
+      id: PARENT_ID,
+      subject: 'Original',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'alice@allowed.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+  }
+
+  it('Scenario: HTML with content after a nested list returns a warning', async () => {
+    const result = await createDraftAction.run(ctx, {
+      to: 'jane@example.com', subject: 'Repro', body: REPRO_HTML, format: 'html',
+    });
+    expect(result.success).toBe(true);
+    const warning = reorderWarning(result);
+    expect(warning).toBeDefined();
+    expect(warning!.message).toContain('"ITEM 2 lead-in. Body ending with a colon:"');
+    expect(warning!.message).toContain('passed through unchanged');
+    // The caller's HTML is untouched (only the default force-black wrapper is added).
+    expect(provider.getDrafts().get(result.draftId!)!.bodyHtml)
+      .toBe(`<div style="color: #000000;">${REPRO_HTML}</div>`);
+  });
+
+  it('Scenario: Every compose action returns the nested-list warning', async () => {
+    // update_draft — only when the body is replaced.
+    const created = await createDraftAction.run(ctx, { to: 'jane@example.com', subject: 'S', body: 'plain' });
+    expect(reorderWarning(created)).toBeUndefined();
+    const updated = await updateDraftAction.run(ctx, {
+      draft_id: created.draftId!, body: REPRO_HTML, format: 'html', replace_body: true,
+    });
+    expect(updated.success).toBe(true);
+    expect(reorderWarning(updated)).toBeDefined();
+    expect(provider.getDrafts().get(created.draftId!)!.bodyHtml).toContain(REPRO_HTML);
+    const subjectOnly = await updateDraftAction.run(ctx, { draft_id: created.draftId!, subject: 'S2' });
+    expect(reorderWarning(subjectOnly)).toBeUndefined();
+
+    // send_email — send and draft modes.
+    const sent = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com', subject: 'Sent', body: REPRO_HTML, format: 'html',
+    });
+    expect(sent.success).toBe(true);
+    expect(reorderWarning(sent)).toBeDefined();
+    expect(provider.getSentMessages().at(-1)!.bodyHtml).toContain(REPRO_HTML);
+    const sentDraft = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com', subject: 'Draft', body: REPRO_HTML, format: 'html', draft: true,
+    });
+    expect(reorderWarning(sentDraft)).toBeDefined();
+
+    // reply_to_email — send and draft modes.
+    addParent();
+    const replied = await replyToEmailAction.run(ctx, { message_id: PARENT_ID, body: REPRO_HTML, format: 'html' });
+    expect(replied.success).toBe(true);
+    expect(reorderWarning(replied)).toBeDefined();
+    expect(provider.getSentMessages().at(-1)!.bodyHtml).toContain(REPRO_HTML);
+    const replyDraft = await replyToEmailAction.run(ctx, {
+      message_id: PARENT_ID, body: REPRO_HTML, format: 'html', draft: true,
+    });
+    expect(replyDraft.success).toBe(true);
+    expect(reorderWarning(replyDraft)).toBeDefined();
+  });
+
+  it('Scenario: A nested list that ends its item does not warn', async () => {
+    const draft = await createDraftAction.run(ctx, {
+      to: 'jane@example.com', subject: 'Clean', body: CLEAN_HTML, format: 'html',
+    });
+    expect(draft.success).toBe(true);
+    expect(draft.warnings).toBeUndefined();
+    const sent = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com', subject: 'Clean', body: CLEAN_HTML, format: 'html',
+    });
+    expect(sent.warnings).toBeUndefined();
+    // Text bodies are never checked.
+    const text = await createDraftAction.run(ctx, {
+      to: 'jane@example.com', subject: 'Text', body: REPRO_HTML, format: 'text',
+    });
+    expect(text.warnings).toBeUndefined();
+  });
+
+  it('checks the HTML after truncation, not before (peer-review finding)', async () => {
+    // The hazardous item sits past the body size limit, so truncation drops it.
+    const body = `<p>${'a'.repeat(3_700_000)}</p><ul><li>lead<ul><li>x</li></ul><p>tail</p></li></ul>`;
+    const result = await createDraftAction.run(ctx, { to: 'jane@example.com', subject: 'Big', body, format: 'html' });
+    expect(result.success).toBe(true);
+    expect(provider.getDrafts().get(result.draftId!)!.bodyHtml).not.toContain('<p>tail</p>');
+    expect(reorderWarning(result)).toBeUndefined();
+  });
+
+  it('Scenario: Markdown bodies are checked after rendering', async () => {
+    const plain = await createDraftAction.run(ctx, { to: 'jane@example.com', subject: 'Md', body: REPRO_MD });
+    const warning = reorderWarning(plain);
+    expect(warning).toBeDefined();
+    expect(warning!.message).toContain("list_style: 'outlook'");
+
+    const shaped = await createDraftAction.run(ctx, {
+      to: 'jane@example.com', subject: 'Md', body: REPRO_MD, list_style: 'outlook',
+    });
+    expect(shaped.warnings).toBeUndefined();
+    expect(provider.getDrafts().get(shaped.draftId!)!.bodyHtml)
+      .toContain('</ol>\n<p style="margin-left:80px">AFTER-BULLETS paragraph.');
+  });
+});
