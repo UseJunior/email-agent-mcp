@@ -26,6 +26,7 @@ import {
   claimDelivery,
   settleClaimFromThrow,
   AllowDuplicateSchema,
+  ListStyleSchema,
 } from './compose-helpers.js';
 
 const SendEmailInput = z.object({
@@ -41,6 +42,7 @@ const SendEmailInput = z.object({
     .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
   force_black: z.boolean().optional()
     .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true. Ignored when format is "text".'),
+  list_style: ListStyleSchema.optional(),
   attachments: z.array(AttachmentInputSchema).optional()
     .describe('Files to attach, maximum 25 MB per file. Each entry takes a sandboxed `path` or inline `base64`.'),
   scheduled_send_at: ScheduledSendAtSchema.optional(),
@@ -103,7 +105,7 @@ export const sendEmailAction: EmailAction<
       return { success: false, error: fields.error };
     }
 
-    const { to, cc, bcc, subject, draft, format, forceBlack } = fields;
+    const { to, cc, bcc, subject, draft, format, forceBlack, listStyle } = fields;
     let { body } = fields;
 
     // send_email has no bcc input, and its allowlist gate covers to/cc only. A
@@ -152,7 +154,7 @@ export const sendEmailAction: EmailAction<
     // Render body for transport: markdown → HTML by default.
     // Provider branches on bodyHtml to pick HTML vs Text content-type; the
     // raw source stays in `body` as a plain-text fallback.
-    const rendered = renderEmailBody(body, { format, forceBlack });
+    const rendered = renderEmailBody(body, { format, forceBlack, listStyle });
     let outBody = rendered.body;
     let outBodyHtml = rendered.bodyHtml;
 

@@ -7,7 +7,8 @@ import type { EmailReader } from '../providers/provider.js';
 import { resolveBodyFile } from '../content/body-loader.js';
 import { MAX_ATTACHMENT_SIZE, resolveAttachmentFile } from '../content/attachment-loader.js';
 import type { PathSandboxInput } from '../content/safe-path.js';
-import type { BodyFormat } from '../content/body-renderer.js';
+import type { BodyFormat, ListStyle } from '../content/body-renderer.js';
+import { LIST_STYLES } from '../content/body-renderer.js';
 import { parseAddressList } from '../utils/address.js';
 import { validateAttachment, sanitizeFilename } from './attachments.js';
 import {
@@ -72,6 +73,7 @@ export interface ComposeFields {
   draft?: boolean;
   format?: BodyFormat;
   forceBlack?: boolean;
+  listStyle?: ListStyle;
   error?: ActionError;
 }
 
@@ -94,6 +96,7 @@ export async function resolveComposeFields(
     draft?: boolean;
     format?: BodyFormat;
     force_black?: boolean;
+    list_style?: ListStyle;
   },
   sandbox?: PathSandboxInput,
   opts?: { bodyOptional?: boolean },
@@ -107,6 +110,7 @@ export async function resolveComposeFields(
   let draft = input.draft;
   let format = input.format;
   let forceBlack = input.force_black;
+  let listStyle = input.list_style;
 
   if (input.body_file) {
     const bodyResult = await resolveBodyFile(input.body_file, sandbox);
@@ -126,6 +130,7 @@ export async function resolveComposeFields(
       if (fm.draft !== undefined) draft = fm.draft;
       if (fm.format !== undefined) format = fm.format;
       if (fm.force_black !== undefined) forceBlack = fm.force_black;
+      if (fm.list_style !== undefined) listStyle = fm.list_style;
     }
   } else if (input.body) {
     body = input.body;
@@ -136,8 +141,27 @@ export async function resolveComposeFields(
     };
   }
 
-  return { body: body ?? '', to, cc, bcc, subject, replyTo, draft, format, forceBlack };
+  return { body: body ?? '', to, cc, bcc, subject, replyTo, draft, format, forceBlack, listStyle };
 }
+
+// --- Body rendering options ---
+
+/**
+ * `list_style` on every compose action that renders a markdown body. Shared so
+ * the four tool schemas cannot drift apart.
+ */
+export const ListStyleSchema = z.enum(LIST_STYLES as [ListStyle, ...ListStyle[]])
+  .describe(
+    "Ordered-list shaping for markdown bodies. 'default' (the default) is standard markdown rendering. "
+    + "'outlook' emits numbered items that carry sub-paragraphs (for example lettered points a., b. under "
+    + 'each number) in the shape Outlook\'s own editor saves: the numbered list is split around the '
+    + 'sub-paragraphs, which follow outside the list as <p style="margin-left:80px">, and each later '
+    + 'segment is <ol start="N"> so numbering continues. Use it when the recipient will edit the message in '
+    + 'Outlook: Tab on a sub-paragraph then indents it instead of demoting the numbered item above and '
+    + 'renumbering the list. Either markdown habit works: sub-paragraphs indented under their item, or '
+    + 'unindented between items whose numbers continue (1., then 2.). Bullet lists, items with no '
+    + "sub-paragraphs, and items containing a nested list are unchanged. Ignored when format is 'html' or 'text'.",
+  );
 
 // --- Outbound attachments ---
 

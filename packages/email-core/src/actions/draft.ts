@@ -29,6 +29,7 @@ import {
   claimDelivery,
   settleClaimFromThrow,
   AllowDuplicateSchema,
+  ListStyleSchema,
 } from './compose-helpers.js';
 
 // --- Shared schemas ---
@@ -74,6 +75,7 @@ const CreateDraftInput = z.object({
     .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
   force_black: z.boolean().optional()
     .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true.'),
+  list_style: ListStyleSchema.optional(),
   attachments: z.array(AttachmentInputSchema).optional()
     .describe('Files to attach, maximum 25 MB per file. Each entry takes a sandboxed `path` or inline `base64`.'),
 });
@@ -83,7 +85,7 @@ export const createDraftAction: EmailAction<
   z.infer<typeof DraftOutput>
 > = {
   name: 'create_draft',
-  description: 'Create an email draft with to/cc/bcc recipients. Supports body_file with YAML frontmatter (to, cc, bcc, subject, reply_to, format). Use reply_to for threaded reply drafts, where to and subject are derived from the parent message and may be omitted; pass reply_all=false with reply_to to draft a sender-only reply.',
+  description: 'Create an email draft with to/cc/bcc recipients. Supports body_file with YAML frontmatter (to, cc, bcc, subject, reply_to, format, force_black, list_style). Use reply_to for threaded reply drafts, where to and subject are derived from the parent message and may be omitted; pass reply_all=false with reply_to to draft a sender-only reply. For numbered items with lettered sub-paragraphs that someone will edit in Outlook, pass list_style: \'outlook\' so indenting a sub-paragraph does not renumber the list.',
   input: CreateDraftInput,
   output: DraftOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -100,7 +102,7 @@ export const createDraftAction: EmailAction<
       return { success: false, error: fields.error };
     }
 
-    const { to, cc, bcc, subject, replyTo, format, forceBlack } = fields;
+    const { to, cc, bcc, subject, replyTo, format, forceBlack, listStyle } = fields;
     let { body } = fields;
 
     // Resolve attachments (sandboxed path reads + validation)
@@ -142,7 +144,7 @@ export const createDraftAction: EmailAction<
     }
 
     // Render body: markdown → HTML by default
-    const rendered = renderEmailBody(body, { format, forceBlack });
+    const rendered = renderEmailBody(body, { format, forceBlack, listStyle });
     let outBody = rendered.body;
     let outBodyHtml = rendered.bodyHtml;
 
@@ -431,6 +433,7 @@ const UpdateDraftInput = z.object({
     .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
   force_black: z.boolean().optional()
     .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true.'),
+  list_style: ListStyleSchema.optional(),
   attachments: z.array(AttachmentInputSchema).optional()
     .describe('Files to attach, maximum 25 MB per file. Omit to preserve the draft\'s existing attachments; provide an array (possibly empty) to replace them entirely.'),
 });
@@ -465,7 +468,7 @@ export const updateDraftAction: EmailAction<
       return { success: false, error: fields.error };
     }
 
-    const { to, cc, bcc, subject, format, forceBlack } = fields;
+    const { to, cc, bcc, subject, format, forceBlack, listStyle } = fields;
     let { body } = fields;
     const hasBodyEdit = input.body !== undefined || input.body_file !== undefined;
 
@@ -548,7 +551,7 @@ export const updateDraftAction: EmailAction<
     }
 
     if (hasBodyEdit) {
-      const rendered = renderEmailBody(body, { format, forceBlack });
+      const rendered = renderEmailBody(body, { format, forceBlack, listStyle });
       let outBody = rendered.body;
       let outBodyHtml = rendered.bodyHtml;
       if (Buffer.byteLength(outBody, 'utf-8') > BODY_SIZE_LIMIT) {
