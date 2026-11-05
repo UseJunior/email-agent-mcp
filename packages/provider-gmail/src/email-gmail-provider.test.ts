@@ -1956,8 +1956,9 @@ describe('provider-gmail/buildRawMessage RFC 2047 headers (#198)', () => {
       { email: 'bob@corp.com', name: 'Bob, Jr.' },
     ]);
     const block = headerBlock(raw);
-    expect(block).toMatch(/To: =\?UTF-8\?B\?[^\s]+\?=\r\n <zhang@corp\.com>,\r\n "Bob, Jr\." <bob@corp\.com>/);
-    expect(decodeHeader(raw, 'To')).toBe('张伟 <zhang@corp.com>, "Bob, Jr." <bob@corp.com>');
+    expect(await rawFor('x', [{ email: 'bob@corp.com', name: 'Bob, Jr.' }])).toContain('To: "Bob, Jr." <bob@corp.com>');
+    expect(block).toMatch(/To: =\?UTF-8\?B\?[^\s]+\?=\r\n <zhang@corp\.com>,\r\n =\?UTF-8\?B\?[^\s]+\?=\r\n <bob@corp\.com>/);
+    expect(decodeHeader(raw, 'To')).toBe('张伟 <zhang@corp.com>, Bob, Jr. <bob@corp.com>');
   });
 
   it('Scenario: createDraft and updateDraft encode the subject too', async () => {
@@ -1976,11 +1977,13 @@ describe('provider-gmail/buildRawMessage RFC 2047 headers (#198)', () => {
   it('Scenario: every physical header line stays within 76 chars (RFC 2047 §2)', async () => {
     const raw = await rawFor('测试'.repeat(60), [
       { email: 'a@corp.com', name: 'Bob' },
+      { email: 'alice@example.com', name: 'Alice from the international customer success and enterprise account management team' },
       { email: 'a.very.long.address.for.testing@subdomain.example.com', name: '非常长的显示名称'.repeat(4) },
     ]);
-    const lines = headerBlock(raw).split('\r\n').filter(l => l.includes('=?UTF-8?B?'));
-    expect(lines.length).toBeGreaterThan(2);
+    // Every physical line of the Subject and To fields (incl. continuations).
+    const lines = headerBlock(raw).split('\r\n').filter(l => /^(Subject|To):|^ /.test(l));
+    expect(lines.length).toBeGreaterThan(4);
     for (const l of lines) expect(l.length).toBeLessThanOrEqual(76);
-    expect(decodeHeader(raw, 'To')).toBe(`"Bob" <a@corp.com>, ${'非常长的显示名称'.repeat(4)} <a.very.long.address.for.testing@subdomain.example.com>`);
+    expect(decodeHeader(raw, 'To')).toBe(`Bob <a@corp.com>, Alice from the international customer success and enterprise account management team <alice@example.com>, ${'非常长的显示名称'.repeat(4)} <a.very.long.address.for.testing@subdomain.example.com>`);
   });
 });

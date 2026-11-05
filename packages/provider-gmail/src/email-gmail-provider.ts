@@ -855,11 +855,12 @@ const ENCODED_WORD_MAX_BYTES = 39;
  * RFC 2047-encode a header value containing non-ASCII characters as one or
  * more `=?UTF-8?B?...?=` encoded-words, folded with CRLF + space. Words are
  * split on code-point boundaries so multibyte characters are never split.
- * Pure printable-ASCII values are returned unchanged. Callers must strip
+ * Pure printable-ASCII values are returned unchanged unless `force` is set
+ * (used for display names, whose specials would otherwise need quoting). Callers must strip
  * CR/LF first; the output itself contains only base64 and the fold.
  */
-function encodeHeaderWords(value: string): string {
-  if (/^[\x20-\x7e]*$/.test(value)) return value;
+function encodeHeaderWords(value: string, force = false): string {
+  if (!force && /^[\x20-\x7e]*$/.test(value)) return value;
   const words: string[] = [];
   let chunk: Buffer[] = [];
   let size = 0;
@@ -890,23 +891,22 @@ function encodeSubject(value: string): string {
  * in double quotes; embedded CR/LF are stripped to prevent header injection.
  */
 function formatAddressList(addrs: EmailAddress[]): string {
-  let folded = false;
-  const parts = addrs.map(a => {
-    const email = a.email.replace(/[\r\n]+/g, '');
-    if (!a.name) return email;
-    const name = a.name.replace(/[\r\n"]+/g, '');
-    // Non-ASCII display names become encoded-words, which must not be
-    // quoted. Fold before the angle-addr so the line containing the last
-    // encoded-word stays within RFC 2047 §2's 76-char limit.
-    if (!/^[\x20-\x7e]*$/.test(name)) {
-      folded = true;
-      return `${encodeHeaderWords(name)}${CRLF} <${email}>`;
-    }
-    return `"${name}" <${email}>`;
-  });
-  // Once any address is folded, put each address on its own line so encoded
-  // words never share a line with preceding recipients.
-  return parts.join(folded ? `,${CRLF} ` : ', ');
+  const isAscii = (v: string): boolean => /^[\x20-\x7e]*$/.test(v);
+  const entries = addrs.map(a => ({
+    email: a.email.replace(/[\r\n]+/g, ''),
+    name: a.name ? a.name.replace(/[\r\n"]+/g, '') : '',
+  }));
+  // Pure-ASCII lists keep the historical single-line quoted form.
+  if (entries.every(e => isAscii(e.name))) {
+    return entries.map(e => (e.name ? `"${e.name}" <${e.email}>` : e.email)).join(', ');
+  }
+  // The field contains encoded-words, so RFC 2047 §2 caps every physical
+  // line at 76 chars. Encode every display name (encoded-words are never
+  // quoted and fold safely), fold before each angle-addr, and put each
+  // address on its own line.
+  return entries
+    .map(e => (e.name ? `${encodeHeaderWords(e.name, true)}${CRLF} <${e.email}>` : e.email))
+    .join(`,${CRLF} `);
 }
 
 /**
