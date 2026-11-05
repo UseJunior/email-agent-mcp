@@ -290,6 +290,28 @@ For `markdown` and `html` the rendered HTML is wrapped in a
 `<div style="color: #000000;">` so Outlook's dark mode does not turn the text
 white-on-white.
 
+**Numbered items with sub-paragraphs (`list_style: "outlook"`).** Standard
+markdown puts a numbered item's follow-on paragraphs ("a. …", "b. …") inside
+the `<li>`. Outlook's editor does not keep block content there: pressing Tab on
+such a paragraph demotes the numbered item above it and renumbers the list.
+Pass `list_style: "outlook"` (or set it in frontmatter) and those paragraphs are
+emitted the way Outlook itself saves them — the `<ol>` is split around them,
+they follow as `<p style="margin-left:80px">`, and each later segment is
+`<ol start="N">` so numbering continues:
+
+```md
+1. **Apples.** Apples grow on trees.
+
+   a. Red apples. Sweeter.
+
+2. **Pears.** Pears ripen after picking.
+```
+
+Unindented sub-paragraphs between items whose numbers continue (`1.`, then
+`2.`) give the same HTML. Bullet lists, items without sub-paragraphs, and items
+containing a nested list are unchanged; the option is ignored for `html` and
+`text`. The default (`list_style` omitted or `"default"`) renders as before.
+
 **Body files** — `send_email`, `create_draft`, and `update_draft` also accept
 `body_file`: a path to a `.md`, `.html`, or `.txt` file (read relative to
 `EMAIL_MCP_SAFE_DIR`, default the process working directory, plus any
@@ -314,7 +336,7 @@ force_black: false
 ```
 
 Recognized keys are `to`, `cc`, `bcc`, `subject`, `reply_to`, `draft`, `format`,
-and `force_black` (`draft: true` turns a `send_email` call into a draft save).
+`force_black`, and `list_style` (`draft: true` turns a `send_email` call into a draft save).
 `bcc` applies to `create_draft` and `update_draft`; `send_email` refuses a body
 file that sets it rather than sending without the Bcc. A
 frontmatter value overrides the same-named tool parameter. Frontmatter is

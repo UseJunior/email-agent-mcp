@@ -1,7 +1,7 @@
 // Lightweight YAML frontmatter parser for .md body files
 // Flat key-value only — no nesting, no arrays, no multi-line values
-import type { BodyFormat } from './body-renderer.js';
-import { BODY_FORMATS } from './body-renderer.js';
+import type { BodyFormat, ListStyle } from './body-renderer.js';
+import { BODY_FORMATS, LIST_STYLES } from './body-renderer.js';
 
 export interface FrontmatterFields {
   to?: string | string[];
@@ -12,9 +12,10 @@ export interface FrontmatterFields {
   draft?: boolean;
   format?: BodyFormat;
   force_black?: boolean;
+  list_style?: ListStyle;
 }
 
-const KNOWN_KEYS = new Set(['to', 'cc', 'bcc', 'subject', 'reply_to', 'draft', 'format', 'force_black']);
+const KNOWN_KEYS = new Set(['to', 'cc', 'bcc', 'subject', 'reply_to', 'draft', 'format', 'force_black', 'list_style']);
 
 export function parseFrontmatter(
   content: string,
@@ -74,6 +75,12 @@ export function parseFrontmatter(
       // unknown values silently ignored — action layer falls back to default
     } else if (key === 'force_black') {
       fields.force_black = value.toLowerCase() === 'true';
+    } else if (key === 'list_style') {
+      const lowered = value.toLowerCase();
+      if ((LIST_STYLES as readonly string[]).includes(lowered)) {
+        fields.list_style = lowered as ListStyle;
+      }
+      // unknown values silently ignored, like format
     }
   }
 

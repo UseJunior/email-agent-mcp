@@ -19,6 +19,7 @@ import {
   claimDelivery,
   settleClaimFromThrow,
   AllowDuplicateSchema,
+  ListStyleSchema,
 } from './compose-helpers.js';
 
 const ReplyToEmailInput = z.object({
@@ -35,6 +36,7 @@ const ReplyToEmailInput = z.object({
     .describe("Body format. 'markdown' (default) renders via GFM with line-break preservation; 'html' is passthrough; 'text' sends as plain text."),
   force_black: z.boolean().optional()
     .describe('Wrap rendered HTML in a force-black div so Outlook dark mode does not hide the text. Default true.'),
+  list_style: ListStyleSchema.optional(),
   attachments: z.array(AttachmentInputSchema).optional()
     .describe('Files to attach, maximum 25 MB per file. Each entry takes a sandboxed `path` or inline `base64`.'),
   allow_duplicate: AllowDuplicateSchema.optional(),
@@ -159,7 +161,7 @@ export const replyToEmailAction: EmailAction<
     const attachments = attResult.files!.length > 0 ? attResult.files : undefined;
 
     // Render body: markdown → HTML by default
-    const rendered = renderEmailBody(input.body, { format: input.format, forceBlack: input.force_black });
+    const rendered = renderEmailBody(input.body, { format: input.format, forceBlack: input.force_black, listStyle: input.list_style });
     const bodyPlain = rendered.body;
     const bodyHtml = rendered.bodyHtml;
 

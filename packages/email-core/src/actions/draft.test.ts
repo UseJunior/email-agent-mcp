@@ -2055,3 +2055,85 @@ Body here`);
     expect(sent.error?.code).toBe('ALLOWLIST_BLOCKED');
   });
 });
+
+describe('email-write/Outlook List Style', () => {
+  const LISTS_MD = '1. **One.** First item.\n\n   a. sub of one\n\n2. **Two.** Second item.\n';
+  const SPLIT_SHAPE = '<ol start="1">\n<li><p><strong>One.</strong> First item.</p>\n</li>\n</ol>\n'
+    + '<p style="margin-left:80px">a. sub of one</p>\n'
+    + '<ol start="2">\n<li><p><strong>Two.</strong> Second item.</p>\n</li>\n</ol>\n';
+
+  it('Scenario: Every compose action accepts list_style', async () => {
+    // create_draft
+    const created = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com', subject: 'Lists', body: LISTS_MD, list_style: 'outlook',
+    });
+    expect(created.success).toBe(true);
+    expect(provider.getDrafts().get(created.draftId!)!.bodyHtml).toContain(SPLIT_SHAPE);
+
+    // update_draft: start from a default-rendered draft, then replace with the option.
+    const plain = await createDraftAction.run(ctx, {
+      to: 'alice@allowed.com', subject: 'Lists 2', body: LISTS_MD,
+    });
+    expect(provider.getDrafts().get(plain.draftId!)!.bodyHtml).not.toContain('margin-left:80px');
+    const updated = await updateDraftAction.run(ctx, {
+      draft_id: plain.draftId!, body: LISTS_MD, replace_body: true, list_style: 'outlook',
+    });
+    expect(updated.success).toBe(true);
+    expect(provider.getDrafts().get(plain.draftId!)!.bodyHtml).toContain(SPLIT_SHAPE);
+
+    // send_email
+    const sent = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com', subject: 'Lists 3', body: LISTS_MD, list_style: 'outlook',
+    });
+    expect(sent.success).toBe(true);
+    expect(provider.getSentMessages().at(-1)!.bodyHtml).toContain(SPLIT_SHAPE);
+
+    // reply_to_email (send and draft paths)
+    provider.addMessage({
+      id: 'abc123def456ghi789jkl012',
+      subject: 'Original',
+      from: { email: 'partner@allowed.com' },
+      to: [{ email: 'alice@allowed.com' }],
+      receivedAt: '2024-01-01T00:00:00Z',
+      isRead: true,
+      hasAttachments: false,
+    });
+    const replied = await replyToEmailAction.run(ctx, {
+      message_id: 'abc123def456ghi789jkl012', body: LISTS_MD, list_style: 'outlook',
+    });
+    expect(replied.error).toBeUndefined();
+    expect(replied.success).toBe(true);
+    expect(provider.getSentMessages().at(-1)!.bodyHtml).toContain(SPLIT_SHAPE);
+    const before = new Set(provider.getDrafts().keys());
+    const replyDraft = await replyToEmailAction.run(ctx, {
+      message_id: 'abc123def456ghi789jkl012', body: LISTS_MD, list_style: 'outlook', draft: true,
+    });
+    expect(replyDraft.success).toBe(true);
+    const newDraftId = [...provider.getDrafts().keys()].find(id => !before.has(id))!;
+    expect(provider.getDrafts().get(newDraftId)!.bodyHtml).toContain(SPLIT_SHAPE);
+  });
+
+  it('Scenario: Frontmatter list_style is authoritative', async () => {
+    await writeFile(join(testDir, 'lists.md'), `---
+to: alice@allowed.com
+subject: Lists from file
+list_style: outlook
+---
+${LISTS_MD}`);
+
+    const result = await createDraftAction.run(ctx, { body_file: 'lists.md' });
+    expect(result.success).toBe(true);
+    expect(provider.getDrafts().get(result.draftId!)!.bodyHtml).toContain(SPLIT_SHAPE);
+
+    // Frontmatter wins over the call parameter, like format.
+    await writeFile(join(testDir, 'lists-default.md'), `---
+to: alice@allowed.com
+subject: Lists from file
+list_style: default
+---
+${LISTS_MD}`);
+    const overridden = await createDraftAction.run(ctx, { body_file: 'lists-default.md', list_style: 'outlook' });
+    expect(overridden.success).toBe(true);
+    expect(provider.getDrafts().get(overridden.draftId!)!.bodyHtml).not.toContain('margin-left:80px');
+  });
+});

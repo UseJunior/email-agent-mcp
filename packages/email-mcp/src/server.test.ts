@@ -2672,3 +2672,18 @@ describe('mcp-transport/Allowed attachment roots wiring', () => {
     }
   });
 });
+
+describe('mcp-transport/list_style on compose tools (issue #228)', () => {
+  it('exposes list_style as a described enum on every markdown-rendering compose tool', () => {
+    const tools = actionsToMcpTools(EMAIL_ACTIONS as unknown as EmailActionDef[]);
+    for (const name of ['send_email', 'create_draft', 'update_draft', 'reply_to_email']) {
+      const tool = tools.find(t => t.name === name);
+      expect(tool, name).toBeDefined();
+      const prop = (tool!.inputSchema.properties as Record<string, { enum?: string[]; description?: string }>).list_style;
+      expect(prop, name).toBeDefined();
+      expect(prop!.enum).toEqual(['default', 'outlook']);
+      expect(prop!.description).toContain('margin-left:80px');
+      expect(tool!.inputSchema.required ?? []).not.toContain('list_style');
+    }
+  });
+});
