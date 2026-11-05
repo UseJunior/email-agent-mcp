@@ -837,7 +837,51 @@ function parseEmailAddress(raw: string): { email: string; name?: string } {
  * SUBJECT_MAX_LENGTH so cross-provider behaviour is consistent.
  */
 function escapeHeader(value: string): string {
-  return value.replace(/[\r\n]+/g, ' ').slice(0, SUBJECT_MAX_LENGTH);
+  let out = value.replace(/[\r\n]+/g, ' ').slice(0, SUBJECT_MAX_LENGTH);
+  // Don't leave a lone high surrogate where truncation split a pair.
+  if (/[\uD800-\uDBFF]$/.test(out)) out = out.slice(0, -1);
+  return out;
+}
+
+/**
+ * Max UTF-8 bytes per `=?UTF-8?B?...?=` word: 52 base64 chars + 12 overhead
+ * = 64 chars. Kept well under the 75-char word limit so that a first line of
+ * `Subject: ` + word (73) and folded continuation lines stay within RFC 2047
+ * §2's 76-char line limit.
+ */
+const ENCODED_WORD_MAX_BYTES = 39;
+
+/**
+ * RFC 2047-encode a header value containing non-ASCII characters as one or
+ * more `=?UTF-8?B?...?=` encoded-words, folded with CRLF + space. Words are
+ * split on code-point boundaries so multibyte characters are never split.
+ * Pure printable-ASCII values are returned unchanged. Callers must strip
+ * CR/LF first; the output itself contains only base64 and the fold.
+ */
+function encodeHeaderWords(value: string): string {
+  if (/^[\x20-\x7e]*$/.test(value)) return value;
+  const words: string[] = [];
+  let chunk: Buffer[] = [];
+  let size = 0;
+  const flush = (): void => {
+    if (chunk.length === 0) return;
+    words.push(`=?UTF-8?B?${Buffer.concat(chunk).toString('base64')}?=`);
+    chunk = [];
+    size = 0;
+  };
+  for (const ch of value) {
+    const bytes = Buffer.from(ch, 'utf-8');
+    if (size + bytes.length > ENCODED_WORD_MAX_BYTES) flush();
+    chunk.push(bytes);
+    size += bytes.length;
+  }
+  flush();
+  return words.join(`${CRLF} `);
+}
+
+/** Sanitize and RFC 2047-encode a Subject value. */
+function encodeSubject(value: string): string {
+  return encodeHeaderWords(escapeHeader(value));
 }
 
 /**
@@ -846,14 +890,23 @@ function escapeHeader(value: string): string {
  * in double quotes; embedded CR/LF are stripped to prevent header injection.
  */
 function formatAddressList(addrs: EmailAddress[]): string {
-  return addrs
-    .map(a => {
-      const email = a.email.replace(/[\r\n]+/g, '');
-      if (!a.name) return email;
-      const name = a.name.replace(/[\r\n"]+/g, '');
-      return `"${name}" <${email}>`;
-    })
-    .join(', ');
+  let folded = false;
+  const parts = addrs.map(a => {
+    const email = a.email.replace(/[\r\n]+/g, '');
+    if (!a.name) return email;
+    const name = a.name.replace(/[\r\n"]+/g, '');
+    // Non-ASCII display names become encoded-words, which must not be
+    // quoted. Fold before the angle-addr so the line containing the last
+    // encoded-word stays within RFC 2047 §2's 76-char limit.
+    if (!/^[\x20-\x7e]*$/.test(name)) {
+      folded = true;
+      return `${encodeHeaderWords(name)}${CRLF} <${email}>`;
+    }
+    return `"${name}" <${email}>`;
+  });
+  // Once any address is folded, put each address on its own line so encoded
+  // words never share a line with preceding recipients.
+  return parts.join(folded ? `,${CRLF} ` : ', ');
 }
 
 /**
@@ -997,7 +1050,7 @@ function buildRawMessage(msg: ComposeMessage, opts: BuildRawOptions = {}): strin
   if (msg.to.length > 0) headers.push(`To: ${formatAddressList(msg.to)}`);
   if (msg.cc && msg.cc.length > 0) headers.push(`Cc: ${formatAddressList(msg.cc)}`);
   if (msg.bcc && msg.bcc.length > 0) headers.push(`Bcc: ${formatAddressList(msg.bcc)}`);
-  headers.push(`Subject: ${escapeHeader(msg.subject)}`);
+  headers.push(`Subject: ${encodeSubject(msg.subject)}`);
   if (opts.draftOrigin) headers.push(`${DRAFT_ORIGIN_HEADER}: ${opts.draftOrigin}`);
   if (opts.inReplyTo) headers.push(`In-Reply-To: ${escapeHeader(opts.inReplyTo)}`);
   if (opts.references && opts.references.length > 0) {
