@@ -19,6 +19,19 @@
 // changed chain is rendered by marked's own renderer for list items and inline
 // content. Everything else goes through marked's parser untouched, so an input
 // with nothing to reshape renders byte-identically to the default mode.
+//
+// Content after a nested list (issue #227). Outlook's compose editor also
+// hoists any block that follows a nested list inside an `<li>` to *above* that
+// nested list when the message is opened, and saves it in that order. GFM
+// produces exactly that shape for an item whose nested list is followed by a
+// continuation paragraph. Outlook's own surviving shape keeps the lead-in and
+// the nested list in the list and moves the follow-on paragraph out of it, so
+// such an item is reshaped the same way as a continuation paragraph: the list
+// closes after the item (which ends with its nested list), the follow-on
+// paragraphs come next at the sub-paragraph margin, and the list reopens.
+// Because the hoisting is a property of `<li>`, not of numbering, this also
+// applies to top-level bullet lists — a bullet list is split only for this
+// case; its plain continuation paragraphs stay inside the `<li>` as before.
 
 import { marked, Parser } from 'marked';
 import type { MarkedOptions, Token, Tokens } from 'marked';
@@ -27,12 +40,17 @@ import type { MarkedOptions, Token, Tokens } from 'marked';
 export const OUTLOOK_SUBPARAGRAPH_STYLE = 'margin-left:80px';
 
 type OrderedList = Tokens.List & { ordered: true; start: number };
+type BulletList = Tokens.List & { ordered: false };
 type BlockText = Tokens.Paragraph | Tokens.Text;
 
 function isOrderedList(token: Token | undefined): token is OrderedList {
   return token?.type === 'list'
     && (token as Tokens.List).ordered
     && typeof (token as Tokens.List).start === 'number';
+}
+
+function isBulletList(token: Token | undefined): token is BulletList {
+  return token?.type === 'list' && !(token as Tokens.List).ordered;
 }
 
 function isBlockText(token: Token): token is BlockText {
@@ -49,6 +67,32 @@ function splittableParagraphs(item: Tokens.ListItem): BlockText[] | null {
   const blocks = item.tokens.filter(t => t.type !== 'space');
   if (blocks.length < 2 || !blocks.every(isBlockText)) return null;
   return blocks as BlockText[];
+}
+
+/** An item split after its nested list: what stays in the `<li>`, and what moves out. */
+interface NestedListSplit {
+  /** The item's tokens up to and including its nested list. */
+  keep: Token[];
+  /** The paragraphs that followed the nested list. */
+  trailing: BlockText[];
+}
+
+/**
+ * The split for an item Outlook would reorder (issue #227) — a plain
+ * (non-task) item holding exactly one nested list, followed only by one or more
+ * paragraphs. Whatever precedes the nested list stays in the `<li>` untouched.
+ * Items with two nested lists, or with a code block, quote, table, or other
+ * non-paragraph block after the nested list, stay whole: those cannot be moved
+ * out as margin-indented paragraphs. The HTML hazard check still flags them.
+ */
+function nestedListSplit(item: Tokens.ListItem): NestedListSplit | null {
+  if (item.task) return null;
+  const lists = item.tokens.filter(t => t.type === 'list');
+  if (lists.length !== 1) return null;
+  const at = item.tokens.indexOf(lists[0]!);
+  const after = item.tokens.slice(at + 1).filter(t => t.type !== 'space');
+  if (after.length === 0 || !after.every(isBlockText)) return null;
+  return { keep: item.tokens.slice(0, at + 1), trailing: after as BlockText[] };
 }
 
 /**
@@ -110,6 +154,39 @@ function collectChain(tokens: Token[], index: number): Chain {
   return { lists, bridges, next };
 }
 
+/** A paragraph moved out of a list, at Outlook's sub-paragraph margin. */
+function indentedParagraph(paragraph: BlockText, parser: Parser): string {
+  return `<p style="${OUTLOOK_SUBPARAGRAPH_STYLE}">${parser.parseInline(paragraph.tokens ?? [])}</p>\n`;
+}
+
+/**
+ * A top-level bullet list with an item Outlook would reorder, rendered as
+ * `<ul>` segments split after each such item, with that item's follow-on
+ * paragraphs between the segments. Every item keeps marked's own markup; only
+ * the reordered items lose their trailing paragraphs.
+ */
+function renderBulletList(list: BulletList, parser: Parser): string {
+  let html = '';
+  let items = '';
+  const flush = (): void => {
+    if (items === '') return;
+    html += `<ul>\n${items}</ul>\n`;
+    items = '';
+  };
+  for (const item of list.items) {
+    const nested = nestedListSplit(item);
+    if (!nested) {
+      items += parser.renderer.listitem(item);
+      continue;
+    }
+    items += parser.renderer.listitem({ ...item, tokens: nested.keep });
+    flush();
+    for (const paragraph of nested.trailing) html += indentedParagraph(paragraph, parser);
+  }
+  flush();
+  return html;
+}
+
 function renderChain(chain: Chain, parser: Parser): string {
   let html = '';
   let segmentStart = chain.lists[0]!.start;
@@ -126,16 +203,21 @@ function renderChain(chain: Chain, parser: Parser): string {
     pending = [];
   };
   const indent = (paragraph: BlockText): void => {
-    html += `<p style="${OUTLOOK_SUBPARAGRAPH_STYLE}">${parser.parseInline(paragraph.tokens ?? [])}</p>\n`;
+    html += indentedParagraph(paragraph, parser);
   };
 
   chain.lists.forEach((list, i) => {
     for (const item of list.items) {
       const paragraphs = splittableParagraphs(item);
+      const nested = paragraphs ? null : nestedListSplit(item);
       if (paragraphs) {
         pending.push(asLooseItem(item, [paragraphs[0]!]));
         flush();
         paragraphs.slice(1).forEach(indent);
+      } else if (nested) {
+        pending.push({ ...item, tokens: nested.keep });
+        flush();
+        nested.trailing.forEach(indent);
       } else {
         pending.push(asLooseItem(item, item.tokens));
       }
@@ -154,9 +236,11 @@ function renderChain(chain: Chain, parser: Parser): string {
 /**
  * Render markdown to HTML like `marked.parse(raw, options)`, but with
  * top-level ordered lists reshaped into Outlook's split-list form wherever an
- * item carries continuation paragraphs or paragraphs sit between two parts of
- * one numbered list. Lists with nothing to reshape — and all other blocks —
- * render exactly as marked renders them.
+ * item carries continuation paragraphs, paragraphs follow an item's nested
+ * list, or paragraphs sit between two parts of one numbered list. Top-level
+ * bullet lists are split only where paragraphs follow an item's nested list.
+ * Lists with nothing to reshape — and all other blocks — render exactly as
+ * marked renders them.
  */
 export function renderMarkdownOutlookLists(raw: string, options: MarkedOptions): string {
   // Fresh option object per call: Lexer and Parser attach their tokenizer and
@@ -167,8 +251,16 @@ export function renderMarkdownOutlookLists(raw: string, options: MarkedOptions):
 
   const out: Token[] = [];
   let i = 0;
+  const htmlToken = (html: string): Tokens.HTML =>
+    ({ type: 'html', block: true, pre: false, raw: html, text: html }) as Tokens.HTML;
+
   while (i < tokens.length) {
     const token = tokens[i]!;
+    if (isBulletList(token) && token.items.some(item => nestedListSplit(item) !== null)) {
+      out.push(htmlToken(renderBulletList(token, parser)));
+      i++;
+      continue;
+    }
     if (!isOrderedList(token)) {
       out.push(token);
       i++;
@@ -176,14 +268,14 @@ export function renderMarkdownOutlookLists(raw: string, options: MarkedOptions):
     }
     const chain = collectChain(tokens, i);
     const reshape = chain.bridges.length > 0
-      || chain.lists.some(list => list.items.some(item => splittableParagraphs(item) !== null));
+      || chain.lists.some(list => list.items.some(item =>
+        splittableParagraphs(item) !== null || nestedListSplit(item) !== null));
     if (!reshape) {
       out.push(token);
       i++;
       continue;
     }
-    const html = renderChain(chain, parser);
-    out.push({ type: 'html', block: true, pre: false, raw: html, text: html } as Tokens.HTML);
+    out.push(htmlToken(renderChain(chain, parser)));
     i = chain.next;
   }
 

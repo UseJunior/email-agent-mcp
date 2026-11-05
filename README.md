@@ -308,9 +308,21 @@ they follow as `<p style="margin-left:80px">`, and each later segment is
 ```
 
 Unindented sub-paragraphs between items whose numbers continue (`1.`, then
-`2.`) give the same HTML. Bullet lists, items without sub-paragraphs, and items
-containing a nested list are unchanged; the option is ignored for `html` and
+`2.`) give the same HTML.
+
+Outlook's editor also moves anything that follows a nested list inside an
+`<li>` to *above* that nested list when the message is opened for editing. With
+`list_style: "outlook"`, a paragraph after an item's nested list (numbered or
+bulleted) is moved out after the list the same way — the item keeps its
+lead-in and nested list, the paragraph follows at `margin-left:80px`, and the
+list reopens. Other bullet lists, items without sub-paragraphs, and items
+ending in a nested list are unchanged; the option is ignored for `html` and
 `text`. The default (`list_style` omitted or `"default"`) renders as before.
+
+When the HTML a compose call stores or sends still has content after a nested
+list inside an `<li>` — caller-supplied `html` is never rewritten — the
+response carries a `warnings` entry with code `OUTLOOK_NESTED_LIST_REORDER`
+naming the affected items.
 
 **Body files** — `send_email`, `create_draft`, and `update_draft` also accept
 `body_file`: a path to a `.md`, `.html`, or `.txt` file (read relative to

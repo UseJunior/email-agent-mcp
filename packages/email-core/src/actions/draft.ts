@@ -30,7 +30,11 @@ import {
   settleClaimFromThrow,
   AllowDuplicateSchema,
   ListStyleSchema,
+  ActionWarningSchema,
+  outlookNestedListWarning,
+  collectWarnings,
 } from './compose-helpers.js';
+import type { ActionWarning } from './compose-helpers.js';
 
 // --- Shared schemas ---
 
@@ -39,10 +43,7 @@ const DraftOutput = z.object({
   draftId: z.string().optional(),
   preview: DraftPreviewSchema.optional(),
   previewError: PreviewErrorSchema.optional(),
-  warnings: z.array(z.object({
-    code: z.string(),
-    message: z.string(),
-  })).optional(),
+  warnings: z.array(ActionWarningSchema).optional(),
   error: z.object({
     code: z.string(),
     message: z.string(),
@@ -147,6 +148,8 @@ export const createDraftAction: EmailAction<
     const rendered = renderEmailBody(body, { format, forceBlack, listStyle });
     let outBody = rendered.body;
     let outBodyHtml = rendered.bodyHtml;
+    // Outlook reorders content after a nested list inside an <li> (issue #227).
+    const listWarning = outlookNestedListWarning(rendered.bodyHtml, format, listStyle);
 
     if (Buffer.byteLength(outBody, 'utf-8') > BODY_SIZE_LIMIT) {
       outBody = truncateBody(outBody);
@@ -184,12 +187,12 @@ export const createDraftAction: EmailAction<
             authoredOnly: !input.include_quoted,
           })
           : {};
-        const bccWarning = bccVisibleWarning(previewResult.preview);
+        const warnings = collectWarnings(listWarning, bccVisibleWarning(previewResult.preview));
         return {
           success: result.success,
           draftId: result.draftId,
           ...previewResult,
-          ...(bccWarning ? { warnings: [bccWarning] } : {}),
+          ...(warnings ? { warnings } : {}),
           error: result.error ? { code: result.error.code, message: result.error.message, recoverable: result.error.recoverable } : undefined,
         };
       } catch (err) {
@@ -213,12 +216,12 @@ export const createDraftAction: EmailAction<
           authoredOnly: !input.include_quoted,
         })
         : {};
-      const bccWarning = bccVisibleWarning(previewResult.preview);
+      const warnings = collectWarnings(listWarning, bccVisibleWarning(previewResult.preview));
       return {
         success: result.success,
         draftId: result.draftId,
         ...previewResult,
-        ...(bccWarning ? { warnings: [bccWarning] } : {}),
+        ...(warnings ? { warnings } : {}),
         error: result.error ? { code: result.error.code, message: result.error.message, recoverable: result.error.recoverable } : undefined,
       };
     } catch (err) {
@@ -550,8 +553,10 @@ export const updateDraftAction: EmailAction<
       partial.attachments = attResult.files!;
     }
 
+    let listWarning: ActionWarning | undefined;
     if (hasBodyEdit) {
       const rendered = renderEmailBody(body, { format, forceBlack, listStyle });
+      listWarning = outlookNestedListWarning(rendered.bodyHtml, format, listStyle);
       let outBody = rendered.body;
       let outBodyHtml = rendered.bodyHtml;
       if (Buffer.byteLength(outBody, 'utf-8') > BODY_SIZE_LIMIT) {
@@ -575,7 +580,8 @@ export const updateDraftAction: EmailAction<
           authoredOnly: !input.include_quoted,
         })
         : {};
-      const warnings: Array<{ code: string; message: string }> = [];
+      const warnings: ActionWarning[] = [];
+      if (listWarning) warnings.push(listWarning);
       if (result.success && subject !== undefined && isReplyDraft) {
         warnings.push({
           code: 'REPLY_SUBJECT_THREADING_WARNING',

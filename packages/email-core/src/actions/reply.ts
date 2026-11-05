@@ -20,6 +20,8 @@ import {
   settleClaimFromThrow,
   AllowDuplicateSchema,
   ListStyleSchema,
+  ActionWarningSchema,
+  outlookNestedListWarning,
 } from './compose-helpers.js';
 
 const ReplyToEmailInput = z.object({
@@ -48,6 +50,7 @@ const ReplyToEmailOutput = z.object({
   draftId: z.string().optional(),
   preview: DraftPreviewSchema.optional(),
   previewError: PreviewErrorSchema.optional(),
+  warnings: z.array(ActionWarningSchema).optional(),
   error: z.object({
     code: z.string(),
     message: z.string(),
@@ -164,6 +167,9 @@ export const replyToEmailAction: EmailAction<
     const rendered = renderEmailBody(input.body, { format: input.format, forceBlack: input.force_black, listStyle: input.list_style });
     const bodyPlain = rendered.body;
     const bodyHtml = rendered.bodyHtml;
+    // Outlook reorders content after a nested list inside an <li> (issue #227).
+    const listWarning = outlookNestedListWarning(bodyHtml, input.format, input.list_style);
+    const warnings = listWarning ? { warnings: [listWarning] } : {};
 
     // Draft branch — create reply draft, bypass allowlist
     if (input.draft) {
@@ -193,6 +199,7 @@ export const replyToEmailAction: EmailAction<
           success: draftResult.success,
           draftId: draftResult.draftId,
           ...previewResult,
+          ...warnings,
           error: draftResult.error ? {
             code: draftResult.error.code,
             message: draftResult.error.message,
@@ -273,6 +280,7 @@ export const replyToEmailAction: EmailAction<
       return {
         success: result.success,
         messageId: result.messageId,
+        ...warnings,
         error: result.error ? {
             code: result.error.code,
             message: result.error.message,

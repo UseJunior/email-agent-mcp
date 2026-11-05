@@ -105,6 +105,29 @@ const OUTLOOK_REPRO_EXPECTED = [
   '<ol start="3">\n<li><p><strong>Plums are the third topic.</strong> Short season.</p>\n</li>\n</ol>\n',
 ].join('');
 
+// Issue #227: a list item whose nested list is followed by a paragraph. The
+// issue gives the HTML; this is the markdown that GFM renders to that shape,
+// plus a following item so the list has to reopen.
+const NESTED_REPRO_INDENTED = `1. **ITEM 2 lead-in.** Body ending with a colon:
+
+   - BULLET a;
+   - BULLET b.
+
+   AFTER-BULLETS paragraph. It should appear below the bullets.
+
+2. **ITEM 3.** Next item.
+`;
+const NESTED_REPRO_UNINDENTED = NESTED_REPRO_INDENTED.replace('   AFTER-BULLETS', 'AFTER-BULLETS');
+
+// Outlook's own surviving shape for the repro: lead-in and bullets stay in the
+// list; the follow-on paragraph leaves it at the sub-paragraph margin.
+const NESTED_REPRO_EXPECTED = [
+  '<ol start="1">\n<li><p><strong>ITEM 2 lead-in.</strong> Body ending with a colon:</p>\n',
+  '<ul>\n<li>BULLET a;</li>\n<li>BULLET b.</li>\n</ul>\n</li>\n</ol>\n',
+  '<p style="margin-left:80px">AFTER-BULLETS paragraph. It should appear below the bullets.</p>\n',
+  '<ol start="2">\n<li><p><strong>ITEM 3.</strong> Next item.</p>\n</li>\n</ol>\n',
+].join('');
+
 function outlook(md: string): string {
   return renderEmailBody(md, { listStyle: 'outlook', forceBlack: false }).bodyHtml!;
 }
@@ -158,15 +181,19 @@ describe('email-write/Outlook List Style', () => {
   });
 
   it('Scenario: Items containing a nested list stay whole', () => {
-    const md = '1. Parent\n\n   - child a\n   - child b\n\n   after the nested list\n\n2. Next\n';
-    expect(outlook(md)).toBe(standard(md));
-
-    // In a list that does get split, the nested-list item keeps everything in its <li>.
-    const mixed = '1. Split me\n\n   a. sub\n\n2. Keep me\n\n   - child\n\n   tail\n\n3. Last\n';
-    const html = outlook(mixed);
-    expect(html).toContain('<p style="margin-left:80px">a. sub</p>');
-    expect(html).toContain('<ol start="2">\n<li><p>Keep me</p>\n<ul>\n<li>child</li>\n</ul>\n<p>tail</p>\n</li>\n<li><p>Last</p>\n</li>\n</ol>\n');
-    expect(html).not.toContain('<p style="margin-left:80px">tail</p>');
+    // Nested list as the item's last block: nothing for Outlook to reorder.
+    const last = '1. Parent\n\n   - child a\n   - child b\n\n2. Next\n';
+    expect(outlook(last)).toBe(standard(last));
+    // Two nested lists, or a non-paragraph block after the nested list, cannot be
+    // moved out as margin paragraphs; the item keeps everything (issue #227 scope).
+    for (const md of [
+      '1. Parent\n\n   - a\n\n   between\n\n   1. b\n\n   after\n\n2. Next\n',
+      '1. Parent\n\n   - a\n\n   ```\n   code\n   ```\n\n2. Next\n',
+      '1. Parent\n\n   - a\n\n   > quoted\n\n2. Next\n',
+      '- [ ] task\n\n  - a\n\n  after\n',
+    ]) {
+      expect(outlook(md)).toBe(standard(md));
+    }
 
     // A tight nested-list item inside a reshaped chain keeps marked's own
     // markup — no paragraph wrapper is added to it (peer-review finding).
@@ -177,6 +204,61 @@ describe('email-write/Outlook List Style', () => {
       `<ol start="1">\n${defaultItem}\n</ol>\n`
       + '<p style="margin-left:80px">a. bridge</p>\n'
       + '<ol start="2">\n<li><p>Next</p>\n</li>\n</ol>\n',
+    );
+  });
+
+  it('Scenario: Content after a nested list moves out of the item', () => {
+    // Issue #227 repro (markdown equivalent of the issue's HTML), plus a next item.
+    const html = outlook(NESTED_REPRO_INDENTED);
+    expect(html).toBe(NESTED_REPRO_EXPECTED);
+    // Order: lead-in, bullets, then the follow-on paragraph — outside the list.
+    const lead = html.indexOf('ITEM 2 lead-in.');
+    const bulletA = html.indexOf('BULLET a;');
+    const bulletB = html.indexOf('BULLET b.');
+    const after = html.indexOf('AFTER-BULLETS');
+    expect(lead).toBeLessThan(bulletA);
+    expect(bulletA).toBeLessThan(bulletB);
+    expect(bulletB).toBeLessThan(after);
+    expect(html.lastIndexOf('</ol>', after)).toBeGreaterThan(bulletB);
+    for (const li of html.match(/<li>[^]*?<\/li>\n<\/ol>/g)!) {
+      expect(li).not.toContain('AFTER-BULLETS');
+    }
+
+    // Several follow-on paragraphs all move out, in order, at the same margin;
+    // other items in the chain keep #228's treatment.
+    const many = outlook('1. One\n\n   a. sub\n\n2. Two:\n\n   - x\n\n   p1\n\n   p2\n\n3. Three\n');
+    expect(many).toBe(
+      '<ol start="1">\n<li><p>One</p>\n</li>\n</ol>\n'
+      + '<p style="margin-left:80px">a. sub</p>\n'
+      + '<ol start="2">\n<li><p>Two:</p>\n<ul>\n<li>x</li>\n</ul>\n</li>\n</ol>\n'
+      + '<p style="margin-left:80px">p1</p>\n'
+      + '<p style="margin-left:80px">p2</p>\n'
+      + '<ol start="3">\n<li><p>Three</p>\n</li>\n</ol>\n',
+    );
+
+    // A list's own start number carries through, and a nested ordered list
+    // is treated like a nested bullet list.
+    expect(outlook('4. Four:\n\n   1. x\n   2. y\n\n   after\n\n5. Five\n')).toBe(
+      '<ol start="4">\n<li><p>Four:</p>\n<ol>\n<li>x</li>\n<li>y</li>\n</ol>\n</li>\n</ol>\n'
+      + '<p style="margin-left:80px">after</p>\n'
+      + '<ol start="5">\n<li><p>Five</p>\n</li>\n</ol>\n',
+    );
+  });
+
+  it('Scenario: Follow-on paragraph indentation does not change the output', () => {
+    expect(outlook(NESTED_REPRO_UNINDENTED)).toBe(outlook(NESTED_REPRO_INDENTED));
+    // Tight lead-in (no blank line before the nested list) gives the same too.
+    expect(outlook(NESTED_REPRO_INDENTED.replace(':\n\n   - BULLET a', ':\n   - BULLET a')))
+      .toBe(NESTED_REPRO_EXPECTED);
+  });
+
+  it('Scenario: Bullet-list items with content after a nested list are split', () => {
+    const md = '- Lead:\n\n  - a\n  - b\n\n  After\n\n- Next\n\n  continuation of next\n';
+    expect(outlook(md)).toBe(
+      '<ul>\n<li><p>Lead:</p>\n<ul>\n<li>a</li>\n<li>b</li>\n</ul>\n</li>\n</ul>\n'
+      + '<p style="margin-left:80px">After</p>\n'
+      // The other item keeps marked's own markup, continuation paragraph included.
+      + '<ul>\n<li><p>Next</p>\n<p>continuation of next</p>\n</li>\n</ul>\n',
     );
   });
 
@@ -205,6 +287,18 @@ describe('email-write/Outlook List Style', () => {
       + '</ol>\n</div>';
     expect(renderEmailBody(OUTLOOK_REPRO_INDENTED).bodyHtml).toBe(golden);
     expect(renderEmailBody(OUTLOOK_REPRO_INDENTED, { listStyle: 'default' }).bodyHtml).toBe(golden);
+
+    // Same for the issue #227 repro: default mode keeps marked's nesting.
+    const nestedGolden = '<div style="color: #000000;"><ol>\n'
+      + '<li><p><strong>ITEM 2 lead-in.</strong> Body ending with a colon:</p>\n'
+      + '<ul>\n<li>BULLET a;</li>\n<li>BULLET b.</li>\n</ul>\n'
+      + '<p>AFTER-BULLETS paragraph. It should appear below the bullets.</p>\n'
+      + '</li>\n'
+      + '<li><p><strong>ITEM 3.</strong> Next item.</p>\n'
+      + '</li>\n'
+      + '</ol>\n</div>';
+    expect(renderEmailBody(NESTED_REPRO_INDENTED).bodyHtml).toBe(nestedGolden);
+    expect(renderEmailBody(NESTED_REPRO_INDENTED, { listStyle: 'default' }).bodyHtml).toBe(nestedGolden);
   });
 
   it('Scenario: list_style is ignored for html and text formats', () => {
