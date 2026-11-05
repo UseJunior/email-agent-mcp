@@ -1430,11 +1430,19 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
 
   async getDraftReplyStatus(draftId: string): Promise<DraftReplyStatus> {
     const propertyFilter = `$filter=id eq '${DRAFT_ORIGIN_PROPERTY}'`;
-    const metadata = await this.client.get(
-      `${this.basePath}/messages/${encodeGraphPathId(draftId)}`
-      + `?$select=isDraft,conversationIndex`
-      + `&$expand=singleValueExtendedProperties(${propertyFilter})`,
-    ) as unknown as GraphMessage;
+    let metadata: GraphMessage;
+    try {
+      metadata = await this.client.get(
+        `${this.basePath}/messages/${encodeGraphPathId(draftId)}`
+        + `?$select=isDraft,conversationIndex`
+        + `&$expand=singleValueExtendedProperties(${propertyFilter})`,
+      ) as unknown as GraphMessage;
+    } catch (err) {
+      if (err instanceof GraphApiError && err.status === 404) {
+        throw new MessageNotFoundError(`Draft ${draftId} not found`);
+      }
+      throw err;
+    }
 
     if (metadata.isDraft !== true) return 'indeterminate';
 

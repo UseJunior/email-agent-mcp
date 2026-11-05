@@ -23,6 +23,12 @@ Fields other than the body remain editable on any draft. `subject`, `attachments
 - **AND** the stored draft body is unchanged
 - **AND** the message directs the caller to create a new draft instead
 
+#### Scenario: Reply-status lookup failure on a body edit fails closed honestly
+- **WHEN** `update_draft` is called with a `body` and the provider's reply-status lookup fails
+- **THEN** the body is not changed
+- **AND** if the draft does not exist the response carries the provider's not-found code (e.g. `MESSAGE_NOT_FOUND`), not `REPLY_DRAFT_BODY_IMMUTABLE`
+- **AND** otherwise the response code is `DRAFT_STATUS_UNAVAILABLE`
+
 #### Scenario: Body edit on a non-reply draft requires explicit opt-in
 - **WHEN** `update_draft` is called with a `body` on a draft that is not a reply, and `replace_body` is not set
 - **THEN** the response is a recoverable error identifying `replace_body: true` as the required opt-in

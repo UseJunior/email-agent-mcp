@@ -1480,6 +1480,17 @@ describe('provider-gmail/Update Draft', () => {
     expect(result.error?.code).toBe('INLINE_ATTACHMENTS_UNSUPPORTED');
   });
 
+  it('Scenario: reply status for a deleted draft throws MessageNotFoundError', async () => {
+    const notFound = Object.assign(new Error('Requested entity was not found.'), { code: 404 });
+    const client = createMockGmailClient({
+      getDraft: vi.fn().mockRejectedValue(notFound),
+      getMessage: vi.fn().mockRejectedValue(notFound),
+    });
+    const provider = new GmailEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('r-deleted')).rejects.toBeInstanceOf(MessageNotFoundError);
+  });
+
   it('Scenario: reply status reads the nested draft message by draft resource id', async () => {
     const backingMessage = draftMessageMock();
     const client = createMockGmailClient({

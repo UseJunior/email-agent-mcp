@@ -1381,6 +1381,23 @@ describe('provider-microsoft/Graph Scheduled Send Inspection and Cancellation', 
 describe('provider-microsoft/update_draft Reply Metadata', () => {
   const draftOriginProperty = 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailDraftOrigin';
 
+  it('Scenario: reply status for a missing draft throws MessageNotFoundError', async () => {
+    const client = createMockClient({
+      get: vi.fn().mockRejectedValueOnce(new GraphApiError(404, 'ErrorItemNotFound')),
+    });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('gone')).rejects.toBeInstanceOf(MessageNotFoundError);
+  });
+
+  it('Scenario: reply status non-404 failures propagate unchanged', async () => {
+    const failure = new GraphApiError(503, 'Service Unavailable');
+    const client = createMockClient({ get: vi.fn().mockRejectedValueOnce(failure) });
+    const provider = new GraphEmailProvider(client);
+
+    await expect(provider.getDraftReplyStatus('busy')).rejects.toBe(failure);
+  });
+
   it('Scenario: conflicting duplicate origin stamps are indeterminate', async () => {
     // A forged or colliding second stamp must not be resolvable by read order.
     const client = createMockClient({

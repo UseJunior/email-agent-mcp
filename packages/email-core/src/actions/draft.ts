@@ -5,7 +5,7 @@ import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { checkReplyThreading } from '../security/reply-validation.js';
 import { truncateBody, BODY_SIZE_LIMIT } from '../content/body-loader.js';
 import { renderEmailBody } from '../content/body-renderer.js';
-import { isProviderError, withRetry } from '../providers/provider.js';
+import { isProviderError, MessageNotFoundError, withRetry } from '../providers/provider.js';
 import {
   ScheduledSendAtSchema,
   scheduledSendNotSupportedError,
@@ -473,15 +473,23 @@ export const updateDraftAction: EmailAction<
     // body and subject changes need it: recipient/attachment-only updates must
     // remain editable even if metadata lookup is unavailable.
     let isReplyDraft = false;
+    let statusError: { code: string; message: string; recoverable: boolean } | undefined;
     if (hasBodyEdit || subject !== undefined) {
       try {
         const status = await ctx.provider.getDraftReplyStatus?.(input.draft_id);
         isReplyDraft = status !== 'non_reply';
-      } catch {
+      } catch (err) {
         // Fail closed. An unavailable or failed determination must never make a
-        // destructive body replacement look safe.
+        // destructive body replacement look safe. But report why honestly: a
+        // missing draft is not a reply draft, and a transient lookup failure is
+        // neither.
         isReplyDraft = true;
+        statusError = draftStatusError(err, input.draft_id);
       }
+    }
+
+    if (hasBodyEdit && statusError) {
+      return { success: false, error: statusError };
     }
 
     if (hasBodyEdit && isReplyDraft) {
@@ -587,3 +595,24 @@ export const updateDraftAction: EmailAction<
     }
   },
 };
+
+/**
+ * Map a failed reply-status lookup to the error update_draft returns for a
+ * body edit. Not-found keeps its own code so the caller stops retrying a dead
+ * id; anything else is DRAFT_STATUS_UNAVAILABLE rather than a misleading
+ * REPLY_DRAFT_BODY_IMMUTABLE.
+ */
+function draftStatusError(err: unknown, draftId: string): { code: string; message: string; recoverable: boolean } {
+  if (err instanceof MessageNotFoundError) {
+    return { code: 'MESSAGE_NOT_FOUND', message: err.message, recoverable: false };
+  }
+  if (isProviderError(err) && /NOT_FOUND$/.test(err.code)) {
+    return { code: err.code, message: err.message, recoverable: false };
+  }
+  const detail = err instanceof Error ? err.message : String(err);
+  return {
+    code: 'DRAFT_STATUS_UNAVAILABLE',
+    message: `Could not determine whether draft ${draftId} is a reply draft, so the body was not changed. Retry later. (${detail})`,
+    recoverable: isProviderError(err) ? err.recoverable : true,
+  };
+}
