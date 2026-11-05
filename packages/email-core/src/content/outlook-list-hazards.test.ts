@@ -43,6 +43,23 @@ describe('email-write/Outlook Nested List Warning', () => {
     expect(found[0]!.endsWith('…')).toBe(true);
   });
 
+  it('handles deeply nested HTML without overflowing the stack (peer-review finding)', () => {
+    const depth = 20000;
+    const deepTail = `<ul><li>lead<ul><li>x</li></ul>${'<div>'.repeat(depth)}tail${'</div>'.repeat(depth)}</li></ul>`;
+    expect(findNestedListReorderHazards(deepTail)).toEqual(['lead']);
+    const deepLead = `<ul><li>${'<div>'.repeat(depth)}lead${'</div>'.repeat(depth)}<ul><li>x</li></ul></li></ul>`;
+    expect(findNestedListReorderHazards(deepLead)).toEqual([]);
+  });
+
+  it('ignores text that is never displayed (peer-review finding)', () => {
+    for (const tail of ['<script>hidden()</script>', '<style>.x { color:red }</style>', '<div><style>.x{}</style></div>']) {
+      expect(findNestedListReorderHazards(`<ul><li>lead<ul><li>child</li></ul>${tail}</li></ul>`)).toEqual([]);
+    }
+    // <pre> text is visible.
+    expect(findNestedListReorderHazards('<ul><li>lead<ul><li>child</li></ul><pre>shown</pre></li></ul>'))
+      .toEqual(['lead']);
+  });
+
   it('does not flag nested lists that end their item, or Outlook\'s own shape', () => {
     const clean = [
       '<ol><li><p>lead</p><ul><li>a</li><li>b</li></ul></li><li>next</li></ol>',

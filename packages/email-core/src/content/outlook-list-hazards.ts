@@ -17,6 +17,8 @@ import type { HTMLElement, Node } from 'node-html-parser';
 
 /** Elements that carry content even with no text inside them. */
 const CONTENT_ELEMENTS = new Set(['img', 'hr', 'table', 'iframe', 'video', 'audio', 'object', 'embed', 'svg', 'input']);
+/** Elements whose text is never displayed. */
+const HIDDEN_ELEMENTS = new Set(['script', 'style', 'template', 'head', 'title', 'noscript']);
 const LIST_TAGS = new Set(['ul', 'ol']);
 /** Elements whose boundaries separate words in the snippet; inline ones do not. */
 const INLINE_TAGS = new Set(['a', 'b', 'strong', 'i', 'em', 'u', 's', 'del', 'span', 'font', 'code', 'sub', 'sup', 'small', 'mark']);
@@ -29,18 +31,41 @@ function tagOf(node: Node): string {
 
 /** Non-breaking spaces count as blank: they are what editors leave behind in empty lines. */
 function isBlank(text: string): boolean {
-  return text.replace(/[\s ]+/g, '') === '';
+  return text.replace(/[\s\u00a0]+/g, '') === '';
 }
 
-/** True when a node would show something a reader can see — text, an image, a rule, a table. */
-function hasVisibleContent(node: Node): boolean {
+// Every walk below is iterative with an explicit stack: email HTML can nest
+// thousands of wrappers deep, and a recursive walk (including the parser's own
+// querySelectorAll) overflows the call stack on such input.
+
+/**
+ * Visit `root`'s descendants in document order (pre-order), not descending
+ * into elements for which `enter` returns false. Stops when `visit` returns
+ * true, and returns whether it did.
+ */
+function walk(root: Node, visit: (node: Node) => boolean, enter: (el: Node) => boolean = () => true): boolean {
+  const stack: Node[] = [...root.childNodes].reverse();
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (visit(node)) return true;
+    if (node.nodeType === NodeType.ELEMENT_NODE && enter(node)) {
+      for (let k = node.childNodes.length - 1; k >= 0; k--) stack.push(node.childNodes[k]!);
+    }
+  }
+  return false;
+}
+
+/** True for a node a reader would see: visible text, an image, a rule, a table. */
+function isVisibleLeaf(node: Node): boolean {
   if (node.nodeType === NodeType.TEXT_NODE) return !isBlank(node.text);
-  if (node.nodeType !== NodeType.ELEMENT_NODE) return false;
-  const tag = tagOf(node);
-  if (tag === 'br') return false;
-  if (CONTENT_ELEMENTS.has(tag)) return true;
-  if (!isBlank(node.text)) return true;
-  return node.childNodes.some(hasVisibleContent);
+  return CONTENT_ELEMENTS.has(tagOf(node));
+}
+
+/** True when `node` itself or anything inside it is visible. Hidden elements never are. */
+function hasVisibleContent(node: Node): boolean {
+  if (HIDDEN_ELEMENTS.has(tagOf(node))) return false;
+  if (isVisibleLeaf(node)) return true;
+  return walk(node, isVisibleLeaf, el => !HIDDEN_ELEMENTS.has(tagOf(el)));
 }
 
 /** The nearest `<li>` that contains `node`, or null. */
@@ -74,22 +99,17 @@ function contentFollows(list: HTMLElement, item: HTMLElement): boolean {
 /** The item's own text before its first nested list, collapsed and shortened. */
 function itemSnippet(item: HTMLElement): string {
   let text = '';
-  // Depth-first, stopping at the first nested list wherever it sits.
-  const walk = (node: Node): boolean => {
-    for (const child of node.childNodes) {
-      if (LIST_TAGS.has(tagOf(child))) return true;
-      if (child.nodeType === NodeType.TEXT_NODE) text += child.text;
-      else if (child.nodeType === NodeType.ELEMENT_NODE) {
-        const gap = INLINE_TAGS.has(tagOf(child)) ? '' : ' ';
-        text += gap;
-        if (walk(child)) return true;
-        text += gap;
-      }
-    }
-    return false;
-  };
-  walk(item);
-  const collapsed = text.replace(/[\s ]+/g, ' ').trim();
+  walk(
+    item,
+    node => {
+      if (LIST_TAGS.has(tagOf(node))) return true;
+      if (node.nodeType === NodeType.TEXT_NODE) text += node.text;
+      else if (node.nodeType === NodeType.ELEMENT_NODE && !INLINE_TAGS.has(tagOf(node))) text += ' ';
+      return text.length > SNIPPET_LENGTH * 4;
+    },
+    el => !HIDDEN_ELEMENTS.has(tagOf(el)),
+  );
+  const collapsed = text.replace(/[\s\u00a0]+/g, ' ').trim();
   return collapsed.length > SNIPPET_LENGTH ? `${collapsed.slice(0, SNIPPET_LENGTH - 1)}…` : collapsed;
 }
 
@@ -97,17 +117,23 @@ function itemSnippet(item: HTMLElement): string {
  * The list items in `html` that hold a nested list followed by more content
  * inside the same `<li>` — the shape Outlook's editor reorders. Returns one
  * short snippet of each such item's lead-in text, in document order. A nested
- * list that is the last thing in its item is not a hazard, and neither is
- * Outlook's own shape (a `<ul>` directly inside an `<ol>`, outside any `<li>`).
+ * list that is the last visible thing in its item is not a hazard, and neither
+ * is Outlook's own shape (a `<ul>` directly inside an `<ol>`, outside any `<li>`).
  */
 export function findNestedListReorderHazards(html: string): string[] {
   // Cheap pre-check: no list markup, nothing to parse.
   if (!/<(?:ul|ol)[\s>/]/i.test(html) || !/<li[\s>/]/i.test(html)) return [];
 
   const root = parse(html, { comment: false });
+  const lists: HTMLElement[] = [];
+  walk(root, node => {
+    if (LIST_TAGS.has(tagOf(node))) lists.push(node as HTMLElement);
+    return false;
+  }, el => !HIDDEN_ELEMENTS.has(tagOf(el)));
+
   const hazards: string[] = [];
   const flagged = new Set<HTMLElement>();
-  for (const list of root.querySelectorAll('ul, ol')) {
+  for (const list of lists) {
     const item = enclosingItem(list);
     if (!item || flagged.has(item)) continue;
     if (contentFollows(list, item)) {

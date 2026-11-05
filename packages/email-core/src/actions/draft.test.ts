@@ -2175,7 +2175,7 @@ describe('email-write/Outlook Nested List Warning', () => {
     const warning = reorderWarning(result);
     expect(warning).toBeDefined();
     expect(warning!.message).toContain('"ITEM 2 lead-in. Body ending with a colon:"');
-    expect(warning!.message).toContain('stored as given');
+    expect(warning!.message).toContain('passed through unchanged');
     // The caller's HTML is untouched (only the default force-black wrapper is added).
     expect(provider.getDrafts().get(result.draftId!)!.bodyHtml)
       .toBe(`<div style="color: #000000;">${REPRO_HTML}</div>`);
@@ -2234,6 +2234,15 @@ describe('email-write/Outlook Nested List Warning', () => {
       to: 'jane@example.com', subject: 'Text', body: REPRO_HTML, format: 'text',
     });
     expect(text.warnings).toBeUndefined();
+  });
+
+  it('checks the HTML after truncation, not before (peer-review finding)', async () => {
+    // The hazardous item sits past the body size limit, so truncation drops it.
+    const body = `<p>${'a'.repeat(3_700_000)}</p><ul><li>lead<ul><li>x</li></ul><p>tail</p></li></ul>`;
+    const result = await createDraftAction.run(ctx, { to: 'jane@example.com', subject: 'Big', body, format: 'html' });
+    expect(result.success).toBe(true);
+    expect(provider.getDrafts().get(result.draftId!)!.bodyHtml).not.toContain('<p>tail</p>');
+    expect(reorderWarning(result)).toBeUndefined();
   });
 
   it('Scenario: Markdown bodies are checked after rendering', async () => {

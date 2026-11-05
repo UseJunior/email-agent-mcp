@@ -189,6 +189,10 @@ const HAZARD_LIST_LIMIT = 3;
  * above the nested list when the message is opened for editing (issue #227).
  * The HTML is never rewritten here — for `format: 'html'` the caller owns the
  * markup — so the warning says how to fix it at the source.
+ *
+ * Pass the HTML exactly as it goes to the provider (after truncation). The
+ * check is advisory: if analysis fails for any reason, no warning is returned
+ * and the compose call proceeds.
  */
 export function outlookNestedListWarning(
   bodyHtml: string | undefined,
@@ -196,14 +200,20 @@ export function outlookNestedListWarning(
   listStyle: ListStyle | undefined,
 ): ActionWarning | undefined {
   if (bodyHtml === undefined) return undefined;
-  const hazards = findNestedListReorderHazards(bodyHtml);
+  let hazards: string[];
+  try {
+    hazards = findNestedListReorderHazards(bodyHtml);
+  } catch (err) {
+    console.error(`[email-core] nested-list check skipped: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
   if (hazards.length === 0) return undefined;
   const shown = hazards.slice(0, HAZARD_LIST_LIMIT).map(h => `"${h}"`).join(', ');
   const more = hazards.length > HAZARD_LIST_LIMIT ? ` and ${hazards.length - HAZARD_LIST_LIMIT} more` : '';
   const where = `${hazards.length} list item${hazards.length === 1 ? '' : 's'} (${shown}${more})`;
   let fix: string;
   if (format === 'html') {
-    fix = 'The HTML was stored as given. To keep the order, close the <li> after its nested list and put the '
+    fix = 'This HTML is passed through unchanged. To keep the order, close the <li> after its nested list and put the '
       + 'following content after the enclosing list, e.g. as <p style="margin-left:80px">, then reopen the '
       + 'list (with <ol start="N"> to continue numbering).';
   } else if (listStyle === 'outlook') {

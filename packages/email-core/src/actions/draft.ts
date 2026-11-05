@@ -148,8 +148,6 @@ export const createDraftAction: EmailAction<
     const rendered = renderEmailBody(body, { format, forceBlack, listStyle });
     let outBody = rendered.body;
     let outBodyHtml = rendered.bodyHtml;
-    // Outlook reorders content after a nested list inside an <li> (issue #227).
-    const listWarning = outlookNestedListWarning(rendered.bodyHtml, format, listStyle);
 
     if (Buffer.byteLength(outBody, 'utf-8') > BODY_SIZE_LIMIT) {
       outBody = truncateBody(outBody);
@@ -158,6 +156,8 @@ export const createDraftAction: EmailAction<
       outBodyHtml = truncateBody(outBodyHtml);
     }
     body = outBody;
+    // Outlook reorders content after a nested list inside an <li> (issue #227).
+    const listWarning = outlookNestedListWarning(outBodyHtml, format, listStyle);
 
     // Reply draft path
     if (replyTo) {
@@ -556,7 +556,6 @@ export const updateDraftAction: EmailAction<
     let listWarning: ActionWarning | undefined;
     if (hasBodyEdit) {
       const rendered = renderEmailBody(body, { format, forceBlack, listStyle });
-      listWarning = outlookNestedListWarning(rendered.bodyHtml, format, listStyle);
       let outBody = rendered.body;
       let outBodyHtml = rendered.bodyHtml;
       if (Buffer.byteLength(outBody, 'utf-8') > BODY_SIZE_LIMIT) {
@@ -565,6 +564,7 @@ export const updateDraftAction: EmailAction<
       if (outBodyHtml !== undefined && Buffer.byteLength(outBodyHtml, 'utf-8') > BODY_SIZE_LIMIT) {
         outBodyHtml = truncateBody(outBodyHtml);
       }
+      listWarning = outlookNestedListWarning(outBodyHtml, format, listStyle);
       body = outBody;
       partial.body = body;
       if (outBodyHtml !== undefined) partial.bodyHtml = outBodyHtml;

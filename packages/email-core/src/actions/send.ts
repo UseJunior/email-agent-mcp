@@ -160,9 +160,6 @@ export const sendEmailAction: EmailAction<
     const rendered = renderEmailBody(body, { format, forceBlack, listStyle });
     let outBody = rendered.body;
     let outBodyHtml = rendered.bodyHtml;
-    // Outlook reorders content after a nested list inside an <li> (issue #227).
-    const listWarning = outlookNestedListWarning(rendered.bodyHtml, format, listStyle);
-    const warnings = listWarning ? { warnings: [listWarning] } : {};
 
     // Graceful truncation — each field independently capped at size limit.
     if (Buffer.byteLength(outBody, 'utf-8') > BODY_SIZE_LIMIT) {
@@ -172,6 +169,9 @@ export const sendEmailAction: EmailAction<
       outBodyHtml = truncateBody(outBodyHtml);
     }
     body = outBody;
+    // Outlook reorders content after a nested list inside an <li> (issue #227).
+    const listWarning = outlookNestedListWarning(outBodyHtml, format, listStyle);
+    const warnings = listWarning ? { warnings: [listWarning] } : {};
 
     // Draft workflow — skip allowlist check and rate limit
     if (draft) {
