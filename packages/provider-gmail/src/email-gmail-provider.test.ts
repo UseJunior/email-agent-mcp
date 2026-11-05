@@ -1896,3 +1896,105 @@ describe('provider-gmail/Draft Deletion', () => {
     await expect(provider.getDraft('msg-draft-1')).resolves.toMatchObject({ id: 'msg-draft-1', isDraft: true });
   });
 });
+
+describe('provider-gmail/buildRawMessage RFC 2047 headers (#198)', () => {
+  function headerBlock(raw: string): string {
+    return raw.slice(0, raw.indexOf('\r\n\r\n'));
+  }
+  /** Unfold a header and decode any =?UTF-8?B?...?= words back to text. */
+  function decodeHeader(raw: string, name: string): string {
+    const block = headerBlock(raw).replace(/\r\n[ \t]/g, '\r\n\u0000');
+    const line = block.split('\r\n').reduce<string[]>((acc, l) => {
+      if (l.startsWith('\u0000')) acc[acc.length - 1] += l;
+      else acc.push(l);
+      return acc;
+    }, []).find(l => l.toLowerCase().startsWith(`${name.toLowerCase()}:`));
+    if (!line) throw new Error(`no ${name} header`);
+    return line
+      .slice(name.length + 1)
+      .replace(/\?=\u0000=\?/g, '?==?')
+      .replace(/\u0000/g, ' ')
+      .replace(/=\?UTF-8\?B\?([A-Za-z0-9+/=]*)\?=/g, (_m, b64: string) => Buffer.from(b64, 'base64').toString('utf-8'))
+      .trim();
+  }
+  async function rawFor(subject: string, to = [{ email: 'bob@corp.com' }] as { email: string; name?: string }[]) {
+    const client = createMockGmailClient();
+    const provider = new GmailEmailProvider(client);
+    await provider.sendMessage({ to, subject, body: 'hi' });
+    return lastRaw(client.sendMessage as ReturnType<typeof vi.fn>);
+  }
+
+  it('Scenario: ASCII subject is left unchanged', async () => {
+    const raw = await rawFor('Plain ASCII subject');
+    expect(raw).toContain('\r\nSubject: Plain ASCII subject\r\n');
+  });
+
+  it.each([
+    ['em dash', '[smoke] draft delete — safe to ignore'],
+    ['CJK', '会议纪要：第三季度'],
+    ['emoji', 'Launch 🚀 day ✓'],
+  ])('Scenario: %s subject is RFC 2047-encoded and round-trips', async (_label, subject) => {
+    const raw = await rawFor(subject);
+    const block = headerBlock(raw);
+    expect(block).toMatch(/Subject: =\?UTF-8\?B\?/);
+    // The header block is pure ASCII on the wire.
+    expect(/^[\x00-\x7f]*$/.test(block)).toBe(true);
+    expect(decodeHeader(raw, 'Subject')).toBe(subject);
+  });
+
+  it('Scenario: long non-ASCII subject folds into <=75-char words without splitting characters', async () => {
+    const subject = '测试'.repeat(40) + ' — 🚀'.repeat(10);
+    const raw = await rawFor(subject);
+    const words = headerBlock(raw).match(/=\?UTF-8\?B\?[A-Za-z0-9+/=]*\?=/g)!;
+    expect(words.length).toBeGreaterThan(1);
+    for (const w of words) {
+      expect(w.length).toBeLessThanOrEqual(75);
+      const decoded = Buffer.from(w.slice(10, -2), 'base64').toString('utf-8');
+      expect(decoded).not.toContain('�');
+    }
+    expect(decodeHeader(raw, 'Subject')).toBe(subject);
+  });
+
+  it('Scenario: subject CR/LF injection is still neutralized', async () => {
+    const raw = await rawFor('Hi — there\r\nBcc: evil@x.com');
+    expect(headerBlock(raw)).not.toMatch(/^Bcc:/m);
+    expect(decodeHeader(raw, 'Subject')).toBe('Hi — there Bcc: evil@x.com');
+  });
+
+  it('Scenario: non-ASCII display names are encoded, ASCII names stay quoted', async () => {
+    const raw = await rawFor('x', [
+      { email: 'zhang@corp.com', name: '张伟' },
+      { email: 'bob@corp.com', name: 'Bob, Jr.' },
+    ]);
+    const block = headerBlock(raw);
+    expect(await rawFor('x', [{ email: 'bob@corp.com', name: 'Bob, Jr.' }])).toContain('To: "Bob, Jr." <bob@corp.com>');
+    expect(block).toMatch(/To: =\?UTF-8\?B\?[^\s]+\?=\r\n <zhang@corp\.com>,\r\n =\?UTF-8\?B\?[^\s]+\?=\r\n <bob@corp\.com>/);
+    expect(decodeHeader(raw, 'To')).toBe('张伟 <zhang@corp.com>, Bob, Jr. <bob@corp.com>');
+  });
+
+  it('Scenario: createDraft and updateDraft encode the subject too', async () => {
+    const client = createMockGmailClient();
+    const provider = new GmailEmailProvider(client);
+    await provider.createDraft({ to: [{ email: 'bob@corp.com' }], subject: 'Draft — 草稿', body: 'b' });
+    const raw = lastRaw(client.createDraft as ReturnType<typeof vi.fn>);
+    expect(decodeHeader(raw, 'Subject')).toBe('Draft — 草稿');
+    expect(headerBlock(raw)).toMatch(/Subject: =\?UTF-8\?B\?/);
+
+    await provider.updateDraft('draft-abc', { subject: 'Updated — 更新' });
+    const updated = lastRaw(client.updateDraft as ReturnType<typeof vi.fn>, 1);
+    expect(decodeHeader(updated, 'Subject')).toBe('Updated — 更新');
+  });
+
+  it('Scenario: every physical header line stays within 76 chars (RFC 2047 §2)', async () => {
+    const raw = await rawFor('测试'.repeat(60), [
+      { email: 'a@corp.com', name: 'Bob' },
+      { email: 'alice@example.com', name: 'Alice from the international customer success and enterprise account management team' },
+      { email: 'a.very.long.address.for.testing@subdomain.example.com', name: '非常长的显示名称'.repeat(4) },
+    ]);
+    // Every physical line of the Subject and To fields (incl. continuations).
+    const lines = headerBlock(raw).split('\r\n').filter(l => /^(Subject|To):|^ /.test(l));
+    expect(lines.length).toBeGreaterThan(4);
+    for (const l of lines) expect(l.length).toBeLessThanOrEqual(76);
+    expect(decodeHeader(raw, 'To')).toBe(`Bob <a@corp.com>, Alice from the international customer success and enterprise account management team <alice@example.com>, ${'非常长的显示名称'.repeat(4)} <a.very.long.address.for.testing@subdomain.example.com>`);
+  });
+});
