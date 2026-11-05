@@ -677,6 +677,15 @@ describe('email-write/Update Draft', () => {
     expect(updateSpy).not.toHaveBeenCalled();
   });
 
+  it('Scenario: MessageNotFoundError from a duplicate email-core copy is still MESSAGE_NOT_FOUND', async () => {
+    const foreign = Object.assign(new Error('Draft gone not found'), { name: 'MessageNotFoundError' });
+    vi.spyOn(provider, 'getDraftReplyStatus').mockRejectedValueOnce(foreign);
+
+    const result = await updateDraftAction.run(ctx, { draft_id: 'gone', body: 'Replacement', replace_body: true });
+
+    expect(result).toMatchObject({ success: false, error: { code: 'MESSAGE_NOT_FOUND', recoverable: false } });
+  });
+
   it('Scenario: Provider not-found code during reply-status lookup is preserved', async () => {
     vi.spyOn(provider, 'getDraftReplyStatus').mockRejectedValueOnce(
       new ProviderError('DRAFT_NOT_FOUND', 'Draft not found: x', 'mock', false),

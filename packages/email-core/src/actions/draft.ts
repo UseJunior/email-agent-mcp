@@ -603,7 +603,9 @@ export const updateDraftAction: EmailAction<
  * REPLY_DRAFT_BODY_IMMUTABLE.
  */
 function draftStatusError(err: unknown, draftId: string): { code: string; message: string; recoverable: boolean } {
-  if (err instanceof MessageNotFoundError) {
+  // Structural fallback: a duplicate email-core install makes instanceof false
+  // (see isProviderError).
+  if (err instanceof MessageNotFoundError || (err instanceof Error && err.name === 'MessageNotFoundError')) {
     return { code: 'MESSAGE_NOT_FOUND', message: err.message, recoverable: false };
   }
   if (isProviderError(err) && /NOT_FOUND$/.test(err.code)) {
