@@ -167,6 +167,17 @@ describe('email-write/Outlook List Style', () => {
     expect(html).toContain('<p style="margin-left:80px">a. sub</p>');
     expect(html).toContain('<ol start="2">\n<li><p>Keep me</p>\n<ul>\n<li>child</li>\n</ul>\n<p>tail</p>\n</li>\n<li><p>Last</p>\n</li>\n</ol>\n');
     expect(html).not.toContain('<p style="margin-left:80px">tail</p>');
+
+    // A tight nested-list item inside a reshaped chain keeps marked's own
+    // markup — no paragraph wrapper is added to it (peer-review finding).
+    const tight = '1. Parent\n   - child\n\na. bridge\n\n2. Next\n';
+    const defaultItem = standard(tight).match(/<li>Parent[^]*?<\/ul>\n<\/li>/)![0];
+    expect(defaultItem).toBe('<li>Parent<ul>\n<li>child</li>\n</ul>\n</li>');
+    expect(outlook(tight)).toBe(
+      `<ol start="1">\n${defaultItem}\n</ol>\n`
+      + '<p style="margin-left:80px">a. bridge</p>\n'
+      + '<ol start="2">\n<li><p>Next</p>\n</li>\n</ol>\n',
+    );
   });
 
   it('Scenario: Closing prose and restarted lists are not indented', () => {

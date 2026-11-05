@@ -52,15 +52,15 @@ function splittableParagraphs(item: Tokens.ListItem): BlockText[] | null {
 }
 
 /**
- * A copy of `item` rendered the way marked renders a loose list item
- * (`<li><p>…</p></li>`), so the indented and unindented markdown habits — which
- * marked lexes as loose and tight lists respectively — produce the same HTML.
- * This is the same text→paragraph promotion marked applies to loose lists.
- * Task items keep marked's own tokens, since their checkbox placement depends
- * on the original looseness.
+ * A copy of a plain-paragraph item rendered the way marked renders a loose list
+ * item (`<li><p>…</p></li>`), so the indented and unindented markdown habits —
+ * which marked lexes as loose and tight lists respectively — produce the same
+ * HTML. This is the same text→paragraph promotion marked applies to loose
+ * lists. Items holding anything but paragraphs (nested list, code, quote, ...)
+ * and task items keep marked's own tokens and render exactly as by default.
  */
 function asLooseItem(item: Tokens.ListItem, tokens: Token[]): Tokens.ListItem {
-  if (item.task) return item;
+  if (item.task || !item.tokens.every(t => t.type === 'space' || isBlockText(t))) return item;
   return {
     ...item,
     loose: true,
