@@ -2,6 +2,7 @@
 import { z } from 'zod';
 import { basename } from 'node:path';
 import type { RateLimiter, MailboxEntry, ActionContext } from './registry.js';
+import { adaptLegacyRateLimiter } from '../security/rate-reservation.js';
 import { isProviderError } from '../providers/provider.js';
 import type { EmailReader } from '../providers/provider.js';
 import { resolveBodyFile } from '../content/body-loader.js';
@@ -17,6 +18,7 @@ import {
   duplicateSendError,
   getDefaultSendLedger,
   providerNamespace,
+  isDeliveryProvenUnsent,
 } from '../security/send-ledger.js';
 import type { SendClaim, SendFingerprintInput } from '../security/send-ledger.js';
 import type { EmailAddress, EmailMessage, OutboundAttachment } from '../types.js';
@@ -33,6 +35,7 @@ interface ActionError {
   // MCP wrapper), not necessarily every mailbox on disk.
   availableMailboxes?: string[];
   defaultMailbox?: string;
+  retryAfter?: number;
 }
 
 /**
@@ -365,6 +368,7 @@ export function validateRequiredFields(
 
 // --- checkRateLimit ---
 
+/** @deprecated Observation only; delivery actions reserve through claimDelivery. */
 export function checkRateLimit(
   rateLimiter: RateLimiter | undefined,
   actionName: string,
@@ -660,9 +664,12 @@ export type DeliveryClaim =
 /**
  * Reserve this delivery in the send ledger before touching the provider.
  *
- * Call AFTER every pre-dispatch gate (mailbox, allowlist, rate limit) and
- * IMMEDIATELY BEFORE the provider call, so the reserved window is exactly the
- * window in which an acknowledgement can be lost.
+ * Compose/reply claim after preflight gates; draft sending claims the input ID
+ * before lookup and the canonical ID after lookup if distinct. Release preflight
+ * refusals, markDispatched immediately before provider invocation, then settle
+ * every outcome (including throws). Live leases never age out automatically.
+ * Rate capacity follows this lease's terminal outcome. Canonical aliases pass
+ * reserveRate=false because the input-ID lease already owns their capacity.
  *
  * On a collision the prior attempt's `messageId` is surfaced at the top level
  * even though `success` is false: the caller asked whether this message went
@@ -673,6 +680,7 @@ export function claimDelivery(
   actionName: string,
   fingerprintInput: Omit<SendFingerprintInput, 'action' | 'mailbox'>,
   allowDuplicate: boolean | undefined,
+  reserveRate = true,
 ): DeliveryClaim {
   const ledger = ctx.sendLedger ?? getDefaultSendLedger();
   // Namespace the fingerprint by mailbox. `mailboxName` is optional on
@@ -685,7 +693,52 @@ export function claimDelivery(
     mailbox: ctx.mailboxName ?? providerNamespace(ctx.provider),
   });
   const result = ledger.claim(fingerprint, { force: allowDuplicate === true });
-  if (result.ok) return { claim: result };
+  if (result.ok) {
+    if (!ctx.rateLimiter || !reserveRate) return { claim: result };
+    let reservation;
+    try {
+      const limiter = 'tryReserve' in ctx.rateLimiter ? ctx.rateLimiter : adaptLegacyRateLimiter(ctx.rateLimiter);
+      reservation = limiter.tryReserve(actionName);
+    } catch (err) {
+      result.release();
+      throw err;
+    }
+    if (!reservation.allowed) {
+      result.release();
+      return { duplicate: { success: false, error: {
+        code: 'RATE_LIMITED',
+        message: `Send rate limit exceeded. Retry after ${reservation.retryAfter}s`,
+        recoverable: true,
+        ...(reservation.retryAfter !== undefined ? { retryAfter: reservation.retryAfter } : {}),
+      } } };
+    }
+    const { lease } = reservation;
+    let terminal = false;
+    return { claim: {
+      ok: true, fingerprint: result.fingerprint,
+      get leaseState() { return result.leaseState; },
+      markDispatched: () => result.markDispatched(),
+      release: () => {
+        if (terminal || result.leaseState !== 'reserved') return;
+        terminal = true;
+        result.release();
+        lease.release();
+      },
+      settle: outcome => {
+        if (terminal) return;
+        terminal = true;
+        result.settle(outcome);
+        try {
+          if (!outcome.success && isDeliveryProvenUnsent(outcome.errorCode)) lease.release();
+          else lease.consume();
+        } catch {
+          // Bookkeeping cannot change provider evidence or interrupt sibling
+          // canonical-draft settlement. Never print provider/client content.
+          console.error('[email-agent-mcp] Rate reservation settlement failed');
+        }
+      },
+    } };
+  }
   return {
     duplicate: {
       success: false,

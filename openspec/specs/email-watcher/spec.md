@@ -144,6 +144,11 @@ The runner SHALL own bootstrapping, idle, polling, delivering, checkpointing, ba
 - **WHEN** a later page fails
 - **THEN** no partial retrieval is delivered or checkpointed and retry uses the same lower bound
 
+#### Scenario: Malformed raw messages reject the complete window
+- **WHEN** any page contains a non-object message, a missing, null, empty or non-string ID, or a missing, null, empty, non-string or invalid receivedDateTime
+- **THEN** retrieval SHALL reject before delivery or checkpoint advancement, validating raw fields before mapper defaults
+- **AND** valid messages at both inclusive window boundaries remain eligible
+
 #### Scenario: Equal timestamps remain eligible
 - **WHEN** another message appears at the saved watermark timestamp
 - **THEN** an inclusive subsequent poll can deliver it

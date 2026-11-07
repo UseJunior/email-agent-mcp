@@ -452,6 +452,26 @@ describe('mcp-transport/Server Discovery', () => {
 describe('mcp-transport/Lazy Provider State', () => {
   const noAllowlist = () => undefined;
 
+  it('Scenario: MCP actions carry invalid policy into outbound permission evaluation', async () => {
+    const send = vi.fn();
+    const state = createLazyProviderState();
+    state.status = 'connected';
+    state.initPromise = Promise.resolve();
+    state.mailboxes = [{
+      name: 'synthetic', displayName: 'synthetic@example.com', providerType: 'microsoft',
+      provider: { sendEmail: send } as never, auth: null, isDefault: true, status: 'connected',
+    }];
+    const actions = await buildLazyActions(state, () => ({ status: 'invalid', reason: 'Malformed JSON' }));
+    const result = await actions.find(action => action.name === 'send_email')!.run({}, {
+      to: 'recipient@example.com', subject: 'Synthetic policy test', body: 'Hi',
+    }) as { success: boolean; error?: { message: string } };
+    expect(result.success).toBe(false);
+    expect(result.error?.message).toContain('allowlist invalid');
+    expect(send).not.toHaveBeenCalled();
+    const status = await actions.find(action => action.name === 'get_mailbox_status')!.run({}, {}) as { warnings: string[] };
+    expect(status.warnings).toContain('Send allowlist invalid — all outbound email is disabled');
+  });
+
   it('Scenario: buildLazyActions registers all tool schemas without auth', async () => {
     const state = createLazyProviderState();
     // No init has been triggered — state is still 'pending'.

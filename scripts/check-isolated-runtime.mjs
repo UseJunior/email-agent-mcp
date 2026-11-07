@@ -1,14 +1,18 @@
 #!/usr/bin/env node
 // Isolated runtime smoke test — packs all workspace packages as local tarballs,
-// installs in a temp directory, and verifies the MCP server starts and reports 26 tools.
+// installs in a temp directory, and verifies the canonical tool identities.
 
 import { execSync } from 'node:child_process';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
+import { EMAIL_ACTIONS } from '../packages/email-core/dist/index.js';
+import { toolContractError } from './isolated-runtime-contract.mjs';
 
-const EXPECTED_TOOL_COUNT = 26;
+// Registry actions plus the two transport-level diagnostic tools. A build is
+// already required before packing; consume that same canonical registry.
+const EXPECTED_TOOL_NAMES = [...EMAIL_ACTIONS.map(action => action.name), 'get_mailbox_status', 'list_mailboxes'];
 const PACKAGES = [
   'email-core',
   'provider-microsoft',
@@ -114,10 +118,11 @@ function testMcpServer(installDir, serverBin) {
             clearTimeout(timeout);
             proc.kill();
             const toolCount = msg.result.tools.length;
-            if (toolCount === EXPECTED_TOOL_COUNT) {
+            const error = toolContractError(msg.result.tools, EXPECTED_TOOL_NAMES);
+            if (!error) {
               resolve({ success: true, toolCount });
             } else {
-              resolve({ success: false, error: `Expected ${EXPECTED_TOOL_COUNT} tools, got ${toolCount}` });
+              resolve({ success: false, error });
             }
             return;
           }

@@ -99,6 +99,9 @@ describe('provider-gmail/GoogleapisGmailClient', () => {
 
   it('Scenario: getDraft requests the draft resource and returns its backing message', async () => {
     const api = createMockApi();
+    api.users.drafts.get.mockResolvedValueOnce({ data: {
+      id: 'd-1', message: { id: 'm-draft', threadId: 't-draft', historyId: 'observed-revision' },
+    } });
     const client = createClient(api);
 
     const result = await client.getDraft('d-1');
@@ -111,6 +114,7 @@ describe('provider-gmail/GoogleapisGmailClient', () => {
     expect(api.users.messages.get).not.toHaveBeenCalled();
     expect(result.id).toBe('d-1');
     expect(result.message.id).toBe('m-draft');
+    expect(result.message.historyId).toBe('observed-revision');
   });
 
   it('Scenario: getMessage falls back to drafts.get for draft ids', async () => {
