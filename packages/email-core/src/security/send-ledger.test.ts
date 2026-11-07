@@ -136,6 +136,12 @@ describe('email-write/Send Ledger', () => {
     expect(ledger.peek(FP)).toMatchObject({ state: 'unresolved' });
   });
 
+  it('successful delivery takes precedence over a contradictory rejection code', () => {
+    const claim = ledger.claim(FP);
+    if (claim.ok) claim.settle({ success: true, messageId: 'accepted', errorCode: 'INVALID_REQUEST' });
+    expect(ledger.peek(FP)).toMatchObject({ state: 'delivered', messageId: 'accepted' });
+  });
+
   it('forgets an attempt once the window passes', () => {
     let now = 1_000_000;
     const clocked = new SendLedger({ windowMs: 60_000, now: () => now });
@@ -149,15 +155,17 @@ describe('email-write/Send Ledger', () => {
     expect(clocked.claim(FP).ok).toBe(true);
   });
 
-  it('ages an abandoned in-flight claim from its start, so a throw cannot wedge it forever', () => {
+  it('retains a live reservation until its owner releases or settles it', () => {
     let now = 1_000_000;
     const clocked = new SendLedger({ windowMs: 60_000, now: () => now });
-    clocked.claim(FP); // never settled — the action threw between claim and settle
+    const claim = clocked.claim(FP);
 
     now += 30_000;
     expect(clocked.claim(FP).ok).toBe(false);
 
     now += 31_000;
+    expect(clocked.claim(FP).ok).toBe(false);
+    if (claim.ok) claim.release();
     expect(clocked.claim(FP).ok).toBe(true);
   });
 
@@ -199,19 +207,97 @@ describe('email-write/Send Ledger', () => {
     if (!replay.ok) expect(replay.prior.messageId).toBe('A-delivered');
   });
 
-  it('keeps a success that lands after its reservation was pruned', () => {
+  it('Scenario: Active dispatch outlives retention and ages only after settlement', () => {
     let now = 0;
     const clocked = new SendLedger({ windowMs: 100, now: () => now });
     const claim = clocked.claim(FP);
+    if (claim.ok) claim.markDispatched();
 
     now = 101;
-    clocked.claim('unrelated'); // prunes the aged in-flight reservation
+    clocked.claim('unrelated');
+    expect(clocked.claim(FP).ok).toBe(false);
     if (claim.ok) claim.settle({ success: true, messageId: 'late' });
 
     // The delivery happened. Dropping the outcome because the reservation
     // aged out would admit an immediate replay of a message just sent.
     expect(clocked.peek(FP)).toMatchObject({ state: 'delivered', messageId: 'late' });
     expect(clocked.claim(FP).ok).toBe(false);
+    now = 202;
+    expect(clocked.claim(FP).ok).toBe(true);
+  });
+
+  const outcomes = [
+    { success: true, messageId: 'delivered' },
+    { success: false, errorCode: 'SEND_STATUS_UNKNOWN' },
+    { success: false, errorCode: 'INVALID_REQUEST' },
+  ];
+
+  it.each(outcomes.flatMap(first => outcomes.map(late => ({ first, late }))))(
+    'terminal settlement ignores reordered callbacks: $first then $late',
+    ({ first, late }) => {
+      let now = 0;
+      const clocked = new SendLedger({ windowMs: 100, now: () => now });
+      const claim = clocked.claim(FP);
+      expect(claim.ok).toBe(true);
+      if (!claim.ok) return;
+      expect(claim.leaseState).toBe('reserved');
+      claim.markDispatched();
+      expect(claim.leaseState).toBe('dispatched');
+      claim.release(); // illegal after dispatch
+      expect(clocked.claim(FP).ok).toBe(false);
+      claim.settle(first);
+      const evidence = clocked.peek(FP);
+      now = 50;
+      claim.markDispatched();
+      claim.release();
+      claim.settle(late);
+      expect(claim.leaseState).toBe('settled');
+      expect(clocked.peek(FP)).toEqual(evidence);
+      if (first.success) expect(evidence).toMatchObject({ state: 'delivered', messageId: 'delivered' });
+      else if (first.errorCode === 'INVALID_REQUEST') expect(evidence).toBeUndefined();
+      else expect(evidence).toMatchObject({ state: 'unresolved' });
+      now = 101;
+      expect(clocked.peek(FP)).toBeUndefined(); // late callback did not renew TTL
+      claim.settle(late);
+      expect(clocked.peek(FP)).toBeUndefined(); // nor resurrect expired evidence
+    },
+  );
+
+  it.each(outcomes)('released reservation ignores late settlement: %j', outcome => {
+    const claim = ledger.claim(FP);
+    if (!claim.ok) throw new Error('expected claim');
+    claim.release();
+    claim.markDispatched();
+    claim.settle(outcome);
+    claim.release();
+    expect(claim.leaseState).toBe('released');
+    expect(ledger.peek(FP)).toBeUndefined();
+  });
+
+  it.each([false, true])('late sibling rejection preserves accepted evidence (reverse=%s)', reverse => {
+    const first = ledger.claim(FP);
+    const forced = ledger.claim(FP, { force: true });
+    if (!first.ok || !forced.ok) throw new Error('expected claims');
+    first.markDispatched();
+    forced.markDispatched();
+    const accepted = reverse ? first : forced;
+    const rejected = reverse ? forced : first;
+    accepted.settle({ success: true, messageId: 'accepted' });
+    rejected.release();
+    rejected.settle({ success: false, errorCode: 'INVALID_REQUEST' });
+    rejected.settle({ success: false });
+    expect(ledger.peekAll(FP)).toHaveLength(1);
+    expect(ledger.peek(FP)).toMatchObject({ state: 'delivered', messageId: 'accepted' });
+  });
+
+  it('prefers unresolved evidence over pending siblings and the latest accepted sibling over both', () => {
+    const unknown = ledger.claim(FP);
+    if (unknown.ok) unknown.settle({ success: false });
+    ledger.claim(FP, { force: true });
+    expect(ledger.peek(FP)?.state).toBe('unresolved');
+    const delivered = ledger.claim(FP, { force: true });
+    if (delivered.ok) delivered.settle({ success: true, messageId: 'accepted' });
+    expect(ledger.peek(FP)?.messageId).toBe('accepted');
   });
 
   it('never evicts an in-flight reservation to stay under the size cap', () => {
