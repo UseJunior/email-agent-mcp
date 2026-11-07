@@ -506,11 +506,66 @@ function graphDeliveryError(
   };
 }
 
+type FolderSnapshot = { folders: EmailFolder[]; truncated: boolean };
+
+type FolderCacheState<T> =
+  | { kind: 'empty' }
+  | { kind: 'loading'; generation: number; promise: Promise<T> }
+  | { kind: 'ready'; expiresAt: number; data: T };
+
+/** Process-local single-flight cache; invalidated completions must retry. */
+class FolderCache<T> {
+  private generation = 0;
+  private state: FolderCacheState<T> = { kind: 'empty' };
+
+  invalidate(): void {
+    this.generation += 1;
+    this.state = { kind: 'empty' };
+  }
+
+  async get(load: () => Promise<T>, complete: (data: T) => boolean, fresh = false): Promise<T> {
+    // Fresh validation bypasses a completed snapshot, but joins an active load.
+    // Only a completed structural mutation advances the generation.
+    if (fresh && this.state.kind === 'ready') this.state = { kind: 'empty' };
+    for (;;) {
+      if (this.state.kind === 'ready' && this.state.expiresAt > Date.now()) {
+        return this.state.data;
+      }
+      if (this.state.kind !== 'loading') {
+        // Defer the loader until the shared state is installed, including when
+        // a loader throws synchronously before making its first request.
+        this.state = {
+          kind: 'loading', generation: this.generation,
+          promise: Promise.resolve().then(load),
+        };
+      }
+      const loading = this.state;
+      let data: T;
+      try {
+        data = await loading.promise;
+      } catch (err) {
+        if (this.state === loading) this.state = { kind: 'empty' };
+        if (loading.generation !== this.generation) continue;
+        throw err;
+      }
+      // A structural mutation can finish while Graph is still traversing.
+      // Neither publish nor return that generation as the current snapshot.
+      if (loading.generation !== this.generation) continue;
+      if (this.state === loading) {
+        this.state = complete(data)
+          ? { kind: 'ready', expiresAt: Date.now() + FOLDER_CACHE_TTL_MS, data }
+          : { kind: 'empty' };
+      }
+      return data;
+    }
+  }
+}
+
 export class GraphEmailProvider implements EmailReader, EmailSender, EmailScheduledSender, EmailCategorizer, EmailAttachmentHandler, EmailFolderManager, EmailRuleManager {
   private client: GraphApiClient;
   private basePath: string;
-  private folderCache?: { expiresAt: number; folders: EmailFolder[] };
-  private systemFolderIdsCache?: { expiresAt: number; idsByName: Map<string, string> };
+  private folderCache = new FolderCache<FolderSnapshot>();
+  private systemFolderIdsCache = new FolderCache<Map<string, string>>();
 
   constructor(client: GraphApiClient, userId = 'me') {
     this.client = client;
@@ -894,12 +949,13 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
     // Resolve folder destinations to opaque ids and reject mail-discarding ones.
     // resolveRuleDestinationId does the destructive check on the canonical
     // resolved folder, closing alias/slash/case bypasses like `/trash/`.
-    for (const folderAction of ['moveToFolder', 'copyToFolder'] as const) {
+    // Start both validations together so move/copy share a fresh traversal.
+    await Promise.all((['moveToFolder', 'copyToFolder'] as const).map(async folderAction => {
       const destination = actions[folderAction];
       if (typeof destination === 'string') {
         actions[folderAction] = await this.resolveRuleDestinationId(destination);
       }
-    }
+    }));
 
     // Graph rejects sequence 0 (`MessageRuleValidationError` on Field 'Sequence'),
     // which is exactly the value it assigns when a POST omits sequence. The tool
@@ -1696,25 +1752,18 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       : [];
   }
 
-  private async getFolderSnapshot(): Promise<{ folders: EmailFolder[]; truncated: boolean }> {
-    const now = Date.now();
-    if (this.folderCache && this.folderCache.expiresAt > now) {
-      return { folders: this.folderCache.folders, truncated: false };
-    }
-
-    const budget = { remaining: MAX_FOLDER_REQUESTS_PER_SNAPSHOT, truncated: false };
-    const folders = await this.fetchFolderCollection(
-      `${this.basePath}/mailFolders?${FOLDER_SELECT}&$top=100&includeHiddenFolders=true`,
-      '',
-      new Set<string>(),
-      budget,
-    );
-    // Never cache a partial tree — a truncated snapshot would otherwise make
-    // "folder not found" sticky for 60s on a folder that does exist.
-    if (!budget.truncated) {
-      this.folderCache = { expiresAt: now + FOLDER_CACHE_TTL_MS, folders };
-    }
-    return { folders, truncated: budget.truncated };
+  private async getFolderSnapshot(fresh = false): Promise<FolderSnapshot> {
+    return this.folderCache.get(async () => {
+      const budget = { remaining: MAX_FOLDER_REQUESTS_PER_SNAPSHOT, truncated: false };
+      const folders = await this.fetchFolderCollection(
+        `${this.basePath}/mailFolders?${FOLDER_SELECT}&$top=100&includeHiddenFolders=true`,
+        '',
+        new Set<string>(),
+        budget,
+      );
+      // A partial tree cannot establish absence or uniqueness.
+      return { folders, truncated: budget.truncated };
+    }, snapshot => !snapshot.truncated, fresh);
   }
 
   private async fetchFolderCollection(
@@ -1767,13 +1816,10 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
   /**
    * Resolve a folder name/path/id to a Graph folder id.
    *
-   * `forWrite` is reserved for operations that MUTATE the folder tree
-   * (createFolder's parent, deleteFolder's target): these are low-frequency and
-   * high-harm — deleting or nesting under a stale-cached id is unrecoverable —
-   * so they re-fetch to get a current path→id mapping. Message moves and rule
-   * destinations deliberately do NOT pass forWrite: they don't change the tree,
-   * they run in high-volume loops, and their worst-case staleness (the 60s
-   * rename race) is the same recoverable risk we already accept for reads.
+   * Structural writes and persistent rule destinations bypass ready snapshots
+   * for fresh path→id validation, sharing any active traversal. Message moves
+   * retain the ordinary 60s cache. Validation does not invalidate system IDs or
+   * advance generations; successful structural mutations invalidate both caches.
    */
   private async resolveFolderId(folder: string, forWrite = false): Promise<string> {
     const trimmed = folder.trim();
@@ -1782,8 +1828,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       ?? (SYSTEM_FOLDER_NAME_SET.has(normalized) ? normalized : undefined);
     if (wellKnown) return wellKnown;
 
-    if (forWrite) this.invalidateFolderCaches();
-    const { folders, truncated } = await this.getFolderSnapshot();
+    const { folders, truncated } = await this.getFolderSnapshot(forWrite);
 
     // Exact id match is safe even against a truncated tree — ids are globally
     // unique, so a visible match is THE match regardless of unseen folders.
@@ -1915,11 +1960,10 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
 
   /** Well-known-name -> resolved id for every provisioned system folder. */
   private async getSystemFolderIdMap(): Promise<Map<string, string>> {
-    const now = Date.now();
-    if (this.systemFolderIdsCache && this.systemFolderIdsCache.expiresAt > now) {
-      return this.systemFolderIdsCache.idsByName;
-    }
+    return this.systemFolderIdsCache.get(() => this.fetchSystemFolderIdMap(), () => true);
+  }
 
+  private async fetchSystemFolderIdMap(): Promise<Map<string, string>> {
     const idsByName = new Map<string, string>();
     for (const name of SYSTEM_FOLDER_NAMES) {
       try {
@@ -1934,7 +1978,6 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       }
     }
 
-    this.systemFolderIdsCache = { expiresAt: now + FOLDER_CACHE_TTL_MS, idsByName };
     return idsByName;
   }
 
@@ -1959,8 +2002,8 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
   }
 
   private invalidateFolderCaches(): void {
-    this.folderCache = undefined;
-    this.systemFolderIdsCache = undefined;
+    this.folderCache.invalidate();
+    this.systemFolderIdsCache.invalidate();
   }
 }
 
