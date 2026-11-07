@@ -89,9 +89,64 @@ The system SHALL check email authentication headers on inbound emails. Configura
 
 ### Requirement: Rate Limiting
 
-The system SHALL enforce configurable rate limits on outbound operations (max sends per time window).
+When a limiter is injected, the system SHALL enforce configurable process-local capacity across outbound operations using atomic `tryReserve(action)` admission. Allowed results SHALL include a lease; denied results SHALL include retry-after guidance. Live reserved capacity SHALL count immediately and SHALL NOT expire before settlement. Shipped adapters SHALL remain unconfigured by default and SHALL NOT construct a new default limiter.
 
 #### Scenario: Rate limit exceeded
 - **WHEN** the agent exceeds the configured send rate
 - **THEN** the system returns an error with retry-after guidance
+
+#### Scenario: Capacity barrier includes reservations immediately across actions
+- **WHEN** concurrent outbound calls compete for the last available capacity
+- **THEN** only available capacity is admitted before provider dispatch
+- **AND** pending reservations count across send, reply, draft send, and scheduled delivery on the same limiter instance
+
+#### Scenario: Terminal accounting is idempotent and live reservations never expire
+- **WHEN** a reservation is released before dispatch or on proven rejection
+- **THEN** its capacity becomes available immediately
+- **WHEN** dispatch succeeds or its acceptance is unknown
+- **THEN** its capacity is consumed until one window after settlement
+- **AND** subsequent terminal callbacks cannot change its accounting
+
+#### Scenario: Draft preflight failure releases capacity
+- **WHEN** lookup, draft eligibility, recipient policy, or canonical duplicate checks refuse a reserved draft send
+- **THEN** the reservation is released without consuming capacity
+- **AND** canonical alias claims do not reserve capacity a second time
+
+#### Scenario: Default clock ignores wall-clock jumps
+- **WHEN** wall time changes during the rate window
+- **THEN** quota expiration uses monotonic elapsed time
+- **AND** zero configured capacity returns a finite denial rather than accessing nonexistent usage
+
+#### Scenario: Legacy adapter preserves check/record but cannot reserve concurrently
+- **WHEN** a caller injects the deprecated `RateLimiter` check/record interface
+- **THEN** the compatibility adapter checks admission and records accepted or unknown outcomes once
+- **AND** the documented legacy check/record protocol does not guarantee atomic concurrency admission
+
+### Requirement: Validated Allowlist Policy Lifecycle
+
+Allowlist policy SHALL distinguish absent, valid and invalid states. Only a missing path/file SHALL select absent defaults (send denied, receive accepted). Existing malformed or unreadable policy SHALL block governed operations at startup. Reloads SHALL be serialized; malformed reloads SHALL retain the last good policy. Startup SHALL be idempotent, and close SHALL prevent late publication. Explicit empty receive lists SHALL retain their existing accept-all meaning.
+
+#### Scenario: Only missing files and absent paths use absent defaults
+- **WHEN** loading encounters malformed data or a non-ENOENT filesystem error
+- **THEN** policy SHALL be invalid rather than absent
+
+#### Scenario: Invalid startup stays blocked until a valid reload
+- **WHEN** an existing startup policy is invalid
+- **THEN** permission checks SHALL deny until valid policy is loaded
+
+#### Scenario: Stale reload completion
+- **WHEN** several file changes arrive while a prior load is pending
+- **THEN** reads SHALL publish in order without restoring an older policy after the newer one
+
+#### Scenario: Invalid reload retains last good, deletion resets, recreation recovers
+- **WHEN** a valid policy is followed by malformed data, deletion, and recreation
+- **THEN** malformed data SHALL retain the valid policy, deletion SHALL select absent defaults, and recreation SHALL load its valid policy
+
+#### Scenario: Close during reload prevents late publish and queued reads
+- **WHEN** close occurs during a pending load
+- **THEN** that completion and queued reads SHALL NOT publish policy
+
+#### Scenario: Explicitly empty receive policy retains accept-all behavior
+- **WHEN** a receive policy explicitly contains an empty entries array
+- **THEN** incoming senders SHALL remain allowed while an empty send list denies outbound mail
 

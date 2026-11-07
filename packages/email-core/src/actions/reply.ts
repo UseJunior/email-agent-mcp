@@ -7,7 +7,6 @@ import { isPlausibleMessageId } from '../security/reply-validation.js';
 import { renderEmailBody } from '../content/body-renderer.js';
 import {
   checkMailboxRequired,
-  checkRateLimit,
   handleProviderError,
   parseRecipients,
   buildDraftPreview,
@@ -230,12 +229,6 @@ export const replyToEmailAction: EmailAction<
       };
     }
 
-    // Check rate limit
-    const rateLimitError = checkRateLimit(ctx.rateLimiter, 'reply_to_email');
-    if (rateLimitError) {
-      return rateLimitError;
-    }
-
     // Reserve this delivery before touching the provider — see claimDelivery.
     // The draft branch above deliberately does not claim: creating a draft
     // delivers nothing, so a repeat is not a duplicate send.
@@ -260,6 +253,7 @@ export const replyToEmailAction: EmailAction<
       // non-idempotent provider endpoints with no idempotency key, so an
       // automatic retry after an ambiguous failure (timeout/5xx post-
       // acceptance) could deliver duplicates. Fail fast instead.
+      claim.markDispatched();
       const result = await ctx.provider.replyToMessage(input.message_id, bodyPlain, {
         cc: parsed.cc,
         bodyHtml,
@@ -272,10 +266,6 @@ export const replyToEmailAction: EmailAction<
         ...(result.messageId !== undefined ? { messageId: result.messageId } : {}),
         ...(result.error?.code !== undefined ? { errorCode: result.error.code } : {}),
       });
-
-      if (ctx.rateLimiter) {
-        ctx.rateLimiter.recordUsage('reply_to_email');
-      }
 
       return {
         success: result.success,
@@ -291,9 +281,6 @@ export const replyToEmailAction: EmailAction<
     } catch (err) {
       settleClaimFromThrow(claim, err);
       const handled = handleProviderError(err, 'SEND_STATUS_UNKNOWN');
-      if (ctx.rateLimiter && handled.error.code === 'SEND_STATUS_UNKNOWN') {
-        ctx.rateLimiter.recordUsage('reply_to_email');
-      }
       return handled;
     }
   },

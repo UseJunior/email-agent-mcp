@@ -7,6 +7,22 @@ feature: Gmail Provider
 
 Implements the provider interface for Gmail API email operations. Uses `@googleapis/gmail` (lightweight, ~1.1MB). Supports OAuth2 authentication, Gmail-specific label/star mapping, dual watch mode (Pub/Sub with 7-day auto-renewal + history.list polling fallback), and anti-spoofing via Authentication-Results headers.
 ## Requirements
+### Requirement: Canonical Gmail draft observations
+
+Gmail snapshots SHALL resolve draft/message IDs and re-read the canonical draft resource after message-ID resolution, capturing its current backing message and history revision. Partial attachment rehydration failures SHALL retain the known canonical draft ID.
+
+#### Scenario: Gmail snapshot re-reads canonical draft and changed backing message
+- **WHEN** message-ID resolution finds a draft whose backing message changed
+- **THEN** the snapshot contains the canonical draft ID and newly observed backing message ID
+
+#### Scenario: Gmail snapshot refuses deletion during canonical resolution
+- **WHEN** a draft disappears between list resolution and canonical read
+- **THEN** observation fails as not found
+
+#### Scenario: Gmail attachment rehydration failure preserves canonical draft id
+- **WHEN** preserving attachments fails before draft replacement
+- **THEN** the failure result retains the canonical draft ID
+
 ### Requirement: OAuth2 Authentication
 
 The system SHALL authenticate to Gmail via OAuth2 using `@googleapis/gmail` (NOT the full `googleapis` package at 200MB).
@@ -29,8 +45,13 @@ The system SHALL authenticate to Gmail via OAuth2 using `@googleapis/gmail` (NOT
 
 #### Scenario: Atomic one-shot ticket claim
 - **WHEN** two `POST /api/tickets/claim` calls present a valid `session_id` + `pickup_secret` pair concurrently
-- **THEN** at most one returns the tokens; the other returns 410 (`consumed` or `not_found`)
-- **AND** on KV-backed deployments this atomicity is implemented with a single Redis `GETDEL` command after constant-time secret verification
+- **THEN** at most one returns the tokens; the other returns 410 `consumed` or 404 `not_found`, without adding consumed tombstones
+- **AND** on KV-backed deployments a single Redis Lua operation validates the current session and compares all 64 bytes of the pickup hash without early exit before consuming that same record; malformed persisted state never releases tokens
+
+#### Scenario: First terminal callback wins without extending expiry
+- **WHEN** success, denial, or exchange-failure callbacks compete for a pending broker session
+- **THEN** exactly one can advance it to a terminal state and later callbacks cannot overwrite the winner
+- **AND** the transition preserves the original session expiry on both memory and KV backends
 
 #### Scenario: Distinguishable terminal states
 - **WHEN** the CLI polls `/api/tickets/claim` while the user has not yet completed consent
@@ -107,15 +128,15 @@ Under reply-all, an explicit `to` displaces the parent's sender from the To line
 
 ### Requirement: Dual Watch Mode
 
-The system SHALL support Pub/Sub push notifications (requires Google Cloud project, auto-renewal every 7 days) and `history.list` polling as a fallback for local/NAT environments.
+The provider SHALL expose Pub/Sub registration and bounded `history.list` polling helpers. The caller owns scheduling watch renewal before expiration; these helpers do not start a renewal service or Gmail watcher. History retrieval SHALL follow every page, reject repeated tokens or excessive pages, and publish a cursor only on complete retrieval.
 
 #### Scenario: Pub/Sub auto-renewal
 - **WHEN** the Pub/Sub watch registration approaches 7-day expiry
-- **THEN** the system automatically re-registers via `users.watch()`
+- **THEN** the caller invokes registration via `users.watch()`; the helper does not schedule automatic work
 
 #### Scenario: history.list fallback
 - **WHEN** Pub/Sub is not configured
-- **THEN** the system polls `history.list` at a configurable interval (default 30s)
+- **THEN** the caller may invoke the history helper, which returns a complete bounded result or fails without publishing a cursor
 
 ### Requirement: Label Mapping
 

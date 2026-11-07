@@ -667,6 +667,22 @@ Agent Email ships with restrictive defaults that you loosen as needed:
 
 - **Send allowlist**: empty by default -- agents cannot send email until you add recipients
 - **Receive allowlist**: accepts all by default -- controls which senders trigger the watcher
+
+Allowlist files must contain an `entries` array of strings. Missing files keep
+the defaults above; an explicitly empty receive array also accepts all senders.
+An unreadable or malformed startup policy blocks the operations it governs.
+During hot reload, an invalid file retains the last good policy; deleting the
+file restores its absent-file default. The watcher monitors the parent directory
+so atomic replacement and recreation are supported. Watch errors retain the
+current policy and disable hot reload with a stderr warning.
+
+For embedders, `loadAllowlistPolicy()` and `WatchedAllowlist.policy` expose
+`absent | valid | invalid` policy states. Pass the policy directly to permission
+checks. The legacy `loadSendAllowlist()` / `loadReceiveAllowlist()` signatures
+and `WatchedAllowlist.config` remain as deprecated adapters; their `undefined`
+result cannot distinguish invalid policy from absence. Watcher lifecycle is
+`unstarted | starting | active | degraded | closed`; startup is shared and
+idempotent, reads are serialized, and close is terminal.
 - **Delete disabled**: agents cannot delete email by default. Two gates must both be satisfied:
   1. operator sets `AGENT_EMAIL_DELETE_ENABLED=true` in the email-agent-mcp process environment (and `AGENT_EMAIL_HARD_DELETE_ENABLED=true` for permanent deletion). Restart required after change. Gmail can delete only drafts, and a draft delete is always permanent; it needs only `AGENT_EMAIL_DELETE_ENABLED`.
   2. the caller passes `user_explicitly_requested_deletion: true` on the tool call.
@@ -730,6 +746,27 @@ that server.
 | `@usejunior/provider-gmail` | Gmail API email provider |
 | `email-agent-mcp` | Distribution wrapper (`npx email-agent-mcp`) |
 | `@usejunior/email-agent-mcp` | Compatibility wrapper, published in lockstep; use `email-agent-mcp` for new installs |
+
+Core embedders may inject `ActionContext.rateLimiter`; shipped MCP/CLI adapters
+do not configure one. Prefer `ReservationRateLimiter.tryReserve(action)`, returning
+`{ allowed: true, lease }` or `{ allowed: false, retryAfter }` (seconds).
+`SendRateLimiter` implements this API with shared process-local capacity across
+actions. Reservations count immediately and stay live until `lease.release()`
+(pre-dispatch refusal or proven rejection) or `lease.consume()` (accepted or
+unknown dispatch). The first terminal call wins. Consumed capacity expires one
+window after consumption, using a monotonic clock (`performance.now` by default;
+the optional third constructor argument injects elapsed milliseconds for tests).
+Zero capacity denies all reservations with finite retry guidance. Guidance for
+fully reserved capacity is a polling interval, not a promised release time.
+
+The exported `RateLimiter` interface, `SendRateLimiter.checkLimit`/`recordUsage`,
+and `checkRateLimit` helper remain available but are deprecated. Actions prefer
+reservations and automatically adapt old injected check/record implementations;
+`adaptLegacyRateLimiter` is also exported. That compatibility path cannot reserve
+capacity between check and record, so concurrent legacy callers may exceed their
+limit. Legacy usage is recorded once for accepted/unknown dispatch, never for
+proven rejection. Bookkeeping failure after settlement is logged to stderr without
+changing the delivery result. Limits remain in memory with no distributed storage.
 
 ## Quality and Trust Signals
 

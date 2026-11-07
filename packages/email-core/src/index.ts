@@ -1,6 +1,7 @@
 // @usejunior/email-core — Actions, content engine, security, and provider interfaces
 export { EMAIL_ACTIONS } from './actions/registry.js';
-export type { EmailAction, AllowlistConfig } from './actions/registry.js';
+export type { EmailAction, AllowlistConfig, RateLimiter, ReservationRateLimiter, RateReservation, RateReservationResult } from './actions/registry.js';
+export { adaptLegacyRateLimiter } from './security/rate-reservation.js';
 export {
   EMAIL_SCOPE_PROFILES,
   EMAIL_SCOPE_PROFILE_ENV,
@@ -10,6 +11,7 @@ export {
   profileBlockedActionError,
 } from './scope-profile.js';
 export type { EmailScopeProfile } from './scope-profile.js';
+export { runScheduledWorkflow } from './scheduled-workflow.js';
 export type {
   EmailAddress,
   EmailMessage,
@@ -20,7 +22,10 @@ export type {
   SendResult,
   ScheduledSend,
   ScheduledSendResult,
+  ScheduledSendWorkflow,
+  ScheduledPreparationPhase,
   DraftResult,
+  DraftSnapshot,
   EmailError,
   ListOptions,
   ReplyOptions,
@@ -52,9 +57,11 @@ export {
   parseRetryAfter,
   isRetryable,
   withRetry,
+  withAuthenticatedRetry,
+  withAutoRefresh,
   SEND_STATUS_UNKNOWN,
 } from './providers/provider.js';
-export type { OperationKind, DispatchStage, ClassifiedFailure } from './providers/provider.js';
+export type { OperationKind, DispatchStage, ClassifiedFailure, AuthErrorClassification } from './providers/provider.js';
 export {
   isAllowedSender,
   loadReceiveAllowlist,
@@ -71,6 +78,9 @@ export {
   SendRateLimiter,
 } from './security/send-allowlist.js';
 export { WatchedAllowlist } from './security/watched-allowlist.js';
+export type { AllowlistLifecycle } from './security/watched-allowlist.js';
+export { loadAllowlistPolicy, asAllowlistPolicy } from './security/allowlist-policy.js';
+export type { AllowlistPolicy, AllowlistInput } from './security/allowlist-policy.js';
 export {
   SendLedger,
   computeSendFingerprint,
@@ -90,6 +100,7 @@ export {
 export type {
   SendAttempt,
   SendAttemptState,
+  SendLeaseState,
   SendClaim,
   SendOutcome,
   ClaimResult,

@@ -13,7 +13,7 @@ import {
   isDirectCliRun,
   shouldShowConfigureMailboxPicker,
 } from './cli.js';
-import { mkdtemp, rm, readFile, symlink } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -45,6 +45,7 @@ const watcherMockState = vi.hoisted(() => ({
   },
   /** Controls getNewMessages behavior. null = return [], Error = throw. */
   getNewMessagesResult: null as Error | null,
+  newMessages: [] as Array<{ id: string; from: { email: string }; to: Array<{ email: string }>; subject: string }>,
   /** Number of poll iterations before sending SIGINT. */
   pollCountBeforeShutdown: 1,
   /** Track poll calls. */
@@ -112,6 +113,7 @@ vi.mock('node:http', () => ({
         if (event === 'error') onceErrorHandler = callback;
         return server;
       }),
+      removeListener: vi.fn(() => server),
       listen: vi.fn((_port: number, _host: string, callback?: () => void) => {
         if (httpMockState.listenError) {
           queueMicrotask(() => {
@@ -128,12 +130,16 @@ vi.mock('node:http', () => ({
             const query = httpMockState.callbackQueryFactory?.();
             if (!query) return;
 
+            let finish: (() => void) | undefined;
             const response = {
               statusCode: 0,
               setHeader: vi.fn(),
+              writeHead: (status: number) => { response.statusCode = status; return response; },
+              once: (_event: string, callback: () => void) => { finish = callback; return response; },
               end: (body?: string) => {
                 httpMockState.lastResponseStatus = response.statusCode;
                 httpMockState.lastResponseBody = body ?? null;
+                finish?.();
               },
             };
 
@@ -187,7 +193,7 @@ vi.mock('@usejunior/provider-microsoft', async (importOriginal) => {
       if (watcherMockState.getNewMessagesResult instanceof Error) {
         throw watcherMockState.getNewMessagesResult;
       }
-      return [];
+      return watcherMockState.newMessages;
     }
   }
 
@@ -2014,6 +2020,7 @@ describe('cli/Watcher Token Error Recovery', () => {
     watcherMockState.auth.getAccessTokenResult = 'mock-token';
     watcherMockState.auth.shutdownOnTryReconnect = false;
     watcherMockState.getNewMessagesResult = null;
+    watcherMockState.newMessages = [];
     watcherMockState.pollCountBeforeShutdown = 1;
     watcherMockState.pollCount = 0;
   });
@@ -2029,6 +2036,31 @@ describe('cli/Watcher Token Error Recovery', () => {
     }
     await rm(tmpDir, { recursive: true, force: true });
     exitSpy.mockRestore();
+  });
+
+  it('Scenario: Malformed startup receive policy cannot emit a wake', async () => {
+    const savedPath = process.env['AGENT_EMAIL_RECEIVE_ALLOWLIST'];
+    process.env['AGENT_EMAIL_RECEIVE_ALLOWLIST'] = join(tmpDir, 'receive-allowlist.json');
+    await writeFile(process.env['AGENT_EMAIL_RECEIVE_ALLOWLIST'], '{ malformed');
+    watcherMockState.newMessages = [{
+      id: 'malformed-policy-message', from: { email: 'sender@example.com' },
+      to: [{ email: 'test@example.com' }], subject: 'Synthetic policy regression',
+    }];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 200 }));
+    try {
+      const { runWatch } = await import('./cli.js');
+      expect(await runWatch({ command: 'watch', pollInterval: 2 })).toBe(0);
+      expect(watcherMockState.pollCount).toBeGreaterThan(0);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      // The runner no longer emits the old aggregate poll counter; startup
+      // still identifies the fail-closed policy, and the real wake path stays idle.
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Invalid receive allowlist'));
+    } finally {
+      fetchSpy.mockRestore();
+      watcherMockState.newMessages = [];
+      if (savedPath === undefined) delete process.env['AGENT_EMAIL_RECEIVE_ALLOWLIST'];
+      else process.env['AGENT_EMAIL_RECEIVE_ALLOWLIST'] = savedPath;
+    }
   });
 
   it('Scenario: Watcher calls tryReconnect on auth error during poll', async () => {

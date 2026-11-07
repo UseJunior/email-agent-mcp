@@ -211,6 +211,8 @@ export class GoogleapisGmailClient implements GmailApiClient {
     }
     return {
       id: response.data.id,
+      // Keep the full backing resource, including historyId for observation.
+      // It is not a conditional-write token for drafts.update/drafts.send.
       message: response.data.message,
     };
   }

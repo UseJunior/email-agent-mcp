@@ -28,6 +28,16 @@ beforeEach(async () => {
 });
 
 describe('email-write/Send Email', () => {
+  it('Scenario: Invalid startup policy blocks outbound dispatch', async () => {
+    ctx.sendAllowlist = { status: 'invalid', reason: 'Malformed allowlist JSON' };
+    const result = await sendEmailAction.run(ctx, {
+      to: 'alice@allowed.com', subject: 'Synthetic policy test', body: 'Hi',
+    });
+    expect(result.success).toBe(false);
+    expect(result.error?.message).toContain('allowlist invalid');
+    expect(provider.getSentMessages()).toHaveLength(0);
+  });
+
   it('Scenario: Send to allowed domain', async () => {
     const result = await sendEmailAction.run(ctx, {
       to: 'alice@allowed.com',
