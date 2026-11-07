@@ -5,6 +5,7 @@ import type {
   ComposeMessage,
   SendResult,
   DraftResult,
+  DraftSnapshot,
   ListOptions,
   ReplyOptions,
   Subscription,
@@ -17,6 +18,8 @@ export interface EmailReader {
   listMessages(opts: ListOptions): Promise<EmailMessage[]>;
   getMessage(id: string): Promise<EmailMessage>;
   getDraft?(draftId: string): Promise<EmailMessage>;
+  /** Optional observation capability; does not lock or condition a later write. */
+  getDraftSnapshot?(draftId: string): Promise<DraftSnapshot>;
   searchMessages(query: string, folder?: string, limit?: number, offset?: number): Promise<EmailMessage[]>;
   getThread(messageId: string): Promise<EmailThread>;
 }
