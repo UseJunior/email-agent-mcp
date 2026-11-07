@@ -179,6 +179,25 @@ describe('provider-gmail/Config Discovery', () => {
 });
 
 describe('mailbox-config/Configure Mailbox', () => {
+  it('rotates a valid alias despite an unrelated malformed profile', async () => {
+    const metadata = gmailMailbox({ emailAddress: 'synthetic@example.com' });
+    const path = join(tempHome, 'tokens', 'personal.json');
+    await writeFile(path, JSON.stringify(metadata));
+    await writeFile(join(tempHome, 'tokens', 'aaa-unrelated.json'), '{bad');
+    expect(await listConfiguredGmailMailboxes()).toHaveLength(1);
+    await createGmailMetadataWriter(metadata)('rotated', metadata.refreshToken);
+    expect(JSON.parse(await readFile(path, 'utf8')).refreshToken).toBe('rotated');
+    expect(await readdir(join(tempHome, 'tokens'))).toEqual(['aaa-unrelated.json', 'personal.json']);
+  });
+
+  it('refuses to overwrite a corrupt canonical target while scanning aliases', async () => {
+    const metadata = gmailMailbox({ emailAddress: 'synthetic@example.com' });
+    const path = join(tempHome, 'tokens', `${toFilesystemSafeKey(metadata.emailAddress)}.json`);
+    await writeFile(path, '{bad');
+    await writeFile(join(tempHome, 'tokens', 'personal.json'), JSON.stringify(metadata));
+    await expect(createGmailMetadataWriter(metadata)('rotated', metadata.refreshToken)).rejects.toThrow();
+    expect(await readFile(path, 'utf8')).toBe('{bad');
+  });
   async function writeRaw(filename: string, body: Record<string, unknown>): Promise<void> {
     await writeFile(join(tempHome, 'tokens', filename), JSON.stringify(body, null, 2) + '\n');
   }
