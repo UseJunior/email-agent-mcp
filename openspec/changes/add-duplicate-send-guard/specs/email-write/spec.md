@@ -26,8 +26,24 @@ Each attempt SHALL carry an identity, and a settlement or release SHALL apply on
 the attempt that produced it. A fingerprint MAY carry more than one live attempt; a
 colliding claim SHALL be told about the strongest evidence available, preferring a
 delivered attempt over an unresolved one over one still in flight. The ledger SHALL
-NOT discard an in-flight reservation to stay within its size bound, and SHALL retain a
-successful outcome that settles after its reservation was pruned.
+NOT discard a pending reservation to stay within its size bound or because the
+retention window elapsed. Leases SHALL advance through reserved, dispatched,
+settled, or released states. Only reserved leases may release; settlement SHALL be
+terminal and idempotent, including proven rejection. Late callbacks SHALL NOT
+weaken, resurrect, or extend the retention of terminal evidence. Retained settled
+attempts SHALL age from their first settlement. Existing exported settle/release
+callbacks SHALL remain compatible; legacy settlement without an explicit dispatch
+transition SHALL adapt a reserved lease directly to terminal settlement.
+
+Delivery/scheduling provider invocations SHALL be preceded by `markDispatched`.
+Unknown throws after dispatch SHALL settle unresolved. Preflight refusals SHALL
+release reserved claims. Success SHALL take precedence over contradictory error codes.
+
+For `send_draft`, the system SHALL claim the input ID before lookup and additionally
+claim the canonical snapshot draft ID when distinct. Both claims SHALL advance and
+settle/release coherently; the same input/canonical identity SHALL use one claim.
+Concurrent aliases SHALL NOT bypass the process-local guard. Forced alias attempts
+SHALL preserve earlier sibling evidence on both identities.
 
 The fingerprint SHALL be scoped to a mailbox namespace: the caller-supplied mailbox
 name, or a per-provider-instance identity when none is supplied.
@@ -99,3 +115,19 @@ restart of the server.
 #### Scenario: Guard disabled by window of zero
 - **WHEN** `AGENT_EMAIL_DUPLICATE_SEND_WINDOW_MS` is `0`
 - **THEN** identical repeated sends are dispatched without duplicate checking
+
+#### Scenario: Active dispatch outlives retention and ages only after settlement
+- **WHEN** a provider request remains active beyond the retention window
+- **THEN** an identical delivery is still refused as in flight
+- **AND** retained terminal evidence expires only after the window from first settlement
+
+#### Scenario: Terminal callbacks cannot weaken evidence
+- **WHEN** an attempt is settled or released and callbacks arrive again in any order
+- **THEN** its terminal state, retained evidence, and settlement time remain unchanged
+- **AND** sibling attempts are untouched
+
+#### Scenario: Concurrent draft aliases dispatch at most once
+- **WHEN** concurrent send_draft calls resolve distinct input IDs to one canonical draft
+- **THEN** at most one unforced call dispatches, including scheduled sends
+- **AND** the loser releases only its own reserved claim
+- **AND** a replay of the winner's consumed input ID is blocked before lookup

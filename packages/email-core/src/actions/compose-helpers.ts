@@ -660,9 +660,10 @@ export type DeliveryClaim =
 /**
  * Reserve this delivery in the send ledger before touching the provider.
  *
- * Call AFTER every pre-dispatch gate (mailbox, allowlist, rate limit) and
- * IMMEDIATELY BEFORE the provider call, so the reserved window is exactly the
- * window in which an acknowledgement can be lost.
+ * Compose/reply claim after preflight gates; draft sending claims the input ID
+ * before lookup and the canonical ID after lookup if distinct. Release preflight
+ * refusals, markDispatched immediately before provider invocation, then settle
+ * every outcome (including throws). Live leases never age out automatically.
  *
  * On a collision the prior attempt's `messageId` is surfaced at the top level
  * even though `success` is false: the caller asked whether this message went
