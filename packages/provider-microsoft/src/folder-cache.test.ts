@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { GraphEmailProvider, type GraphApiClient } from './email-graph-provider.js';
+import { GraphEmailProvider, GraphApiError, type GraphApiClient } from './email-graph-provider.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -23,6 +23,152 @@ const rule = { displayName: 'File', sequence: 1, conditions: {}, actions: { move
 afterEach(() => vi.restoreAllMocks());
 
 describe('provider-microsoft/Versioned folder caches (#108, approved harden-email-state-machines group 14)', () => {
+  it('Scenario: Fresh writes refuse name resolution from truncated trees', async () => {
+    for (const operation of ['create', 'delete', 'rule'] as const) {
+      const get = vi.fn(async (url: string) => {
+        if (url.startsWith('/me/mailFolders?') || url.includes('/childFolders?')) {
+          return { value: [{ id: `f-${get.mock.calls.length}`, displayName: 'Target', childFolderCount: 1 }] };
+        }
+        throw new GraphApiError(404, 'ErrorItemNotFound');
+      });
+      const mock = client(get);
+      const provider = new GraphEmailProvider(mock);
+      const write = operation === 'create' ? provider.createFolder('Child', 'Target')
+        : operation === 'delete' ? provider.deleteFolder('Target')
+          : provider.createInboxRule({ ...rule, actions: { moveToFolder: 'Target', copyToFolder: 'Target' } });
+      await expect(write).rejects.toMatchObject({ code: 'FOLDER_TRAVERSAL_LIMIT' });
+      expect(get).toHaveBeenCalledTimes(operation === 'rule' ? 402 : 401);
+      expect(mock.post).not.toHaveBeenCalled();
+      expect(mock.delete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('Scenario: Fresh rule destinations coalesce without invalidating system IDs', async () => {
+    const root = deferred<ReturnType<typeof tree>>();
+    const started = deferred<void>();
+    let block = false;
+    const get = vi.fn(async (url: string) => {
+      if (url.startsWith('/me/mailFolders?')) {
+        if (block) { started.resolve(); return root.promise; }
+        return tree('stale');
+      }
+      return { id: `system-${url.split('/').pop()!.split('?')[0]}` };
+    });
+    const mock = client(get);
+    const provider = new GraphEmailProvider(mock);
+    await provider.listFolders();
+    await provider.createInboxRule(rule); // Prime the system ID cache.
+    block = true;
+    const custom = { ...rule, actions: { moveToFolder: 'Target' } };
+    const first = provider.createInboxRule(custom);
+    const second = provider.createInboxRule(custom);
+    const wellKnown = provider.createInboxRule(rule);
+    await started.promise;
+    root.resolve(tree('fresh'));
+    await Promise.all([first, second, wellKnown]);
+    expect(get.mock.calls.filter(([url]) => url.startsWith('/me/mailFolders?'))).toHaveLength(2);
+    expect(get.mock.calls.filter(([url]) => !url.startsWith('/me/mailFolders?'))).toHaveLength(17);
+    const destinations = mock.post.mock.calls.map(([, body]) => body.actions.moveToFolder);
+    expect(destinations.filter(id => id === 'fresh')).toHaveLength(2);
+    expect(destinations).not.toContain('stale');
+  });
+
+  it('Scenario: Move and copy rule destinations share fresh validation', async () => {
+    const get = vi.fn(async (url: string) => url.startsWith('/me/mailFolders?')
+      ? { value: [
+        { id: 'project', displayName: 'Projects', childFolderCount: 0 },
+        { id: 'backup', displayName: 'Backup', childFolderCount: 0 },
+      ] }
+      : { id: `system-${url.split('/').pop()!.split('?')[0]}` });
+    const mock = client(get);
+    const provider = new GraphEmailProvider(mock);
+    await provider.createInboxRule({ ...rule, actions: { moveToFolder: 'Projects', copyToFolder: 'Backup' } });
+    expect(get.mock.calls.filter(([url]) => url.startsWith('/me/mailFolders?'))).toHaveLength(1);
+    expect(get.mock.calls.filter(([url]) => !url.startsWith('/me/mailFolders?'))).toHaveLength(17);
+    expect(mock.post).toHaveBeenCalledWith('/me/mailFolders/inbox/messageRules',
+      expect.objectContaining({ actions: { moveToFolder: 'project', copyToFolder: 'backup' } }));
+  });
+
+  it('Scenario: Custom structural writes validate fresh and fence pending reads after mutation', async () => {
+    for (const operation of ['create', 'delete'] as const) {
+      for (const staleFirst of [true, false]) {
+        const now = vi.spyOn(Date, 'now').mockReturnValue(0);
+        const sent = deferred<void>();
+        const commit = deferred<void>();
+        const old = deferred<ReturnType<typeof tree>>();
+        const oldStarted = deferred<void>();
+        const fresh = deferred<ReturnType<typeof tree>>();
+        const freshStarted = deferred<void>();
+        let traversals = 0;
+        const get = vi.fn(async (url: string) => {
+          if (!url.startsWith('/me/mailFolders?')) return { id: `system-${url}` };
+          traversals++;
+          if (traversals === 1) return tree('stale-target');
+          if (traversals === 2) return tree('current-target');
+          if (traversals === 3) { oldStarted.resolve(); return old.promise; }
+          freshStarted.resolve();
+          return fresh.promise;
+        });
+        const mock = client(get);
+        mock.post.mockImplementation(async () => {
+          sent.resolve(); await commit.promise;
+          return { id: 'created', displayName: 'Child' };
+        });
+        mock.delete.mockImplementation(async () => { sent.resolve(); await commit.promise; });
+        const provider = new GraphEmailProvider(mock);
+        await provider.listFolders();
+        const mutation = operation === 'create'
+          ? provider.createFolder('Child', 'Target') : provider.deleteFolder('Target');
+        await sent.promise;
+        expect(operation === 'create' ? mock.post.mock.calls[0]![0] : mock.delete.mock.calls[0]![0])
+          .toContain('/mailFolders/current-target');
+        // A read completed before the mutation commits may see the old tree.
+        expect((await provider.listFolders())[0]!.id).toBe('current-target');
+        now.mockReturnValue(60_000); // Start a pre-commit load while the write is blocked.
+        const pending = provider.listFolders();
+        await oldStarted.promise;
+        commit.resolve();
+        await mutation;
+        const later = provider.listFolders();
+        await freshStarted.promise;
+        if (staleFirst) old.resolve(tree('pre-mutation'));
+        fresh.resolve(tree('post-mutation'));
+        expect((await later)[0]!.id).toBe('post-mutation');
+        if (!staleFirst) old.resolve(tree('pre-mutation'));
+        expect((await pending)[0]!.id).toBe('post-mutation');
+        expect((await provider.listFolders())[0]!.id).toBe('post-mutation');
+        expect(traversals).toBe(4);
+        now.mockRestore();
+      }
+    }
+  });
+
+  it('Scenario: A read may complete before a custom structural mutation is sent', async () => {
+    const events: string[] = [];
+    const root = deferred<ReturnType<typeof tree>>();
+    const started = deferred<void>();
+    const sent = deferred<void>();
+    const commit = deferred<void>();
+    const get = vi.fn(async () => { started.resolve(); return root.promise; });
+    const mock = client(get);
+    mock.post.mockImplementation(async () => {
+      events.push('sent');
+      sent.resolve(); await commit.promise;
+      return { id: 'created', displayName: 'Child' };
+    });
+    const provider = new GraphEmailProvider(mock);
+    const read = provider.listFolders().then(folders => { events.push('read'); return folders; });
+    await started.promise;
+    const create = provider.createFolder('Child', 'Target');
+    root.resolve(tree('parent'));
+    expect((await read).map(folder => folder.id)).toEqual(['parent']);
+    await sent.promise;
+    expect(events).toEqual(['read', 'sent']);
+    expect(get).toHaveBeenCalledTimes(1);
+    commit.resolve();
+    await create;
+  });
+
   it('Scenario: Concurrent folder reads share one complete traversal', async () => {
     const root = deferred<ReturnType<typeof tree>>();
     const child = deferred<ReturnType<typeof tree>>();

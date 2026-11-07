@@ -491,7 +491,10 @@ class FolderCache<T> {
     this.state = { kind: 'empty' };
   }
 
-  async get(load: () => Promise<T>, complete: (data: T) => boolean): Promise<T> {
+  async get(load: () => Promise<T>, complete: (data: T) => boolean, fresh = false): Promise<T> {
+    // Fresh validation bypasses a completed snapshot, but joins an active load.
+    // Only a completed structural mutation advances the generation.
+    if (fresh && this.state.kind === 'ready') this.state = { kind: 'empty' };
     for (;;) {
       if (this.state.kind === 'ready' && this.state.expiresAt > Date.now()) {
         return this.state.data;
@@ -914,12 +917,13 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
     // Resolve folder destinations to opaque ids and reject mail-discarding ones.
     // resolveRuleDestinationId does the destructive check on the canonical
     // resolved folder, closing alias/slash/case bypasses like `/trash/`.
-    for (const folderAction of ['moveToFolder', 'copyToFolder'] as const) {
+    // Start both validations together so move/copy share a fresh traversal.
+    await Promise.all((['moveToFolder', 'copyToFolder'] as const).map(async folderAction => {
       const destination = actions[folderAction];
       if (typeof destination === 'string') {
         actions[folderAction] = await this.resolveRuleDestinationId(destination);
       }
-    }
+    }));
 
     // Graph rejects sequence 0 (`MessageRuleValidationError` on Field 'Sequence'),
     // which is exactly the value it assigns when a POST omits sequence. The tool
@@ -1645,7 +1649,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       : [];
   }
 
-  private async getFolderSnapshot(): Promise<FolderSnapshot> {
+  private async getFolderSnapshot(fresh = false): Promise<FolderSnapshot> {
     return this.folderCache.get(async () => {
       const budget = { remaining: MAX_FOLDER_REQUESTS_PER_SNAPSHOT, truncated: false };
       const folders = await this.fetchFolderCollection(
@@ -1656,7 +1660,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       );
       // A partial tree cannot establish absence or uniqueness.
       return { folders, truncated: budget.truncated };
-    }, snapshot => !snapshot.truncated);
+    }, snapshot => !snapshot.truncated, fresh);
   }
 
   private async fetchFolderCollection(
@@ -1709,13 +1713,10 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
   /**
    * Resolve a folder name/path/id to a Graph folder id.
    *
-   * `forWrite` is reserved for operations that MUTATE the folder tree
-   * (createFolder's parent, deleteFolder's target): these are low-frequency and
-   * high-harm — deleting or nesting under a stale-cached id is unrecoverable —
-   * so they re-fetch to get a current path→id mapping. Message moves and rule
-   * destinations deliberately do NOT pass forWrite: they don't change the tree,
-   * they run in high-volume loops, and their worst-case staleness (the 60s
-   * rename race) is the same recoverable risk we already accept for reads.
+   * Structural writes and persistent rule destinations bypass ready snapshots
+   * for fresh path→id validation, sharing any active traversal. Message moves
+   * retain the ordinary 60s cache. Validation does not invalidate system IDs or
+   * advance generations; successful structural mutations invalidate both caches.
    */
   private async resolveFolderId(folder: string, forWrite = false): Promise<string> {
     const trimmed = folder.trim();
@@ -1724,8 +1725,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       ?? (SYSTEM_FOLDER_NAME_SET.has(normalized) ? normalized : undefined);
     if (wellKnown) return wellKnown;
 
-    if (forWrite) this.invalidateFolderCaches();
-    const { folders, truncated } = await this.getFolderSnapshot();
+    const { folders, truncated } = await this.getFolderSnapshot(forWrite);
 
     // Exact id match is safe even against a truncated tree — ids are globally
     // unique, so a visible match is THE match regardless of unseen folders.

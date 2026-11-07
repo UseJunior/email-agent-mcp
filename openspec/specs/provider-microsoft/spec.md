@@ -216,6 +216,28 @@ The system SHALL document required egress domains for NemoClaw sandbox policy: `
 
 The provider SHALL share concurrent folder-tree and system-folder ID loads, invalidate both caches on structural mutation, reject superseded results as current, and cache only complete successful loads. This implements issue #108 and approved `harden-email-state-machines` group 14. Public provider signatures and MCP wire fields remain unchanged.
 
+Fresh validation for structural writes and rule destinations SHALL bypass ready folder snapshots and share active traversals without advancing generations or invalidating system-folder IDs. Successful structural mutations SHALL invalidate both caches and fence loads still pending at invalidation. Reads completed before mutation completion may observe the prior tree; this process-local cache does not provide remote atomicity or serialize reads with writes. Truncated trees SHALL remain insufficient to establish name/path uniqueness.
+
+#### Scenario: Fresh rule destinations coalesce without invalidating system IDs
+- **WHEN** concurrent rules resolve custom destinations with a ready folder snapshot and system ID map
+- **THEN** they share a fresh traversal and reuse the system ID map, including concurrent well-known destinations
+
+#### Scenario: Fresh writes refuse name resolution from truncated trees
+- **WHEN** structural writes or rule destinations resolve names from a truncated fresh traversal
+- **THEN** they fail closed without sending mutations, even if the name is visible in the partial tree
+
+#### Scenario: Move and copy rule destinations share fresh validation
+- **WHEN** one rule includes custom move and copy destinations
+- **THEN** both destinations share one fresh folder traversal and one system ID sweep
+
+#### Scenario: Custom structural writes validate fresh and fence pending reads after mutation
+- **WHEN** a custom-parent create or custom-folder delete completes while a pre-mutation traversal remains pending
+- **THEN** validation bypasses the ready snapshot and the pending read retries in the post-mutation generation regardless of completion order
+
+#### Scenario: A read may complete before a custom structural mutation is sent
+- **WHEN** a read shares a traversal with custom-parent validation and finishes before the mutation is sent
+- **THEN** it may return the pre-mutation tree without waiting for the mutation
+
 #### Scenario: Concurrent folder reads share one complete traversal
 - **WHEN** folder reads overlap a cold recursive traversal
 - **THEN** they share its requests and complete result
