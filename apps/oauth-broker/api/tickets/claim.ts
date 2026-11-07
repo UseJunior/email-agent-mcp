@@ -4,7 +4,7 @@
 // One-shot ticket claim. The CLI proves ownership by presenting the raw
 // pickup_secret it generated locally; the broker hashes and compares
 // against the SHA-256 hash registered at /api/sessions. Successful
-// claim atomically deletes the session record (Redis GETDEL on KV,
+// claim atomically verifies and deletes the session record (Redis Lua on KV,
 // single-threaded delete on memory) so a second concurrent claim with
 // the same secret returns 410 consumed.
 //
