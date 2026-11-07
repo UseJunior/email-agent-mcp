@@ -55,3 +55,32 @@ describe('provider-gmail/Dual Watch Mode', () => {
     expect(result.nextHistoryId).toBe('12346');
   });
 });
+
+describe('provider-gmail/Bounded history lifecycle', () => {
+  it('retrieves every page before publishing the final cursor', async () => {
+    const listHistory = vi.fn()
+      .mockResolvedValueOnce({ history: [{ messagesAdded: [{ message: { id: 'first' } }] }], historyId: 'intermediate', nextPageToken: 'page2' })
+      .mockResolvedValueOnce({ history: [{ messagesAdded: [{ message: { id: 'second' } }] }], historyId: 'final' });
+    await expect(pollHistory({ listHistory }, 'start')).resolves.toEqual({ newMessageIds: ['first', 'second'], nextHistoryId: 'final' });
+    expect(listHistory.mock.calls).toEqual([['start', undefined], ['start', 'page2']]);
+  });
+  it('does not return partial progress after a page error or repeated token', async () => {
+    const listHistory = vi.fn().mockResolvedValueOnce({ historyId: 'partial', nextPageToken: 'again' }).mockRejectedValueOnce(new Error('page failed'));
+    await expect(pollHistory({ listHistory }, 'start')).rejects.toThrow('page failed');
+    listHistory.mockReset().mockResolvedValue({ historyId: 'partial', nextPageToken: 'again' });
+    await expect(pollHistory({ listHistory }, 'start')).rejects.toThrow('repeated');
+    expect(listHistory).toHaveBeenCalledTimes(2);
+  });
+  it('bounds unique pages and rejects a missing final cursor', async () => {
+    let count = 0;
+    const listHistory = vi.fn(async () => ({ historyId: 'partial', nextPageToken: String(++count) }));
+    await expect(pollHistory({ listHistory }, 'start')).rejects.toThrow('safety limit');
+    expect(count).toBe(100);
+    await expect(pollHistory({ listHistory: vi.fn().mockResolvedValue({}) }, 'start')).rejects.toThrow('Missing history cursor');
+  });
+  it('validates expiry and supports Gmail epoch milliseconds', () => {
+    expect(needsRenewal(String(Date.now() + 7_200_000))).toBe(false);
+    expect(() => needsRenewal('invalid')).toThrow('Invalid');
+    expect(() => needsRenewal(new Date().toISOString(), -1)).toThrow('Invalid');
+  });
+});
