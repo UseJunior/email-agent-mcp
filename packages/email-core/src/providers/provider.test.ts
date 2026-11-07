@@ -171,12 +171,12 @@ describe('provider-interface/Authentication Lifecycle', () => {
     const fn = async () => {
       callCount++;
       if (callCount === 1 && tokenExpired) {
-        throw new Error('Token expired');
+        throw new ProviderError('AUTH_REQUIRED', 'Token expired', 'test', false);
       }
       return 'data';
     };
 
-    const result = await withAutoRefresh(authManager, fn);
+    const result = await withAutoRefresh(authManager, fn, { operation: 'idempotent-read' });
     expect(result).toBe('data');
     expect(refreshCalled).toBe(true);
     expect(callCount).toBe(2);

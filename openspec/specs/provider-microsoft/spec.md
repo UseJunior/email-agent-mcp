@@ -7,6 +7,23 @@ feature: Microsoft Graph Provider
 
 Implements the provider interface for Microsoft Graph API email operations. Supports delegated OAuth (device code/PKCE for end users) and client credentials (for daemon deployments). Handles Graph-specific concerns: createReplyAll for threading, validation token handling (GET + POST), webhook deduplication, zombie subscription detection, size limits, and anti-spoofing via authentication headers.
 ## Requirements
+### Requirement: Explicit Graph Auth Retry
+
+Graph HTTP wrappers SHALL pass an operation kind to authenticated retry: GET and binary GET are reads, PATCH/DELETE and known resource POSTs are writes, and sendMail/send and unknown POST actions are delivery. Only a received HTTP 401 SHALL authorize at most one recovery retry, including rejected delivery. Timeout, 5xx and other failures SHALL NOT cause auth replay. Concurrent requests SHALL share active recovery; AbortSignal SHALL interrupt an individual waiter without cancelling another request's shared recovery. Existing constructor and method calls SHALL remain compatible, with optional signal parameters added for POST, PATCH, DELETE and binary GET.
+
+#### Scenario: Delivery 401 permits one recovery retry with fresh credentials
+- **WHEN** Graph explicitly rejects delivery with HTTP 401 and recovery succeeds
+- **THEN** the request SHALL be retried once using fresh credentials
+
+#### Scenario: Concurrent auth recovery survives cancellation of one waiter
+- **WHEN** concurrent rejected requests wait on recovery and one request is cancelled
+- **THEN** only that wait SHALL be cancelled
+- **AND** the other request may retry after the shared recovery succeeds
+
+#### Scenario: Cancellation interrupts token waiting before delivery dispatch
+- **WHEN** cancellation occurs while token acquisition is pending
+- **THEN** the caller SHALL stop waiting and SHALL NOT dispatch delivery
+
 ### Requirement: Delegated OAuth Authentication
 
 The system SHALL support delegated OAuth as the primary auth mode for end users, using device code flow or authorization code flow with PKCE. This avoids requiring users to register an Azure AD daemon app. MSAL SHALL own token cache persistence; the existing mailbox metadata route SHALL store only the authentication record, cache identity and profile metadata.
