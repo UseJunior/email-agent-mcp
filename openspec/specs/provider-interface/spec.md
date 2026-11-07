@@ -63,8 +63,42 @@ The system SHALL detect 429/throttle responses across providers, apply exponenti
 The system SHALL manage the authentication lifecycle: connect (initial auth), refresh (token renewal), and disconnect (cleanup).
 
 #### Scenario: Token refresh
-- **WHEN** an access token expires during an operation
-- **THEN** the system refreshes the token using the stored refresh token and retries the operation
+- **WHEN** a read operation fails with an explicit authentication error
+- **THEN** authenticated recovery may refresh credentials and retry once
+- **AND** token expiry alone does not authorize replay of a failed operation
+
+### Requirement: Authenticated Retry Safety
+
+Authenticated retry SHALL require an operation kind and an auth-error classifier. It SHALL perform at most one recovery and replay, and delivery SHALL require an explicit authentication rejection proving the request was rejected. Timeout, server error and ambiguous delivery SHALL NOT authorize replay. The deprecated `withAutoRefresh(auth, fn)` export SHALL remain callable, default to delivery safety and recognize only HTTP 401 as explicit rejection; callers specifying a read/write operation may also recover `ProviderError` code `AUTH_REQUIRED`. Expiry SHALL NOT authorize replay. Existing MCP wire fields SHALL remain unchanged.
+
+#### Scenario: Compatibility wrapper requires explicit rejection for unspecified operation
+- **WHEN** a legacy caller omits the operation kind
+- **THEN** an authentication code alone SHALL NOT authorize delivery replay
+- **AND** an explicit HTTP 401 may authorize one recovery retry
+
+#### Scenario: Recovery is exhausted after one replay and preserves the final error
+- **WHEN** the replay also fails
+- **THEN** its error SHALL propagate without another refresh or attempt
+
+#### Scenario: Failed recovery preserves rejection without dispatch
+- **WHEN** recovery reports failure
+- **THEN** the original rejection SHALL propagate without replay
+
+### Requirement: Cancellable Retry Backoff
+
+Generic retries SHALL remain limited to recoverable provider failures on non-delivery operations. Retry settings SHALL be finite and nonnegative, and maxRetries SHALL be an integer. AbortSignal SHALL interrupt operation/recovery waits and backoff, and pre-aborted calls SHALL NOT dispatch. Retry-After SHALL remain a minimum delay independent of jitter and maxDelay; waits exceeding the platform timer limit SHALL be chunked without reducing that floor. Exhaustion SHALL preserve the last failure.
+
+#### Scenario: Server floor above maxDelay eventually permits retry at the floor
+- **WHEN** a server delay exceeds local maxDelay
+- **THEN** the retry SHALL wait for the server floor even with minimum jitter
+
+#### Scenario: Retry exhaustion preserves the last provider error
+- **WHEN** a recoverable operation consumes its retry budget
+- **THEN** the final provider error SHALL propagate unchanged
+
+#### Scenario: Ambiguous delivery bypasses generic retries even if marked recoverable
+- **WHEN** a delivery failure is marked recoverable
+- **THEN** generic retries SHALL still dispatch only once
 
 ### Requirement: Optional Folder and Rule Capabilities
 
