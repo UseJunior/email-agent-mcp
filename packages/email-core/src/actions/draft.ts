@@ -1,5 +1,6 @@
 // Draft actions — create_draft, send_draft, update_draft
 import { z } from 'zod';
+import { readDraftSnapshot, assertDraftMutationEligible } from './draft-eligibility.js';
 import type { EmailAction } from './registry.js';
 import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { checkReplyThreading } from '../security/reply-validation.js';
@@ -298,14 +299,20 @@ export const sendDraftAction: EmailAction<
     const { claim } = claimed;
 
     // Fetch draft to check recipients against allowlist (fail closed)
+    let snapshot;
     let draftMessage;
     try {
-      draftMessage = await withRetry(
-        () => ctx.provider.getMessage(input.draft_id),
+      snapshot = await withRetry(
+        () => readDraftSnapshot(ctx.provider, input.draft_id),
         { operation: 'idempotent-read' },
       );
+      assertDraftMutationEligible(snapshot);
+      draftMessage = snapshot.message;
     } catch (err) {
       claim.release();
+      if (isProviderError(err) && ['DRAFT_DEFERRED', 'NOT_A_DRAFT'].includes(err.code)) {
+        return handleProviderError(err, 'DRAFT_LOOKUP_FAILED');
+      }
       return {
         success: false,
         error: {
@@ -351,7 +358,7 @@ export const sendDraftAction: EmailAction<
     try {
       if (scheduledSendAt !== undefined) {
         // Capability presence was checked before draft lookup above.
-        const result = await ctx.provider.scheduleDraft!(input.draft_id, scheduledSendAt);
+        const result = await ctx.provider.scheduleDraft!(snapshot.draftId, scheduledSendAt);
         claim.settle({
           success: result.success,
           ...(result.messageId !== undefined ? { messageId: result.messageId } : {}),
@@ -365,7 +372,7 @@ export const sendDraftAction: EmailAction<
         }
         return {
           success: result.success,
-          messageId: result.messageId,
+          messageId: result.messageId ?? snapshot.messageId,
           scheduledSendAt: result.scheduledSendAt,
           error: result.error ? {
             code: result.error.code,
@@ -381,7 +388,7 @@ export const sendDraftAction: EmailAction<
       // second send of an already-consumed draft is undocumented, so do not
       // rely on it: an automatic retry after an ambiguous failure could
       // deliver duplicates. Fail fast instead.
-      const result = await ctx.provider.sendDraft(input.draft_id);
+      const result = await ctx.provider.sendDraft(snapshot.draftId);
 
       claim.settle({
         success: result.success,
@@ -405,11 +412,12 @@ export const sendDraftAction: EmailAction<
       };
     } catch (err) {
       settleClaimFromThrow(claim, err);
-      const handled = handleProviderError(err, 'SEND_STATUS_UNKNOWN');
-      if (ctx.rateLimiter && handled.error.code === 'SEND_STATUS_UNKNOWN') {
+      const unknownCode = scheduledSendAt === undefined ? 'SEND_STATUS_UNKNOWN' : 'SCHEDULE_SEND_STATUS_UNKNOWN';
+      const handled = handleProviderError(err, unknownCode);
+      if (ctx.rateLimiter && handled.error.code === unknownCode) {
         ctx.rateLimiter.recordUsage('send_draft');
       }
-      return handled;
+      return { ...handled, messageId: snapshot.messageId, ...(scheduledSendAt ? { scheduledSendAt } : {}) };
     }
   },
 };
@@ -475,38 +483,28 @@ export const updateDraftAction: EmailAction<
     let { body } = fields;
     const hasBodyEdit = input.body !== undefined || input.body_file !== undefined;
 
-    // Reply status is provider metadata, never inferred from body content. Only
-    // body and subject changes need it: recipient/attachment-only updates must
-    // remain editable even if metadata lookup is unavailable.
+    // Lifecycle eligibility applies to every mutation. Origin is independent:
+    // unknown origin permits recipient/attachment edits, but never body edits.
     let isReplyDraft = false;
     let statusError: { code: string; message: string; recoverable: boolean } | undefined;
-    if (hasBodyEdit || subject !== undefined) {
-      try {
-        const status = await ctx.provider.getDraftReplyStatus?.(input.draft_id);
-        isReplyDraft = status !== 'non_reply';
-      } catch (err) {
-        // Fail closed. An unavailable or failed determination must never make a
-        // destructive body replacement look safe. But report why honestly: a
-        // missing draft is not a reply draft, and a transient lookup failure is
-        // neither.
-        isReplyDraft = true;
-        statusError = draftStatusError(err, input.draft_id);
-      }
+    let canonicalDraftId = input.draft_id;
+    try {
+      const snapshot = await readDraftSnapshot(ctx.provider, input.draft_id, hasBodyEdit || subject !== undefined, hasBodyEdit);
+      assertDraftMutationEligible(snapshot, hasBodyEdit);
+      canonicalDraftId = snapshot.draftId;
+      isReplyDraft = snapshot.origin !== 'non_reply';
+    } catch (err) {
+      // Fail closed. An unavailable or failed determination must never make a
+      // destructive body replacement look safe. But report why honestly: a
+      // missing draft is not a reply draft, and a transient lookup failure is
+      // neither.
+      isReplyDraft = true;
+      statusError = isProviderError(err) && ['DRAFT_DEFERRED', 'NOT_A_DRAFT', 'REPLY_DRAFT_BODY_IMMUTABLE'].includes(err.code)
+        ? { code: err.code, message: err.message, recoverable: err.recoverable }
+        : draftStatusError(err, input.draft_id);
     }
-
-    if (hasBodyEdit && statusError) {
+    if (statusError) {
       return { success: false, error: statusError };
-    }
-
-    if (hasBodyEdit && isReplyDraft) {
-      return {
-        success: false,
-        error: {
-          code: 'REPLY_DRAFT_BODY_IMMUTABLE',
-          message: 'The body of a reply draft cannot be edited safely because its quoted history must be preserved. Create a new draft instead.',
-          recoverable: true,
-        },
-      };
     }
 
     if (hasBodyEdit && input.replace_body !== true) {
@@ -571,7 +569,7 @@ export const updateDraftAction: EmailAction<
     }
 
     try {
-      const result = await ctx.provider.updateDraft(input.draft_id, partial);
+      const result = await ctx.provider.updateDraft(canonicalDraftId, partial);
       // Read the persisted draft back for the preview. Providers whose draft
       // resources have distinct identifiers (Gmail) use their draft-specific
       // read path through buildDraftPreview.
@@ -600,7 +598,7 @@ export const updateDraftAction: EmailAction<
         error: result.error ? { code: result.error.code, message: result.error.message, recoverable: result.error.recoverable } : undefined,
       };
     } catch (err) {
-      return handleProviderError(err, 'UPDATE_DRAFT_FAILED');
+      return { ...handleProviderError(err, 'UPDATE_DRAFT_FAILED'), draftId: canonicalDraftId };
     }
   },
 };

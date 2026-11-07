@@ -24,6 +24,22 @@ Graph HTTP wrappers SHALL pass an operation kind to authenticated retry: GET and
 - **WHEN** cancellation occurs while token acquisition is pending
 - **THEN** the caller SHALL stop waiting and SHALL NOT dispatch delivery
 
+### Requirement: Graph draft observations and partial preparation
+
+Graph snapshots SHALL capture message identity, changeKey revision, lifecycle, origin, recipients and the deferred property from one metadata response. Preparation or attachment replacement failures after draft creation SHALL preserve the surviving ID. Scheduling transition redesign remains separate.
+
+#### Scenario: Graph snapshot captures revision origin and scheduling observation together
+- **WHEN** Graph returns a future deferred marker on a draft
+- **THEN** the snapshot contains its deferred lifecycle, origin, revision and scheduling observation
+
+#### Scenario: Graph snapshot keeps sent lifecycle independent of stripped origin
+- **WHEN** origin metadata is absent or the message is sent or deleted
+- **THEN** origin stays indeterminate and lifecycle or not-found status reflects the independent observation
+
+#### Scenario: Graph partial reply preparation and attachment replacement retain draft ids
+- **WHEN** preparation or replacement fails after a draft exists
+- **THEN** the result retains the known surviving draft ID
+
 ### Requirement: Delegated OAuth Authentication
 
 The system SHALL support delegated OAuth as the primary auth mode for end users, using device code flow or authorization code flow with PKCE. This avoids requiring users to register an Azure AD daemon app. MSAL SHALL own token cache persistence; the existing mailbox metadata route SHALL store only the authentication record, cache identity and profile metadata.

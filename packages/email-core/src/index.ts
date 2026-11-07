@@ -10,6 +10,7 @@ export {
   profileBlockedActionError,
 } from './scope-profile.js';
 export type { EmailScopeProfile } from './scope-profile.js';
+export { runScheduledWorkflow } from './scheduled-workflow.js';
 export type {
   EmailAddress,
   EmailMessage,
@@ -20,7 +21,10 @@ export type {
   SendResult,
   ScheduledSend,
   ScheduledSendResult,
+  ScheduledSendWorkflow,
+  ScheduledPreparationPhase,
   DraftResult,
+  DraftSnapshot,
   EmailError,
   ListOptions,
   ReplyOptions,

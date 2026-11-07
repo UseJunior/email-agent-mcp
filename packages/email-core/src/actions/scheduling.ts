@@ -63,7 +63,7 @@ export const cancelScheduledSendAction: EmailAction<
   z.infer<typeof CancelScheduledSendOutput>
 > = {
   name: 'cancel_scheduled_send',
-  description: 'Cancel a pending provider-held scheduled send. Only verified scheduled drafts can be cancelled.',
+  description: 'Delete a verified future-deferred draft to cancel its pending send. Delivery can race deletion; success does not recall mail already delivered.',
   input: CancelScheduledSendInput,
   output: CancelScheduledSendOutput,
   annotations: { readOnlyHint: false, destructiveHint: true },
@@ -84,7 +84,7 @@ export const cancelScheduledSendAction: EmailAction<
       await ctx.provider.cancelScheduledSend(input.message_id);
       return { success: true, messageId: input.message_id };
     } catch (err) {
-      return handleProviderError(err, 'CANCEL_SCHEDULED_SEND_FAILED');
+      return { ...handleProviderError(err, 'CANCEL_SCHEDULED_SEND_FAILED'), messageId: input.message_id };
     }
   },
 };
