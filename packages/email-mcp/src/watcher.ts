@@ -1,5 +1,7 @@
 // Email watcher — monitors mailboxes and POSTs to wake URL
-import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, unlink, rename } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { EmailMessage, EmailAddress } from '@usejunior/email-core';
@@ -28,10 +30,25 @@ export interface WakePayload {
   mode: 'now';
 }
 
-/** Persisted delta state for a mailbox */
+/** @deprecated Compatibility input/output shape; timestamp v1 is written on disk. */
 export interface DeltaState {
   deltaLink: string;
   lastUpdated: string;
+}
+
+export interface TimestampCheckpoint {
+  version: 1;
+  kind: 'timestamp';
+  lastUpdated: string;
+}
+const timestamp = z.iso.datetime({ offset: true });
+const checkpointSchema = z.union([
+  z.object({ version: z.literal(1), kind: z.literal('timestamp'), lastUpdated: timestamp }),
+  z.object({ deltaLink: z.string(), lastUpdated: timestamp }).strict(),
+]);
+
+function dedupKey(id: string, provider?: string, mailbox?: string): string {
+  return JSON.stringify([provider ?? 'legacy', mailbox ?? 'legacy', id]);
 }
 
 // Deduplication — track processed message IDs
@@ -39,16 +56,18 @@ const processedMessages = new Set<string>();
 
 /**
  * Check if a message has already been processed (dedup).
+ * The single-ID overload is deprecated; supply provider and stable mailbox identity.
  */
-export function isProcessed(messageId: string): boolean {
-  return processedMessages.has(messageId);
+export function isProcessed(messageId: string, provider?: string, mailbox?: string): boolean {
+  return processedMessages.has(dedupKey(messageId, provider, mailbox));
 }
 
 /**
  * Mark a message as processed.
+ * The single-ID overload is deprecated; supply provider and stable mailbox identity.
  */
-export function markProcessed(messageId: string): void {
-  processedMessages.add(messageId);
+export function markProcessed(messageId: string, provider?: string, mailbox?: string): void {
+  processedMessages.add(dedupKey(messageId, provider, mailbox));
   // Limit memory usage — evict old entries
   if (processedMessages.size > 10000) {
     const entries = [...processedMessages];
@@ -127,6 +146,7 @@ export async function sendWake(
   wakeUrl: string,
   payload: WakePayload,
   token?: string,
+  signal?: AbortSignal,
 ): Promise<{ success: boolean; error?: string }> {
   try {
     const headers: Record<string, string> = {
@@ -140,7 +160,7 @@ export async function sendWake(
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(10_000),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
     });
 
     if (!response.ok) {
@@ -206,18 +226,38 @@ export function getDeltaStatePath(mailboxSafeKey: string): string {
 export async function loadDeltaState(mailboxSafeKey: string): Promise<DeltaState | null> {
   try {
     const content = await readFile(getDeltaStatePath(mailboxSafeKey), 'utf-8');
-    return JSON.parse(content) as DeltaState;
-  } catch {
-    return null;
+    const state = checkpointSchema.parse(JSON.parse(content));
+    // Deprecated delta-shaped reader remains source compatible; cursor is unused.
+    return { deltaLink: '', lastUpdated: state.lastUpdated };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw new Error(`Cannot load checkpoint for ${mailboxSafeKey}; repair or explicitly remove ${getDeltaStatePath(mailboxSafeKey)}`, { cause: error });
   }
 }
 
 /**
  * Save delta state for a mailbox.
  */
-export async function saveDeltaState(mailboxSafeKey: string, state: DeltaState): Promise<void> {
+export async function saveDeltaState(
+  mailboxSafeKey: string,
+  state: DeltaState | TimestampCheckpoint,
+  signal?: AbortSignal,
+  assertHeld: () => void = () => {},
+): Promise<void> {
+  const parsed = checkpointSchema.parse(state);
+  const record: TimestampCheckpoint = { version: 1, kind: 'timestamp', lastUpdated: parsed.lastUpdated };
+  const assertWritable = () => { signal?.throwIfAborted(); assertHeld(); };
+  assertWritable();
   await mkdir(STATE_DIR, { recursive: true });
-  await writeFile(getDeltaStatePath(mailboxSafeKey), JSON.stringify(state, null, 2), 'utf-8');
+  const temporary = `${getDeltaStatePath(mailboxSafeKey)}.${randomUUID()}.tmp`;
+  try {
+    assertWritable();
+    await writeFile(temporary, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx', ...(signal ? { signal } : {}) });
+    assertWritable();
+    await rename(temporary, getDeltaStatePath(mailboxSafeKey));
+  } finally {
+    await unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; });
+  }
 }
 
 /**

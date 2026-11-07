@@ -104,7 +104,7 @@ describe('email-watcher/Delta State Persistence — cross-module', () => {
     const loaded = await loadDeltaState(TEST_KEY);
 
     expect(loaded).not.toBeNull();
-    expect(loaded!.deltaLink).toBe(original.deltaLink);
+    expect(loaded!.deltaLink).toBe(''); // Deprecated shape; timestamp polling has no cursor.
     expect(loaded!.lastUpdated).toBe(original.lastUpdated);
 
     // Verify it is valid JSON with exactly the expected fields
@@ -125,7 +125,9 @@ describe('email-watcher/Delta State Persistence — cross-module', () => {
     // Read raw file and verify it is valid JSON
     const rawContent = await readFile(getDeltaStatePath(TEST_KEY), 'utf-8');
     const parsed = JSON.parse(rawContent);
-    expect(parsed.deltaLink).toBe(state.deltaLink);
+    expect(parsed.version).toBe(1);
+    expect(parsed.kind).toBe('timestamp');
+    expect(parsed.deltaLink).toBeUndefined();
     expect(parsed.lastUpdated).toBe(state.lastUpdated);
   });
 });
