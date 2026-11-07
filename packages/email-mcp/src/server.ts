@@ -25,6 +25,7 @@ export interface LazyProviderAuth {
   tryReconnect: () => Promise<boolean>;
 }
 
+/** @deprecated Compatibility projection of the internal mailbox union. */
 export interface LazyMailboxState {
   name: string;
   emailAddress?: string;
@@ -43,11 +44,12 @@ interface ConnectedLazyMailboxState extends LazyMailboxState {
 }
 
 /**
- * Lazy provider state. `mailboxes` is the SINGLE source of truth for which
- * mailboxes exist: every configured mailbox is a member carrying its own
- * `status` ('connected' | 'error'), and a failed mailbox is a member with an
- * error — never an absence patched elsewhere. Init lifecycle is tracked
- * separately via `status` / `initPromise` / `error` / `isDemo`.
+ * Lazy provider projection. `mailboxes` lists every configured mailbox with its
+ * `status` ('connected' | 'error'); failed mailboxes retain their metadata and
+ * error. Init lifecycle is tracked
+ * separately in an internal discriminated union. These mutable fields are a
+ * deprecated compatibility adapter; new code should use the lifecycle helpers.
+ * @deprecated Use lifecycle functions rather than assigning these fields.
  */
 export interface LazyProviderState {
   initPromise: Promise<void> | null;
@@ -58,15 +60,85 @@ export interface LazyProviderState {
   mailboxes: LazyMailboxState[];
 }
 
-/** Create a fresh lazy state. */
-export function createLazyProviderState(): LazyProviderState {
+type MailboxMetadata = Pick<LazyMailboxState, 'name' | 'emailAddress' | 'displayName' | 'providerType'>;
+type MailboxState =
+  | { kind: 'connected'; metadata: MailboxMetadata; provider: EmailProvider; auth: LazyProviderAuth }
+  | { kind: 'failed'; metadata: MailboxMetadata; error: string; retryable: boolean };
+type SettledInitialization =
+  | { kind: 'ready'; mailboxes: MailboxState[]; defaultMailboxId: string }
+  | { kind: 'not_configured' }
+  | { kind: 'failed'; mailboxes: MailboxState[]; error: string; retryAt: number | null };
+type Initialization =
+  | { kind: 'pending' }
+  | { kind: 'connecting'; promise: Promise<void>; generation: number }
+  | SettledInitialization;
+interface InitializationOwner {
+  generation: number;
+  current: Initialization;
+  // Writes to the deprecated interface opt into legacy fixture/embedding behavior.
+  legacy?: LazyProviderState;
+}
+const initializationOwners = new WeakMap<LazyProviderState, InitializationOwner>();
+
+function mailboxId(metadata: MailboxMetadata): string {
+  return `${metadata.providerType}:${metadata.name}`;
+}
+
+function projectInitialization(current: Initialization): LazyProviderState {
+  const mailboxes = current.kind === 'ready' || current.kind === 'failed'
+    ? current.mailboxes.map((mailbox): LazyMailboxState => ({
+      ...mailbox.metadata,
+      provider: mailbox.kind === 'connected' ? mailbox.provider : null,
+      auth: mailbox.kind === 'connected' ? mailbox.auth : null,
+      isDefault: current.kind === 'ready' && mailboxId(mailbox.metadata) === current.defaultMailboxId,
+      status: mailbox.kind === 'connected' ? 'connected' : 'error',
+      ...(mailbox.kind === 'failed' ? { error: mailbox.error } : {}),
+    })) : [];
   return {
-    initPromise: null,
-    error: null,
-    isDemo: false,
-    status: 'pending',
-    mailboxes: [],
+    initPromise: current.kind === 'connecting' ? current.promise : null,
+    error: current.kind === 'failed' ? current.error : null,
+    isDemo: current.kind === 'not_configured' || current.kind === 'failed',
+    status: current.kind === 'ready' ? 'connected' : current.kind === 'failed' ? 'error' : current.kind,
+    mailboxes,
   };
+}
+
+/**
+ * Legacy fields remain a compatibility projection; production transitions only
+ * replace the internal union. Assigning a legacy field invalidates pending work
+ * and opts into the old mutable interface (used by existing embedders/tests).
+ */
+export function createLazyProviderState(): LazyProviderState {
+  const state = {} as LazyProviderState;
+  attachInitializationOwner(state);
+  return state;
+}
+
+function attachInitializationOwner(state: LazyProviderState): InitializationOwner {
+  const owner: InitializationOwner = { generation: 0, current: { kind: 'pending' } };
+  for (const key of ['initPromise', 'error', 'isDemo', 'status', 'mailboxes'] as const) {
+    Object.defineProperty(state, key, {
+      enumerable: true,
+      configurable: true,
+      get: () => (owner.legacy ?? projectInitialization(owner.current))[key],
+      set: (value: LazyProviderState[typeof key]) => {
+        owner.legacy ??= projectInitialization(owner.current);
+        owner.generation++;
+        Object.assign(owner.legacy, { [key]: value });
+      },
+    });
+  }
+  initializationOwners.set(state, owner);
+  return owner;
+}
+
+/** Invalidate in-flight initialization after explicit configuration changes. */
+export function resetProviderState(state: LazyProviderState): void {
+  const owner = initializationOwners.get(state);
+  if (!owner) throw new Error('Reset requires a state from createLazyProviderState');
+  owner.generation++;
+  owner.legacy = undefined;
+  owner.current = { kind: 'pending' };
 }
 
 const require = createRequire(import.meta.url);
@@ -410,6 +482,12 @@ function zodToJsonSchema(schema: z.ZodType, io: 'input' | 'output' = 'input'): R
  * distinguish demo mode from a connected provider at call time.
  */
 export async function waitForInit(state: LazyProviderState): Promise<void> {
+  const owner = initializationOwners.get(state);
+  if (owner && !owner.legacy) {
+    await beginInit(owner);
+    return;
+  }
+  // Deprecated mutable states can inject their own initialization promise.
   if (
     state.status === 'connected' ||
     state.status === 'not_configured' ||
@@ -418,8 +496,10 @@ export async function waitForInit(state: LazyProviderState): Promise<void> {
     return;
   }
   if (!state.initPromise) {
-    state.status = 'connecting';
-    state.initPromise = initProvider(state);
+    // Adopt a legacy pending object before starting real initialization, so
+    // direct legacy callers also use the single transition owner.
+    await beginInit(attachInitializationOwner(state));
+    return;
   }
   try {
     await state.initPromise;
@@ -536,7 +616,44 @@ function resolveMailboxContext(
  * records success or failure on `state`. **Never throws** — fire-and-forget
  * callers rely on this invariant.
  */
-export async function initProvider(state: LazyProviderState): Promise<void> {
+export function initProvider(state: LazyProviderState): Promise<void> {
+  const owner = initializationOwners.get(state);
+  if (owner && !owner.legacy) return beginInit(owner);
+  return waitForInit(state);
+}
+
+/** The only owner of initialization work and publication. No timers or auth loops. */
+function beginInit(owner: InitializationOwner): Promise<void> {
+  const current = owner.current;
+  if (current.kind === 'connecting') return current.promise;
+  if (current.kind !== 'pending' && !(current.kind === 'failed'
+    && current.retryAt !== null && Date.now() >= current.retryAt)) return Promise.resolve();
+  const generation = ++owner.generation;
+  // Defer the loader until the connecting variant (and its promise) is installed.
+  const previousFailures = current.kind === 'failed' ? current.mailboxes : [];
+  const promise = Promise.resolve().then(() => loadProvider(previousFailures)).then(result => {
+    if (owner.generation === generation && !owner.legacy) owner.current = result;
+  });
+  owner.current = { kind: 'connecting', promise, generation };
+  return promise;
+}
+
+/** Only explicit transport/service failures retry; unknown/credential failures require configure. */
+function isTransientInitError(err: unknown, seen = new Set<unknown>()): boolean {
+  if (!err || typeof err !== 'object') return false;
+  if (seen.has(err)) return false;
+  seen.add(err);
+  const value = err as { name?: string; message?: string; code?: string; errorCode?: string; error?: string; status?: number; statusCode?: number; response?: { status?: number }; cause?: unknown };
+  const description = [value.name, value.message, value.code, value.errorCode, value.error].join(' ');
+  if (/AuthenticationRequired|invalid_grant|invalid_client|unauthorized_client|interaction_required|login_required|consent_required|reauth|no cached|no account|no refresh token|missing.*credential/i.test(description)) return false;
+  const status = value.status ?? value.statusCode ?? value.response?.status;
+  if (status === 401 || status === 403) return false;
+  if (status === 408 || status === 429 || (status !== undefined && status >= 500 && status <= 599)) return true;
+  if (/ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|network|timeout|timed out|temporarily_unavailable|server_error|service unavailable/i.test(description)) return true;
+  return value.cause !== undefined && isTransientInitError(value.cause, seen);
+}
+
+async function loadProvider(previousFailures: MailboxState[] = []): Promise<SettledInitialization> {
   try {
     const [
       { listConfiguredMailboxesWithMetadata, DelegatedAuthManager, RealGraphApiClient, GraphEmailProvider },
@@ -547,6 +664,7 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
         GmailEmailProvider,
         GoogleapisGmailClient,
         formatGmailAuthError,
+        isGmailReauthError,
       },
     ] = await Promise.all([
       import('@usejunior/provider-microsoft'),
@@ -556,18 +674,22 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
     const gmailMailboxes = await listConfiguredGmailMailboxes();
 
     if (microsoftMailboxes.length === 0 && gmailMailboxes.length === 0) {
-      state.isDemo = true;
-      state.status = 'not_configured';
-      state.mailboxes = [];
       console.error('[email-agent-mcp] No configured mailboxes — running in demo mode');
       console.error(`[email-agent-mcp] ${NO_MAILBOX_CONFIGURED_MESSAGE}`);
-      return;
+      return { kind: 'not_configured' };
     }
 
-    const connectedMailboxes: LazyMailboxState[] = [];
-    const failedMailboxes: LazyMailboxState[] = [];
+    const connectedMailboxes: MailboxState[] = [];
+    const failedMailboxes: Extract<MailboxState, { kind: 'failed' }>[] = [];
+    const retainTerminalFailure = (providerType: MailboxMetadata['providerType'], name: string): boolean => {
+      const previous = previousFailures.find(mailbox => mailbox.metadata.providerType === providerType && mailbox.metadata.name === name);
+      if (previous?.kind !== 'failed' || previous.retryable) return false;
+      failedMailboxes.push(previous);
+      return true;
+    };
 
     for (const metadata of microsoftMailboxes) {
+      if (retainTerminalFailure('microsoft', metadata.mailboxName)) continue;
       const displayName = metadata.emailAddress ?? metadata.mailboxName;
       try {
         const auth = new DelegatedAuthManager(
@@ -584,28 +706,19 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
         };
 
         connectedMailboxes.push({
-          name: metadata.mailboxName,
-          emailAddress: metadata.emailAddress,
-          displayName,
-          providerType: 'microsoft',
+          kind: 'connected',
+          metadata: { name: metadata.mailboxName, emailAddress: metadata.emailAddress, displayName, providerType: 'microsoft' },
           provider,
           auth: mailboxAuth,
-          isDefault: false,
-          status: 'connected',
         });
 
         console.error(`[email-agent-mcp] Connected to mailbox "${displayName}" (${metadata.clientId})`);
       } catch (err) {
         failedMailboxes.push({
-          name: metadata.mailboxName,
-          emailAddress: metadata.emailAddress,
-          displayName,
-          providerType: 'microsoft',
-          provider: null,
-          auth: null,
-          isDefault: false,
-          status: 'error',
+          kind: 'failed',
+          metadata: { name: metadata.mailboxName, emailAddress: metadata.emailAddress, displayName, providerType: 'microsoft' },
           error: err instanceof Error ? err.message : String(err),
+          retryable: isTransientInitError(err),
         });
         console.error(
           `[email-agent-mcp] Skipping mailbox "${displayName}": ${err instanceof Error ? err.message : err}`,
@@ -614,6 +727,7 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
     }
 
     for (const metadata of gmailMailboxes) {
+      if (retainTerminalFailure('gmail', metadata.mailboxName)) continue;
       const displayName = metadata.emailAddress ?? metadata.mailboxName;
       const mailboxRef = metadata.emailAddress ?? metadata.mailboxName;
       try {
@@ -645,14 +759,10 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
         };
 
         connectedMailboxes.push({
-          name: metadata.mailboxName,
-          emailAddress: metadata.emailAddress,
-          displayName,
-          providerType: 'gmail',
+          kind: 'connected',
+          metadata: { name: metadata.mailboxName, emailAddress: metadata.emailAddress, displayName, providerType: 'gmail' },
           provider,
           auth: mailboxAuth,
-          isDefault: false,
-          status: 'connected',
         });
 
         const sourceLabel =
@@ -662,15 +772,10 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
         console.error(`[email-agent-mcp] Connected to Gmail mailbox "${displayName}" (${sourceLabel})`);
       } catch (err) {
         failedMailboxes.push({
-          name: metadata.mailboxName,
-          emailAddress: metadata.emailAddress,
-          displayName,
-          providerType: 'gmail',
-          provider: null,
-          auth: null,
-          isDefault: false,
-          status: 'error',
+          kind: 'failed',
+          metadata: { name: metadata.mailboxName, emailAddress: metadata.emailAddress, displayName, providerType: 'gmail' },
           error: formatGmailAuthError(err, mailboxRef),
+          retryable: !isGmailReauthError(err) && isTransientInitError(err),
         });
         console.error(
           `[email-agent-mcp] Skipping Gmail mailbox "${displayName}": ${formatGmailAuthError(err, mailboxRef)}`,
@@ -679,29 +784,23 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
     }
 
     if (connectedMailboxes.length > 0) {
-      connectedMailboxes[0]!.isDefault = true;
-      state.mailboxes = [...connectedMailboxes, ...failedMailboxes];
-      state.isDemo = false;
-      state.status = 'connected';
-      return;
+      return { kind: 'ready', mailboxes: [...connectedMailboxes, ...failedMailboxes], defaultMailboxId: mailboxId(connectedMailboxes[0]!.metadata) };
     }
 
     // All configured mailboxes failed to authenticate.
-    state.mailboxes = failedMailboxes;
-    state.isDemo = true;
-    state.status = 'error';
-    state.error = failedMailboxes.length === 1
+    const error = failedMailboxes.length === 1
       ? (failedMailboxes[0]!.error ?? 'Mailbox authentication failed')
-      : `All configured mailboxes failed to authenticate. Use get_mailbox_status with a mailbox name for details. Configured mailboxes: ${failedMailboxes.map(mailbox => mailbox.displayName).join(', ')}`;
+      : `All configured mailboxes failed to authenticate. Use get_mailbox_status with a mailbox name for details. Configured mailboxes: ${failedMailboxes.map(mailbox => mailbox.metadata.displayName).join(', ')}`;
     console.error(
       '[email-agent-mcp] WARNING: All configured mailboxes failed to authenticate — running in demo mode. Run: email-agent-mcp configure',
     );
+    return { kind: 'failed', mailboxes: failedMailboxes, error,
+      retryAt: failedMailboxes.some(mailbox => mailbox.retryable) ? Date.now() + 30_000 : null };
   } catch (err) {
-    state.isDemo = true;
-    state.status = 'error';
-    state.error = `Could not load provider: ${err instanceof Error ? err.message : String(err)}`;
-    console.error(`[email-agent-mcp] Could not connect to real provider: ${state.error}`);
+    const error = `Could not load provider: ${err instanceof Error ? err.message : String(err)}`;
+    console.error(`[email-agent-mcp] Could not connect to real provider: ${error}`);
     console.error('[email-agent-mcp] Running in demo mode');
+    return { kind: 'failed', mailboxes: previousFailures, error, retryAt: isTransientInitError(err) ? Date.now() + 30_000 : null };
   }
 }
 
@@ -985,6 +1084,8 @@ export async function buildLazyActions(
       run: async (_ctx, input) => {
         const inp = (input ?? {}) as { mailbox?: string };
         const warnings: string[] = [];
+        const owner = initializationOwners.get(state);
+        if (owner && !owner.legacy && owner.current.kind === 'failed') void beginInit(owner);
         switch (state.status) {
           case 'pending':
           case 'connecting':

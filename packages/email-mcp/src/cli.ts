@@ -610,7 +610,7 @@ function printJsonResult(value: unknown): void {
  *   3 — tool returned a typed failure ({ success: false, error: ... }) or threw
  */
 export async function runCall(opts: CliOptions): Promise<number> {
-  const { createLazyProviderState, buildLazyActions, ensureProvider, executeTool, getActionInputJsonSchema } =
+  const { createLazyProviderState, buildLazyActions, ensureProvider, waitForInit, executeTool, getActionInputJsonSchema } =
     await import('./server.js');
   const { loadSendAllowlist, getSendAllowlistPath, getDeletePolicyFromEnv } = await import('@usejunior/email-core');
 
@@ -692,17 +692,17 @@ export async function runCall(opts: CliOptions): Promise<number> {
   // gating them behind ensureProvider would make them exit 3 in exactly the
   // misconfigured case they exist to explain.
   const DIAGNOSTIC_TOOLS = new Set(['get_mailbox_status', 'list_mailboxes']);
-  if (!DIAGNOSTIC_TOOLS.has(opts.callTool)) {
+  if (DIAGNOSTIC_TOOLS.has(opts.callTool)) {
+    // A one-shot process has no background startup. Settle initialization so
+    // status reports the actual configuration/failures, without a readiness gate.
+    await waitForInit(state);
+  } else {
     // Eagerly initialize the provider — no demo-mode fallback for one-shot CLI.
     // ensureProvider() awaits init internally, so no separate waitForInit() needed.
     try {
       await ensureProvider(state);
     } catch (err) {
       console.error(`Error: provider initialization failed — ${err instanceof Error ? err.message : String(err)}`);
-      return 3;
-    }
-    if (state.status === 'error') {
-      console.error(`Error: provider error — ${state.error ?? 'unknown'}`);
       return 3;
     }
   }
