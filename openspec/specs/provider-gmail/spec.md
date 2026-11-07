@@ -29,8 +29,13 @@ The system SHALL authenticate to Gmail via OAuth2 using `@googleapis/gmail` (NOT
 
 #### Scenario: Atomic one-shot ticket claim
 - **WHEN** two `POST /api/tickets/claim` calls present a valid `session_id` + `pickup_secret` pair concurrently
-- **THEN** at most one returns the tokens; the other returns 410 (`consumed` or `not_found`)
-- **AND** on KV-backed deployments this atomicity is implemented with a single Redis `GETDEL` command after constant-time secret verification
+- **THEN** at most one returns the tokens; the other returns 410 `consumed` or 404 `not_found`, without adding consumed tombstones
+- **AND** on KV-backed deployments a single Redis Lua operation validates the current session and compares all 64 bytes of the pickup hash without early exit before consuming that same record; malformed persisted state never releases tokens
+
+#### Scenario: First terminal callback wins without extending expiry
+- **WHEN** success, denial, or exchange-failure callbacks compete for a pending broker session
+- **THEN** exactly one can advance it to a terminal state and later callbacks cannot overwrite the winner
+- **AND** the transition preserves the original session expiry on both memory and KV backends
 
 #### Scenario: Distinguishable terminal states
 - **WHEN** the CLI polls `/api/tickets/claim` while the user has not yet completed consent
