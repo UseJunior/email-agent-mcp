@@ -86,7 +86,7 @@ The watcher SHALL persist the polling checkpoint per mailbox in `~/.email-agent-
 
 ### Requirement: Per-Mailbox Lock File
 
-The watcher SHALL create a lock file per mailbox at `~/.email-agent-mcp/state/{mailbox-id}.watcher.lock` to prevent duplicate watcher instances for the same mailbox.
+The watcher SHALL acquire an exclusive per-mailbox lease at `~/.email-agent-mcp/state/{mailbox-id}.watcher.lock.lease` using atomic directory creation, a 60-second stale threshold and 10-second heartbeat. It SHALL retain the acquired release handle rather than unlinking paths by PID. Compromise SHALL invalidate the lease and prevent further mailbox side effects. Existing live, malformed or permission-indeterminate legacy `.watcher.lock` records SHALL block acquisition; legacy watchers MUST stop before upgrade because mixed-version exclusion is not guaranteed.
 
 #### Scenario: Lock prevents duplicate watcher
 - **WHEN** a watcher is already running for `test-user@example.com`

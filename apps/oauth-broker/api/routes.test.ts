@@ -9,7 +9,7 @@ import startHandler from './start.js';
 import callbackHandler from './callback.js';
 import claimHandler from './tickets/claim.js';
 import refreshHandler from './refresh.js';
-import { _resetStoreForTests } from '../lib/store.js';
+import { _resetStoreForTests, getStore } from '../lib/store.js';
 import { _resetConfigForTests } from '../lib/config.js';
 
 const ENV = {
@@ -167,6 +167,45 @@ describe('provider-gmail/OAuth2 Authentication (broker routes)', () => {
 });
 
 describe('broker/routes failure modes', () => {
+  it.each<Record<string, string>>([
+    { error: 'access_denied' },
+    {},
+    { code: 'late-success' },
+    { code: 'late-failure' },
+  ])('a losing callback returns 410 and preserves the terminal winner: %j', async query => {
+    const state = urlSafeRandom();
+    const store = getStore();
+    await store.create(state, { state: 'pending', pickupHash: createHash('sha256').update('synthetic').digest('hex'), createdAt: Date.now() });
+    await store.setReady(state, { access_token: 'winner', expires_in: 60 });
+    stubFetchOnce(async () => query.code === 'late-failure'
+      ? new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 })
+      : new Response(JSON.stringify({ access_token: 'loser', expires_in: 60 }), { status: 200 }));
+    const { res, captured } = makeRes();
+    await callbackHandler(makeReq({ method: 'GET', query: { ...query, state } }) as never, res as never);
+    expect(captured.statusCode).toBe(410);
+    expect(await store.claim(state, 'synthetic')).toEqual({ ok: true, tokens: { access_token: 'winner', expires_in: 60 } });
+  });
+
+  it.each([true, false])('denial wins while code exchange is suspended (exchange succeeds: %s)', async succeeds => {
+    const state = urlSafeRandom();
+    const store = getStore();
+    await store.create(state, { state: 'pending', pickupHash: createHash('sha256').update('synthetic').digest('hex'), createdAt: Date.now() });
+    let finish!: (response: Response) => void;
+    const exchange = new Promise<Response>(resolve => { finish = resolve; });
+    stubFetchOnce(() => exchange);
+    const slow = makeRes();
+    const running = callbackHandler(makeReq({ method: 'GET', query: { state, code: 'synthetic' } }) as never, slow.res as never);
+    const denial = makeRes();
+    await callbackHandler(makeReq({ method: 'GET', query: { state, error: 'access_denied' } }) as never, denial.res as never);
+    expect(denial.captured.statusCode).toBe(400);
+    finish(succeeds
+      ? new Response(JSON.stringify({ access_token: 'loser', expires_in: 60 }), { status: 200 })
+      : new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 }));
+    await running;
+    expect(slow.captured.statusCode).toBe(410);
+    expect(await store.claim(state, 'synthetic')).toEqual({ ok: false, reason: 'denied', errorMessage: 'User cancelled or denied: access_denied' });
+  });
+
   it('claim before callback returns 202 pending', async () => {
     const sessionId = urlSafeRandom();
     const pickupSecret = urlSafeRandom();

@@ -57,6 +57,10 @@ The BYOK path runs the full local-loopback OAuth dance (`http://127.0.0.1`); no 
 
 The CLI saves mailbox metadata under `~/.email-agent-mcp/tokens/` and auto-adds the authenticated address to `send-allowlist.json`. Saved metadata is **never** rewritten with a different OAuth client on subsequent runs — re-running `configure` for an existing mailbox reuses whatever was saved (broker URL or BYOK credentials).
 
+Authentication lifecycle hardening ([#240](https://github.com/UseJunior/email-agent-mcp/issues/240), approved `harden-email-state-machines` proposal, group 4): explicit and library automatic refresh share one acquisition. Disconnect immediately invalidates pending completions. `getAccessToken()` remains synchronous and returns `undefined` for expired or unavailable access; `getValidAccessToken()` is the async accessor used by profile lookup. `getOAuth2Client()` remains available; acquire it after connecting, since connect/disconnect retire the prior client. Public tool schemas and `AuthManager` signatures are unchanged.
+
+`GmailAuthConfig.metadataWriter` optionally persists refresh-token rotations. Server startup and CLI health checks supply `createGmailMetadataWriter(metadata)`, which preserves the existing metadata route, serializes in-process writes, rejects stale rotations, and uses a private temporary file plus atomic rename. This is not cross-process compare-and-swap. Storage failure retains the runtime token and reports a health warning and stderr message; it does not fail an otherwise successful refresh or request a delivery replay. Broker refresh tokens stay off OAuth-client credentials.
+
 ## Disconnect and revoke
 
 Stop the MCP process, then use Finder to move only the intended mailbox's JSON

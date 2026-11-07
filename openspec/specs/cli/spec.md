@@ -62,6 +62,7 @@ The system SHALL provide a `configure` subcommand (aliased as `setup`) with an i
 #### Scenario: Direct Gmail configure (BYOK)
 - **WHEN** `email-agent-mcp configure --provider gmail` is run with both `--client-id` and `--client-secret` (or both `AGENT_EMAIL_GMAIL_CLIENT_ID` and `AGENT_EMAIL_GMAIL_CLIENT_SECRET`)
 - **THEN** the system runs a local-loopback OAuth flow against Google directly using those credentials
+- **AND** the listener validates the expected state before returning an authorization code, settles once, and closes timers, listener and open connections on callback, error, timeout or cancellation
 - **AND** persists mailbox metadata with `source: 'byok'` containing the supplied client_id and client_secret
 
 #### Scenario: Partial BYOK credentials are rejected
