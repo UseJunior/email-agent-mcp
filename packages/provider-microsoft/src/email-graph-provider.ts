@@ -474,11 +474,63 @@ function graphDeliveryError(
   };
 }
 
+type FolderSnapshot = { folders: EmailFolder[]; truncated: boolean };
+
+type FolderCacheState<T> =
+  | { kind: 'empty' }
+  | { kind: 'loading'; generation: number; promise: Promise<T> }
+  | { kind: 'ready'; expiresAt: number; data: T };
+
+/** Process-local single-flight cache; invalidated completions must retry. */
+class FolderCache<T> {
+  private generation = 0;
+  private state: FolderCacheState<T> = { kind: 'empty' };
+
+  invalidate(): void {
+    this.generation += 1;
+    this.state = { kind: 'empty' };
+  }
+
+  async get(load: () => Promise<T>, complete: (data: T) => boolean): Promise<T> {
+    for (;;) {
+      if (this.state.kind === 'ready' && this.state.expiresAt > Date.now()) {
+        return this.state.data;
+      }
+      if (this.state.kind !== 'loading') {
+        // Defer the loader until the shared state is installed, including when
+        // a loader throws synchronously before making its first request.
+        this.state = {
+          kind: 'loading', generation: this.generation,
+          promise: Promise.resolve().then(load),
+        };
+      }
+      const loading = this.state;
+      let data: T;
+      try {
+        data = await loading.promise;
+      } catch (err) {
+        if (this.state === loading) this.state = { kind: 'empty' };
+        if (loading.generation !== this.generation) continue;
+        throw err;
+      }
+      // A structural mutation can finish while Graph is still traversing.
+      // Neither publish nor return that generation as the current snapshot.
+      if (loading.generation !== this.generation) continue;
+      if (this.state === loading) {
+        this.state = complete(data)
+          ? { kind: 'ready', expiresAt: Date.now() + FOLDER_CACHE_TTL_MS, data }
+          : { kind: 'empty' };
+      }
+      return data;
+    }
+  }
+}
+
 export class GraphEmailProvider implements EmailReader, EmailSender, EmailScheduledSender, EmailCategorizer, EmailAttachmentHandler, EmailFolderManager, EmailRuleManager {
   private client: GraphApiClient;
   private basePath: string;
-  private folderCache?: { expiresAt: number; folders: EmailFolder[] };
-  private systemFolderIdsCache?: { expiresAt: number; idsByName: Map<string, string> };
+  private folderCache = new FolderCache<FolderSnapshot>();
+  private systemFolderIdsCache = new FolderCache<Map<string, string>>();
 
   constructor(client: GraphApiClient, userId = 'me') {
     this.client = client;
@@ -1593,25 +1645,18 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       : [];
   }
 
-  private async getFolderSnapshot(): Promise<{ folders: EmailFolder[]; truncated: boolean }> {
-    const now = Date.now();
-    if (this.folderCache && this.folderCache.expiresAt > now) {
-      return { folders: this.folderCache.folders, truncated: false };
-    }
-
-    const budget = { remaining: MAX_FOLDER_REQUESTS_PER_SNAPSHOT, truncated: false };
-    const folders = await this.fetchFolderCollection(
-      `${this.basePath}/mailFolders?${FOLDER_SELECT}&$top=100&includeHiddenFolders=true`,
-      '',
-      new Set<string>(),
-      budget,
-    );
-    // Never cache a partial tree — a truncated snapshot would otherwise make
-    // "folder not found" sticky for 60s on a folder that does exist.
-    if (!budget.truncated) {
-      this.folderCache = { expiresAt: now + FOLDER_CACHE_TTL_MS, folders };
-    }
-    return { folders, truncated: budget.truncated };
+  private async getFolderSnapshot(): Promise<FolderSnapshot> {
+    return this.folderCache.get(async () => {
+      const budget = { remaining: MAX_FOLDER_REQUESTS_PER_SNAPSHOT, truncated: false };
+      const folders = await this.fetchFolderCollection(
+        `${this.basePath}/mailFolders?${FOLDER_SELECT}&$top=100&includeHiddenFolders=true`,
+        '',
+        new Set<string>(),
+        budget,
+      );
+      // A partial tree cannot establish absence or uniqueness.
+      return { folders, truncated: budget.truncated };
+    }, snapshot => !snapshot.truncated);
   }
 
   private async fetchFolderCollection(
@@ -1812,11 +1857,10 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
 
   /** Well-known-name -> resolved id for every provisioned system folder. */
   private async getSystemFolderIdMap(): Promise<Map<string, string>> {
-    const now = Date.now();
-    if (this.systemFolderIdsCache && this.systemFolderIdsCache.expiresAt > now) {
-      return this.systemFolderIdsCache.idsByName;
-    }
+    return this.systemFolderIdsCache.get(() => this.fetchSystemFolderIdMap(), () => true);
+  }
 
+  private async fetchSystemFolderIdMap(): Promise<Map<string, string>> {
     const idsByName = new Map<string, string>();
     for (const name of SYSTEM_FOLDER_NAMES) {
       try {
@@ -1831,7 +1875,6 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       }
     }
 
-    this.systemFolderIdsCache = { expiresAt: now + FOLDER_CACHE_TTL_MS, idsByName };
     return idsByName;
   }
 
@@ -1856,8 +1899,8 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
   }
 
   private invalidateFolderCaches(): void {
-    this.folderCache = undefined;
-    this.systemFolderIdsCache = undefined;
+    this.folderCache.invalidate();
+    this.systemFolderIdsCache.invalidate();
   }
 }
 

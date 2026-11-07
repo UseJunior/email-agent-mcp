@@ -211,3 +211,39 @@ The system SHALL document required egress domains for NemoClaw sandbox policy: `
 #### Scenario: NemoClaw egress config
 - **WHEN** running in NemoClaw
 - **THEN** `configure --nemoclaw` adds these domains to the egress policy
+
+### Requirement: Versioned Folder Caches
+
+The provider SHALL share concurrent folder-tree and system-folder ID loads, invalidate both caches on structural mutation, reject superseded results as current, and cache only complete successful loads. This implements issue #108 and approved `harden-email-state-machines` group 14. Public provider signatures and MCP wire fields remain unchanged.
+
+#### Scenario: Concurrent folder reads share one complete traversal
+- **WHEN** folder reads overlap a cold recursive traversal
+- **THEN** they share its requests and complete result
+
+#### Scenario: Concurrent system folder reads share one ID sweep
+- **WHEN** system-folder resolutions overlap a cold load
+- **THEN** they share one complete ID sweep
+
+#### Scenario: Folder mutation supersedes an in-flight traversal
+- **WHEN** a mutation invalidates a pending traversal
+- **THEN** its callers retry against the current generation and its result cannot replace newer data
+
+#### Scenario: Folder mutation supersedes an in-flight system ID sweep
+- **WHEN** a mutation invalidates a pending system-folder load
+- **THEN** its callers use the current generation and its result cannot replace newer IDs
+
+#### Scenario: Failed folder loads clear shared state and retry
+- **WHEN** a shared folder traversal fails
+- **THEN** callers receive the failure and a subsequent read retries
+
+#### Scenario: Failed system ID loads clear shared state and retry
+- **WHEN** a shared system-folder load fails
+- **THEN** callers receive the failure and a subsequent resolution retries
+
+#### Scenario: Partial folder loads are shared but never cached
+- **WHEN** a traversal reaches its request budget
+- **THEN** overlapping readers may share the partial result but a subsequent read traverses again
+
+#### Scenario: Folder cache expiry is measured from completed load
+- **WHEN** a complete traversal finishes
+- **THEN** its 60 second cache lifetime begins at completion and expired reads share a new load
