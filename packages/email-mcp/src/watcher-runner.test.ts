@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, writeFile, mkdir, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { setTimeout as realDelay } from 'node:timers/promises';
 import { GraphEmailProvider, type GraphApiClient } from '@usejunior/provider-microsoft';
 import type { EmailMessage } from '@usejunior/email-core';
 import { MailboxRunner, WatchShutdown, type MailboxRunnerOptions, type MailboxRunState, type WatchSource } from './watcher-runner.js';
@@ -20,9 +21,10 @@ function barrier<T>() {
   return { promise, resolve, reject };
 }
 async function until(predicate: () => boolean) {
-  for (let i = 0; i < 500; i++) {
+  const deadline = performance.now() + 3000;
+  while (performance.now() < deadline) {
     if (predicate()) return;
-    await new Promise<void>(resolve => setImmediate(resolve));
+    await realDelay(5);
   }
   throw new Error('Runner did not reach expected barrier');
 }
