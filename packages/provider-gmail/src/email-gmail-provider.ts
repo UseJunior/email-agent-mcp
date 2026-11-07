@@ -8,6 +8,7 @@ import type {
   ComposeMessage,
   SendResult,
   DraftResult,
+  DraftSnapshot,
   ListOptions,
   ReplyOptions,
   DownloadedAttachment,
@@ -101,6 +102,7 @@ interface GmailMessagePart {
 
 export interface GmailMessage {
   id: string;
+  historyId?: string;
   threadId: string;
   labelIds?: string[];
   payload?: {
@@ -151,6 +153,19 @@ export class GmailEmailProvider {
     return mapGmailMessage(draft.message);
   }
 
+  async getDraftSnapshot(id: string): Promise<DraftSnapshot> {
+    const resource = await this.findDraft(id);
+    if (!resource) throw new ProviderError('NOT_A_DRAFT', `Gmail message ${id} is not a draft`, 'gmail', false);
+    return {
+      draftId: resource.id,
+      messageId: resource.message.id,
+      message: mapGmailMessage(resource.message),
+      revision: resource.message.historyId,
+      lifecycle: resource.message.labelIds?.includes('DRAFT') ? 'editable' : 'indeterminate',
+      origin: this.draftOrigin(resource.message),
+    };
+  }
+
   /**
    * Fetch a draft by its draft id (`r…`) or by the id of its message, which
    * is what `list_emails(folder: "drafts")`, `read_email`, and `get_thread`
@@ -179,7 +194,16 @@ export class GmailEmailProvider {
     do {
       const page = await this.client.listDrafts!({ maxResults: 500, pageToken });
       const match = page.drafts.find(draft => draft.messageId === message.id);
-      if (match) return { id: match.id, message };
+      // Re-read the actual draft resource: list/message observations can be
+      // stale, and drafts.update changes the backing message identity.
+      if (match) {
+        try {
+          return await this.client.getDraft(match.id);
+        } catch (err) {
+          if (isMissingOrInvalidIdError(err)) throw new MessageNotFoundError(`Gmail draft ${match.id} not found`);
+          throw err;
+        }
+      }
       pageToken = page.nextPageToken;
     } while (pageToken);
 
@@ -411,6 +435,7 @@ export class GmailEmailProvider {
       };
     }
 
+    let survivingDraftId: string | undefined;
     try {
       // Gmail's drafts.update is a full replacement, not a PATCH. Fetch the
       // current draft, merge the partial over it, and re-upload. Preserve
@@ -424,6 +449,10 @@ export class GmailEmailProvider {
         };
       }
       const current = mapGmailMessage(draftResource.message);
+      survivingDraftId = draftResource.id;
+      if (current.isDraft !== true) {
+        return { success: false, draftId: survivingDraftId, error: { code: 'NOT_A_DRAFT', message: 'Message is no longer a draft', recoverable: false } };
+      }
       const draftOrigin = getRecognizedDraftOrigin(
         getHeader(draftResource.message, DRAFT_ORIGIN_HEADER),
       );
@@ -443,6 +472,7 @@ export class GmailEmailProvider {
         if (current.attachments.some(att => att.isInline)) {
           return {
             success: false,
+            draftId: survivingDraftId,
             error: {
               code: 'INLINE_ATTACHMENTS_UNSUPPORTED',
               message: 'This draft has inline (CID) attachments that cannot be preserved automatically. Pass an explicit `attachments` array to update it.',
@@ -473,7 +503,7 @@ export class GmailEmailProvider {
       };
 
       const sizeError = attachmentSizeError(attachments);
-      if (sizeError) return { success: false, draftId, error: sizeError };
+      if (sizeError) return { success: false, draftId: survivingDraftId, error: sizeError };
 
       const raw = buildRawMessage(merged, {
         inReplyTo: current.inReplyTo,
@@ -486,6 +516,7 @@ export class GmailEmailProvider {
     } catch (err) {
       return {
         success: false,
+        draftId: survivingDraftId,
         error: {
           code: 'UPDATE_DRAFT_FAILED',
           message: err instanceof Error ? err.message : String(err),
@@ -498,15 +529,18 @@ export class GmailEmailProvider {
   async getDraftReplyStatus(draftId: string): Promise<DraftReplyStatus> {
     const draftResource = await this.findDraft(draftId);
     if (!draftResource) return 'indeterminate';
-    const draft = mapGmailMessage(draftResource.message);
-    if (draft.isDraft !== true) return 'indeterminate';
+    if (!draftResource.message.labelIds?.includes('DRAFT')) return 'indeterminate';
+    return this.draftOrigin(draftResource.message);
+  }
 
+  private draftOrigin(message: GmailMessage): DraftReplyStatus {
+    const draft = mapGmailMessage(message);
     // Duplicate stamps are ambiguous: a draft carrying two conflicting origin
     // headers gives no basis to pick one, and taking the first match would make
     // the answer depend on header ordering. Only a single, unanimous stamp is
     // authoritative; anything else falls through to indeterminate, which
     // refuses the edit.
-    const originStamps = getHeaders(draftResource.message, DRAFT_ORIGIN_HEADER);
+    const originStamps = getHeaders(message, DRAFT_ORIGIN_HEADER);
     if (originStamps.length > 0) {
       const recognized = originStamps.map(getRecognizedDraftOrigin);
       const unanimous = recognized.every(value => value !== undefined && value === recognized[0]);

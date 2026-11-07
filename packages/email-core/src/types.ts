@@ -113,6 +113,18 @@ export interface ScheduledSend {
   scheduledSendAt: string;
 }
 
+/** Internal provider observation, never projected into tool wire schemas. */
+export interface DraftSnapshot {
+  draftId: string;
+  messageId: string;
+  message: EmailMessage;
+  revision?: string;
+  lifecycle: 'editable' | 'deferred' | 'indeterminate';
+  origin: 'reply' | 'non_reply' | 'indeterminate';
+  /** Raw scheduling observation for scheduling transition ownership (group 9). */
+  scheduledSendAt?: string;
+}
+
 export interface DraftResult {
   success: boolean;
   draftId?: string;

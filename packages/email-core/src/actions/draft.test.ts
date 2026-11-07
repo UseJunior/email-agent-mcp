@@ -524,6 +524,7 @@ describe('email-write/Send Draft', () => {
     // be gated too — otherwise a blocked bcc recipient slips past the allowlist.
     provider.addMessage({
       id: 'draft-with-bcc',
+      isDraft: true,
       subject: 'Bcc bypass attempt',
       from: { email: 'me@company.com' },
       to: [{ email: 'alice@allowed.com' }],
