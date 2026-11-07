@@ -5,6 +5,7 @@
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { AllowlistConfig } from '../actions/registry.js';
+import { asAllowlistPolicy, loadAllowlistPolicy, type AllowlistInput } from './allowlist-policy.js';
 
 function getAgentEmailHome(): string {
   return process.env['EMAIL_AGENT_MCP_HOME']
@@ -17,8 +18,11 @@ function getAgentEmailHome(): string {
  */
 export function isAllowedSender(
   email: string,
-  allowlist: AllowlistConfig | undefined,
+  input: AllowlistInput,
 ): boolean {
+  const policy = asAllowlistPolicy(input);
+  if (policy.status === 'invalid') return false;
+  const allowlist = policy.status === 'valid' ? policy.config : undefined;
   // Default: accept all
   if (!allowlist || allowlist.entries.length === 0) {
     return true;
@@ -44,18 +48,11 @@ export function isAllowedSender(
 
 /**
  * Load receive allowlist from a JSON file path.
+ * @deprecated Use loadAllowlistPolicy to distinguish absence from invalid policy.
  */
 export async function loadReceiveAllowlist(filePath?: string): Promise<AllowlistConfig | undefined> {
-  if (!filePath) return undefined;
-
-  try {
-    const { readFile } = await import('node:fs/promises');
-    const content = await readFile(filePath, 'utf-8');
-    const data = JSON.parse(content) as { entries?: string[] };
-    return { entries: data.entries ?? [] };
-  } catch {
-    return undefined;
-  }
+  const policy = await loadAllowlistPolicy(filePath);
+  return policy.status === 'valid' ? policy.config : undefined;
 }
 
 /**

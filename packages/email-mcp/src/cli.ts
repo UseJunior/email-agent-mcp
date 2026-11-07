@@ -610,13 +610,13 @@ function printJsonResult(value: unknown): void {
 export async function runCall(opts: CliOptions): Promise<number> {
   const { createLazyProviderState, buildLazyActions, ensureProvider, executeTool, getActionInputJsonSchema } =
     await import('./server.js');
-  const { loadSendAllowlist, getSendAllowlistPath, getDeletePolicyFromEnv } = await import('@usejunior/email-core');
+  const { loadAllowlistPolicy, getSendAllowlistPath, getDeletePolicyFromEnv } = await import('@usejunior/email-core');
 
   // Match `serve`'s allowlist setup, but DON'T spawn a watcher in a one-shot
   // process — load once and snapshot. (`serve` uses `WatchedAllowlist` for
   // hot-reload; `call` exits before any reload could fire.)
   const sendAllowlistPath = getSendAllowlistPath();
-  const snapshot = await loadSendAllowlist(sendAllowlistPath);
+  const snapshot = await loadAllowlistPolicy(sendAllowlistPath);
   const getSendAllowlist = () => snapshot;
 
   // Resolve delete policy from env once. getDeletePolicyFromEnv emits its own
@@ -762,7 +762,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
   } = await import('@usejunior/provider-microsoft');
   const {
     isAllowedSender,
-    loadReceiveAllowlist,
+    loadAllowlistPolicy,
     getReceiveAllowlistPath,
     WatchedAllowlist,
   } = await import('@usejunior/email-core');
@@ -780,9 +780,11 @@ export async function runWatch(opts: CliOptions): Promise<number> {
 
   // Load receive allowlist with hot-reload
   const allowlistPath = getReceiveAllowlistPath();
-  const receiveWatcher = new WatchedAllowlist(allowlistPath, loadReceiveAllowlist);
+  const receiveWatcher = new WatchedAllowlist(allowlistPath, loadAllowlistPolicy);
   await receiveWatcher.start();
-  if (!receiveWatcher.config) {
+  if (receiveWatcher.policy.status === 'invalid') {
+    console.error('[email-agent-mcp] WARNING: Invalid receive allowlist — blocking all senders until a valid policy is loaded');
+  } else if (receiveWatcher.policy.status === 'absent') {
     console.error('[email-agent-mcp] WARNING: No receive allowlist configured — accepting all senders');
   }
 
@@ -793,6 +795,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
   const allMailboxes = await listConfiguredMailboxesWithMetadata();
   if (allMailboxes.length === 0) {
     console.error('[email-agent-mcp] No configured mailboxes found. Run: email-agent-mcp configure');
+    receiveWatcher.close();
     return 1;
   }
 
@@ -876,6 +879,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
 
   if (watchStates.length === 0) {
     console.error('[email-agent-mcp] No mailboxes could be set up for watching.');
+    receiveWatcher.close();
     await releaseAllLocks();
     return 1;
   }
@@ -919,7 +923,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
 
           // Receive allowlist check
           const senderEmail = msg.from?.email ?? '';
-          if (!isAllowedSender(senderEmail, receiveWatcher.config)) {
+          if (!isAllowedSender(senderEmail, receiveWatcher.policy)) {
             skippedAllowlist++;
             markProcessed(msg.id);
             console.error(`[email-agent-mcp] Skipping email from ${senderEmail} (not on receive allowlist)`);
