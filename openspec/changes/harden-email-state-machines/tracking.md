@@ -33,7 +33,7 @@ The owner approved proposal #256 before implementation. All PRs below remain unm
 | --- | --- | --- |
 | 1 | #260 | Implemented; Redis contract/CI coverage verified; final review |
 | 2 | #257 | Implemented; mailbox-specific lease and release-review fixes |
-| 3 | #263 | Implemented; raw Graph validation review fix underway |
+| 3 | #263 | Implemented; raw Graph validation review fix aa3f4a7, final review |
 | 4 | #261 | Implemented; rotation persistence review fix and CI passed |
 | 5 | #264 | Implemented; lifecycle review passed |
 | 6 | #265 | Implemented; lifecycle review and stacked CI passed |
@@ -43,11 +43,13 @@ The owner approved proposal #256 before implementation. All PRs below remain unm
 | 10 | #271 | Implemented; alias and terminal lease tests; final review |
 | 11 | #269 | Implemented; retry semantics tests and stacked CI passed |
 | 12 | #267 | Implemented; deterministic allowlist tests and CI passed |
-| 13 | pending | Reservation implementation underway |
+| 13 | #274 | Implemented; 778 core tests, final review |
 | 14 | #258 | Implemented; redundant invalidation review fix verified |
 | 15 | #262 | Implemented; Codex and Gemini dynamic reviews passed |
 | 16 | #259 | Implemented; Codex and Gemini dynamic reviews passed |
 
 Verification follow-up #272 / PR #273 replaces a preexisting stale hard-coded runtime tool count with exact registry identities. Both packed executable names passed the corrected smoke. No tool surface was added.
+
+Review follow-up #275 / PR #276 isolates shared delegated-auth waiter cancellation. Fourteen new overlap/cancellation cases and 542 affected tests passed before final integration; independent re-review remains gated.
 
 Integration is isolated on `integration/sm-state-hardening`, with auth dependency join `integration/sm-auth-foundation`. Required reconciliation includes watcher runner + typed fail-closed allowlist policy and independent cancellation for callers joining shared authentication flights. Main and existing user files are untouched. No auto-merge, deployment, archive, or issue closure is armed.
