@@ -673,9 +673,9 @@ export async function runWatch(opts: CliOptions): Promise<number> {
   try {
     await receiveWatcher.start();
     if (shutdown.stopping) return 0;
-    if (receiveWatcher.policy.kind === 'invalid') {
+    if (receiveWatcher.policy.status === 'invalid') {
       console.error('[email-agent-mcp] WARNING: Invalid receive allowlist — blocking senders until repaired');
-    } else if (receiveWatcher.policy.kind === 'absent') {
+    } else if (receiveWatcher.policy.status === 'absent') {
       console.error('[email-agent-mcp] WARNING: No receive allowlist configured — accepting all senders');
     }
     const allMailboxes = await listConfiguredMailboxesWithMetadata();
