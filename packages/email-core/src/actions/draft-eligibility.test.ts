@@ -44,9 +44,16 @@ describe('email-write/Draft observation eligibility', () => {
     const { provider, draftId, ctx } = await setup();
     const future = new Date(Date.now() + 3600000).toISOString();
     await provider.scheduleDraft(draftId, future);
+    const send = vi.spyOn(provider, 'sendDraft');
+    const update = vi.spyOn(provider, 'updateDraft');
+    const schedule = vi.spyOn(provider, 'scheduleDraft');
     expect(await provider.getDraftSnapshot(draftId)).toMatchObject({ lifecycle: 'deferred', scheduledSendAt: future, origin: 'non_reply' });
     expect((await updateDraftAction.run(ctx, { draft_id: draftId, cc: [] })).error?.code).toBe('DRAFT_DEFERRED');
     expect((await sendDraftAction.run(ctx, { draft_id: draftId })).error?.code).toBe('DRAFT_DEFERRED');
+    expect((await sendDraftAction.run(ctx, { draft_id: draftId, scheduled_send_at: future })).error?.code).toBe('DRAFT_DEFERRED');
+    expect(send).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(schedule).not.toHaveBeenCalled();
   });
 
   it('an observed draft is not locked and a later mutation failure retains its id', async () => {

@@ -46,14 +46,20 @@ Graph cancellation first fetches the candidate with:
 - `isDraft`;
 - the deferred-send extended property filtered to `SystemTime 0x3FEF`.
 
-It deletes only when the item is still a draft and the property is present. A missing property returns `NOT_SCHEDULED`; a delivered/missing item returns a structured failure. This tool therefore cannot bypass the separate `delete_email` policy to delete arbitrary messages.
+It deletes only when the item is still a draft and the property contains a valid future timestamp. A missing, past, or invalid property returns `NOT_SCHEDULED`; a delivered/missing item returns a structured failure. This tool therefore cannot bypass the separate `delete_email` policy to delete arbitrary messages. Verification and deletion are not remotely atomic, and successful deletion does not recall already delivered mail.
 
-## Decision: listing is Drafts-scoped and bounded
+## Decision: listing is mailbox-wide and bounded
 
-Microsoft pages through Drafts in batches of 100 with an `$expand` filtered to the deferred property, then filters client-side to rows that actually contain the property. A 100-page/loop guard fails explicitly instead of silently returning an incomplete result. This avoids an unsupported assumption about server-side filtering by legacy proptag while keeping the request bounded.
+Microsoft pages through mailbox-wide messages narrowed to `isDraft eq true`, with an `$expand` filtered to the deferred property, then filters client-side to valid future deferred timestamps. A 100-page/loop guard fails explicitly instead of silently returning an incomplete result. This avoids an unsupported assumption about server-side filtering by legacy proptag while keeping the request bounded.
 
-Returned rows include `messageId`, `subject`, recipient strings, and the normalized `scheduledSendAt`. Only pending held items in Drafts are represented.
+Returned rows include `messageId`, `subject`, recipient strings, and the normalized `scheduledSendAt`. Folder membership alone is not proof of pending delivery; Outlook can retain deferred drafts outside Drafts.
 
 ## Failure semantics
 
-Scheduling is a two-write operation. If draft creation succeeds but Graph explicitly rejects `/send` with a 4xx response, the provider returns a non-recoverable `SCHEDULE_SEND_FAILED` with the created `messageId`. If the response is lost or Graph returns a server-side failure, submission status is ambiguous: the provider returns non-recoverable `SCHEDULE_SEND_STATUS_UNKNOWN`, warns that delivery may already be scheduled, and directs the caller to inspect or cancel the retained handle rather than create a duplicate. The action never automatically retries the whole two-step operation.
+### State hardening (SM-10, issue #246)
+
+This implements group 9 of the approved `harden-email-state-machines` design (parent #236), building on group 8 draft snapshots. The core workflow owns preparation → draft_created → attachments_ready → deferred_property_set → dispatching → accepted/rejected/unknown. Provider callbacks own Graph calls and classify dispatch errors. Attachment preparation finishes before setting the marker. Preparation failure rejects dispatch, but does not prove a failed write left no remote changes; known draft/message handles survive and no compensating deletion or replay occurs. A lost creation response cannot supply an unobserved ID.
+
+The exported scheduling result adds optional workflow evidence; legacy provider results and all MCP wire schemas remain compatible. An unclassified scheduled-draft throw retains the canonical message handle. Cancellation requires an actual draft and a valid future marker, shares timestamp validation with listing/snapshot lifecycle, and treats past markers as residue. No verified Graph conditional DELETE is available in this implementation: delivery can race the observation and deletion, and deletion success cannot recall an already delivered copy.
+
+Scheduling is a multi-write preparation and dispatch operation. If draft creation succeeds but Graph explicitly rejects `/send` with a 4xx response, the provider returns a non-recoverable `SCHEDULE_SEND_FAILED` with the created `messageId`. If the response is lost or Graph returns a server-side failure, submission status is ambiguous: the provider returns non-recoverable `SCHEDULE_SEND_STATUS_UNKNOWN`, warns that delivery may already be scheduled, and directs the caller to inspect or cancel the retained handle rather than create a duplicate. The action never automatically retries the whole operation.

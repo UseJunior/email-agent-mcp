@@ -10,6 +10,7 @@ import {
   validateScheduledSendAt,
 } from './scheduling.js';
 import { sendEmailAction } from './send.js';
+import { SendLedger } from '../security/send-ledger.js';
 
 function futureAt(minutes = 10): string {
   return new Date(Date.now() + minutes * 60_000).toISOString();
@@ -33,6 +34,42 @@ function withoutScheduling(provider: MockEmailProvider): EmailProvider {
 }
 
 describe('email-write/Provider-Held Scheduled Delivery', () => {
+  it('Scenario: Scheduled partial outcomes retain wire handles without exposing workflow evidence', async () => {
+    for (const outcome of ['accepted', 'rejected', 'unknown'] as const) {
+      const provider = new MockEmailProvider();
+      const scheduledSendAt = futureAt();
+      const ctx = { ...actionContext(provider), sendLedger: new SendLedger() };
+      provider.scheduleMessage = vi.fn().mockResolvedValue({ success: outcome === 'accepted',
+        messageId: 'surviving-handle', scheduledSendAt,
+        workflow: { phase: 'terminal', outcome, lastPhase: 'dispatching', draftId: 'surviving-handle', messageId: 'surviving-handle' },
+        ...(outcome === 'accepted' ? {} : { error: { code: outcome === 'unknown' ? 'SCHEDULE_SEND_STATUS_UNKNOWN' : 'SCHEDULE_SEND_FAILED', message: 'Synthetic', recoverable: false } }),
+      });
+      const input = { to: 'alice@example.com', subject: 'Outcome', body: 'Synthetic', scheduled_send_at: scheduledSendAt };
+      const result = await sendEmailAction.run(ctx, input);
+      expect(result).toMatchObject({ success: outcome === 'accepted', messageId: 'surviving-handle', scheduledSendAt });
+      expect(result).not.toHaveProperty('workflow');
+      expect(sendEmailAction.output.parse(result)).toEqual(result);
+      if (outcome === 'unknown') {
+        expect((await sendEmailAction.run(ctx, input)).error?.code).toBe('DUPLICATE_SEND_UNRESOLVED');
+        expect(provider.scheduleMessage).toHaveBeenCalledTimes(1);
+      }
+    }
+  });
+
+  it('Scenario: Unclassified draft scheduling throw retains canonical handle and cannot replay', async () => {
+    const provider = new MockEmailProvider();
+    const draft = await provider.createDraft({ to: [{ email: 'alice@example.com' }], subject: 'Timeout', body: 'Synthetic' });
+    const snapshot = await provider.getDraftSnapshot(draft.draftId!);
+    vi.spyOn(provider, 'getDraftSnapshot').mockResolvedValue({ ...snapshot, draftId: 'canonical-draft', messageId: 'canonical-message' });
+    const schedule = vi.spyOn(provider, 'scheduleDraft').mockRejectedValue(new Error('Lost acknowledgement'));
+    const ctx = { ...actionContext(provider), sendLedger: new SendLedger() };
+    const input = { draft_id: draft.draftId!, scheduled_send_at: futureAt() };
+    expect(await sendDraftAction.run(ctx, input)).toMatchObject({ success: false, messageId: 'canonical-message',
+      scheduledSendAt: input.scheduled_send_at, error: { code: 'SCHEDULE_SEND_STATUS_UNKNOWN', recoverable: false } });
+    expect((await sendDraftAction.run(ctx, input)).error?.code).toBe('DUPLICATE_SEND_UNRESOLVED');
+    expect(schedule).toHaveBeenCalledExactlyOnceWith('canonical-draft', input.scheduled_send_at);
+  });
+
   it('Scenario: New email is held for future delivery', async () => {
     const provider = new MockEmailProvider();
     const scheduled = vi.spyOn(provider, 'scheduleMessage');
