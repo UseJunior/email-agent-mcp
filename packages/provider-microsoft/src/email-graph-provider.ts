@@ -36,6 +36,8 @@ import {
   classifyTransportError,
   parseRetryAfter,
   SEND_STATUS_UNKNOWN,
+  validateScheduledSendAt,
+  runScheduledWorkflow,
 } from '@usejunior/email-core';
 
 const BODY_SIZE_LIMIT = 3.5 * 1024 * 1024; // 3.5MB
@@ -1091,7 +1093,10 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
 
   async scheduleMessage(msg: ComposeMessage, scheduledSendAt: string): Promise<ScheduledSendResult> {
     const sizeError = checkGraphAttachmentLimits(msg.attachments);
-    if (sizeError) return { success: false, error: sizeError };
+    if (sizeError) return {
+      success: false, error: sizeError,
+      workflow: { phase: 'terminal', outcome: 'rejected', lastPhase: 'preparing' },
+    };
 
     const trackingId = msg.trackingId ?? `ae-${Date.now()}`;
     const graphMsg: Record<string, unknown> = {
@@ -1102,7 +1107,6 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       bccRecipients: toGraphRecipients(msg.bcc),
       singleValueExtendedProperties: [
         { id: TRACKING_PROPERTY, value: trackingId },
-        { id: DEFERRED_SEND_PROPERTY, value: scheduledSendAt },
         { id: DRAFT_ORIGIN_PROPERTY, value: 'non_reply' },
       ],
     };
@@ -1111,59 +1115,46 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       graphMsg.attachments = msg.attachments.map(toGraphFileAttachment);
     }
 
-    const created = await this.client.post(`${this.basePath}/messages`, graphMsg);
-    if (!created.id) {
-      return {
-        success: false,
-        error: {
-          code: 'SCHEDULE_DRAFT_FAILED',
-          message: 'Microsoft Graph created no scheduled-send draft id',
-          provider: 'microsoft',
-          recoverable: false,
-        },
-      };
-    }
-
-    if (draftUpload) {
-      try {
-        await this.postDraftAttachments(created.id, msg.attachments!);
-      } catch (err) {
-        return {
-          success: false,
-          messageId: created.id,
-          error: {
-            code: 'ATTACHMENT_UPLOAD_FAILED',
-            message: `Scheduled draft ${created.id} was created but attaching files failed: ${err instanceof Error ? err.message : String(err)}`,
-            recoverable: false,
-          },
-        };
-      }
-    }
-
-    try {
-      await this.client.post(
-        `${this.basePath}/messages/${encodeGraphPathId(created.id)}/send`,
-        {},
-      );
-      return { success: true, messageId: created.id, scheduledSendAt };
-    } catch (err) {
-      return scheduledDraftSendFailure(created.id, scheduledSendAt, err);
-    }
+    return this.runSchedule(scheduledSendAt, undefined, async () => {
+      const created = await this.client.post(`${this.basePath}/messages`, graphMsg);
+      if (!created.id) throw new Error('Microsoft Graph created no scheduled-send draft id');
+      return created.id;
+    }, async id => {
+      if (draftUpload) await this.postDraftAttachments(id, msg.attachments!);
+    });
   }
 
   async scheduleDraft(draftId: string, scheduledSendAt: string): Promise<ScheduledSendResult> {
-    const encodedId = encodeGraphPathId(draftId);
-    await this.client.patch(`${this.basePath}/messages/${encodedId}`, {
-      singleValueExtendedProperties: [
-        { id: DEFERRED_SEND_PROPERTY, value: scheduledSendAt },
-      ],
+    return this.runSchedule(scheduledSendAt, draftId);
+  }
+
+  private async runSchedule(
+    scheduledSendAt: string,
+    draftId?: string,
+    createDraft: () => Promise<string> = async () => { throw new Error('Missing draft'); },
+    prepareAttachments: (id: string) => Promise<void> = async () => {},
+  ): Promise<ScheduledSendResult> {
+    // Attachments are complete before applying the marker. A failed PATCH may
+    // still have applied remotely; retain the handle without cleanup or replay.
+    return runScheduledWorkflow({
+      scheduledSendAt, draftId, createDraft, prepareAttachments,
+      setDeferredProperty: async id => {
+        await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(id)}`, {
+          singleValueExtendedProperties: [
+            { id: DEFERRED_SEND_PROPERTY, value: scheduledSendAt },
+          ],
+        });
+      },
+      dispatch: async id => {
+        await this.client.post(`${this.basePath}/messages/${encodeGraphPathId(id)}/send`, {});
+      },
+      preparationError: (err, phase) => ({
+        code: phase === 'draft_created' ? 'ATTACHMENT_UPLOAD_FAILED' : 'SCHEDULE_DRAFT_FAILED',
+        message: `Scheduled-send preparation failed at ${phase}; no dispatch attempted. Any retained draft may include partial changes. Inspect it before further action. ${err instanceof Error ? err.message : String(err)}`,
+        provider: 'microsoft', recoverable: false,
+      }),
+      dispatchError: (err, id) => scheduledDispatchFailure(id, err),
     });
-    try {
-      await this.client.post(`${this.basePath}/messages/${encodedId}/send`, {});
-      return { success: true, messageId: draftId, scheduledSendAt };
-    } catch (err) {
-      return scheduledDraftSendFailure(draftId, scheduledSendAt, err);
-    }
   }
 
   /**
@@ -1205,8 +1196,9 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
     for (const message of messages) {
       const property = findDeferredSendProperty(message);
       if (message.isDraft !== true || !property) continue;
-      const timestamp = Date.parse(property.value);
-      if (!Number.isFinite(timestamp)) continue;
+      const validated = validateScheduledSendAt(property.value, now);
+      if ('error' in validated) continue;
+      const timestamp = Date.parse(validated.value);
       // Outlook leaves the tagged copy behind after delivery, so a past
       // deferred time marks residue rather than a pending send. Drafts-scoped
       // discovery rarely saw those; a mailbox-wide scan sees all of them.
@@ -1239,10 +1231,13 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       }
       throw err;
     }
-    if (candidate.isDraft !== true || !findDeferredSendProperty(candidate)) {
+    const marker = findDeferredSendProperty(candidate)?.value;
+    if (candidate.isDraft !== true || marker === undefined || 'error' in validateScheduledSendAt(marker)) {
       throw scheduledSendNotFoundError();
     }
     try {
+      // Graph offers no verified conditional DELETE for this flow. Delivery
+      // can win after the observation; deletion cannot recall delivered mail.
       await this.client.delete(`${this.basePath}/messages/${encodedId}`);
     } catch (err) {
       if (err instanceof GraphApiError && err.status === 404) {
@@ -1461,8 +1456,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       throw err;
     }
     const scheduledSendAt = findDeferredSendProperty(metadata)?.value;
-    const pending = scheduledSendAt !== undefined && Number.isFinite(Date.parse(scheduledSendAt))
-      && Date.parse(scheduledSendAt) > Date.now();
+    const pending = scheduledSendAt !== undefined && !('error' in validateScheduledSendAt(scheduledSendAt));
     return {
       draftId: metadata.id,
       messageId: metadata.id,
@@ -1944,20 +1938,17 @@ function decodeConversationIndex(value: unknown): number | undefined {
   return decoded.length;
 }
 
-function scheduledDraftSendFailure(
+function scheduledDispatchFailure(
   draftId: string,
-  scheduledSendAt: string,
   err: unknown,
-): ScheduledSendResult {
+): { outcome: 'rejected' | 'unknown'; error: EmailError } {
   // Shares classifyGraphDelivery with the immediate-send paths so the two
   // families cannot drift on what counts as ambiguous. The codes stay
   // scheduled-specific because they are spec'd and because the remedy differs:
   // here there is a tagged draft to inspect or cancel.
   const failure = classifyGraphDelivery(err);
   return {
-    success: false,
-    messageId: draftId,
-    scheduledSendAt,
+    outcome: failure.ambiguous ? 'unknown' : 'rejected',
     error: {
       code: failure.ambiguous ? 'SCHEDULE_SEND_STATUS_UNKNOWN' : 'SCHEDULE_SEND_FAILED',
       message: failure.ambiguous
