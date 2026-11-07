@@ -132,7 +132,8 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
     await auth.getAccessToken(controller.signal);
     await auth.tryReconnect(controller.signal);
     expect(mockDeviceCodeState.getTokenOptions).toHaveLength(3);
-    expect(mockDeviceCodeState.getTokenOptions.every(options => options?.abortSignal === controller.signal)).toBe(true);
+    // Shared flights own their Azure signal so one caller cannot abort peers.
+    expect(mockDeviceCodeState.getTokenOptions.every(options => options?.abortSignal instanceof AbortSignal && !options.abortSignal.aborted)).toBe(true);
     controller.abort();
     await expect(auth.getAccessToken(controller.signal)).rejects.toThrow();
     await expect(auth.reconnect(controller.signal)).rejects.toThrow();
