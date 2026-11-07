@@ -3,7 +3,8 @@ import { getEmailScopeProfile, type AuthManager, type EmailScopeProfile } from '
 import { DeviceCodeCredential, ClientSecretCredential, useIdentityPlugin, type DeviceCodeInfo, type AuthenticationRecord } from '@azure/identity';
 import { cachePersistencePlugin } from '@azure/identity-cache-persistence';
 import { randomUUID } from 'node:crypto';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { renameSync } from 'node:fs';
+import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { GraphApiError } from './email-graph-provider.js';
@@ -95,18 +96,34 @@ export function toFilesystemSafeKey(email: string): string {
  * Tokens are stored in the OS keychain by MSAL.
  * Only the AuthenticationRecord (non-secret metadata) is saved to disk.
  */
+interface DelegatedSession {
+  credential: DeviceCodeCredential;
+  authRecord: AuthenticationRecord;
+  cacheName: string;
+  lastInteractiveAuthAt: string;
+  emailAddress: string | null;
+  tokenExpiresAt: number | null;
+}
+
+type DelegatedStableState =
+  | { kind: 'disconnected'; emailAddress: string | null }
+  | { kind: 'connected'; session: DelegatedSession }
+  | { kind: 'reauth_required'; reason: unknown; session: DelegatedSession | null };
+
+type DelegatedAuthState = DelegatedStableState
+  | { kind: 'connecting'; previous: DelegatedStableState }
+  | { kind: 'refreshing'; session: DelegatedSession; previous: DelegatedStableState; promise: Promise<string> }
+  | { kind: 'disconnecting' };
+
 export class DelegatedAuthManager implements AuthManager {
-  private credential: DeviceCodeCredential | null = null;
-  private authRecord: AuthenticationRecord | null = null;
-  private cacheName: string | null = null;
+  private state: DelegatedAuthState = { kind: 'disconnected', emailAddress: null };
+  private generation = 0;
+  private mutations: Promise<unknown> = Promise.resolve();
+  private reconnectFlight: { generation: number; promise: Promise<void> } | null = null;
+  private tokenFlight: { generation: number; promise: Promise<string> } | null = null;
   private readonly config: MicrosoftAuthConfig;
   private readonly mailboxName: string;
   private readonly scopes: string[];
-  private _needsReauth = false;
-  private _lastInteractiveAuthAt: string | null = null;
-  private _emailAddress: string | null = null;
-  private _tokenExpiresAt: number | null = null;
-  private _reconnectPromise: Promise<boolean> | null = null;
 
   constructor(config: MicrosoftAuthConfig, mailboxName = 'default') {
     this.config = config;
@@ -116,127 +133,208 @@ export class DelegatedAuthManager implements AuthManager {
 
   /** Set the email address for this mailbox (called after profile fetch during configure). */
   setEmailAddress(email: string): void {
-    this._emailAddress = email;
+    // Compatibility setter used by configure before saving the fetched profile.
+    const state = this.stableState();
+    if (state.kind === 'disconnected') state.emailAddress = email;
+    else if (state.session) state.session.emailAddress = email;
   }
 
   /** Get the email address for this mailbox (may be null if not yet fetched). */
   get emailAddress(): string | null {
-    return this._emailAddress;
+    const state = this.stableState();
+    return state.kind === 'disconnected' ? state.emailAddress : state.session?.emailAddress ?? null;
   }
 
-  get needsReauth(): boolean { return this._needsReauth; }
-  get lastInteractiveAuthAt(): string | null { return this._lastInteractiveAuthAt; }
-  get tokenExpiresAt(): number | null { return this._tokenExpiresAt; }
+  get needsReauth(): boolean { return this.stableState().kind === 'reauth_required'; }
+  get lastInteractiveAuthAt(): string | null { return this.session()?.lastInteractiveAuthAt ?? null; }
+  get tokenExpiresAt(): number | null { return this.session()?.tokenExpiresAt ?? null; }
 
   get isTokenExpiringSoon(): boolean {
-    if (this._needsReauth) return true;
-    if (!this._tokenExpiresAt) return false;
-    return Date.now() > this._tokenExpiresAt - TOKEN_EXPIRY_BUFFER_MS;
+    if (this.needsReauth) return true;
+    if (!this.tokenExpiresAt) return false;
+    return Date.now() > this.tokenExpiresAt - TOKEN_EXPIRY_BUFFER_MS;
+  }
+
+  private stableState(): DelegatedStableState {
+    switch (this.state.kind) {
+      case 'disconnected':
+      case 'connected':
+      case 'reauth_required': return this.state;
+      case 'connecting': return this.state.previous;
+      case 'refreshing': return this.state.previous;
+      case 'disconnecting': return { kind: 'disconnected', emailAddress: null };
+    }
+  }
+
+  private session(): DelegatedSession | null {
+    const state = this.stableState();
+    return state.kind === 'disconnected' ? null : state.session;
+  }
+
+  private assertCurrent(generation: number): void {
+    if (generation !== this.generation) throw new Error('Authentication operation cancelled by disconnect');
+  }
+
+  private serialize<T>(operation: (generation: number) => Promise<T>): Promise<T> {
+    const generation = this.generation;
+    const result = this.mutations.then(() => {
+      this.assertCurrent(generation);
+      return operation(generation);
+    });
+    this.mutations = result.catch(() => {});
+    return result;
+  }
+
+  private terminal(err: unknown): boolean {
+    return err instanceof Error && (err.name === 'AuthenticationRequiredError'
+      || err.message.includes('interaction_required') || err.message.includes('invalid_grant'));
+  }
+
+  private failed(err: unknown, previous: DelegatedStableState, generation: number): void {
+    this.assertCurrent(generation);
+    this.state = this.terminal(err)
+      ? { kind: 'reauth_required', reason: err, session: previous.kind === 'disconnected' ? null : previous.session }
+      : previous;
   }
 
   /**
    * Interactive device code flow — prints URL + code to stderr.
    * Call this from `email-agent-mcp configure`, NOT from MCP serve.
    */
-  async connect(_credentials: Record<string, string>): Promise<void> {
-    this.cacheName = this.createCacheName();
-    this.credential = this.createPersistentCredential({
-      clientId: this.config.clientId,
-      tenantId: this.config.tenantId,
-      cacheName: this.cacheName,
-      disableAutomaticAuthentication: true, // Force interactive in connect()
-      userPromptCallback: (info: DeviceCodeInfo) => {
-        console.error('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.error('  To sign in, open this URL in your browser:');
-        console.error(`  ${info.verificationUri}`);
-        console.error(`  Enter code: ${info.userCode}`);
-        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-      },
+  connect(_credentials: Record<string, string>): Promise<void> {
+    return this.serialize(async generation => {
+      const previous = this.stableState();
+      const emailAddress = this.emailAddress;
+      this.state = { kind: 'connecting', previous };
+      const cacheName = this.createCacheName();
+      try {
+        const credential = this.createPersistentCredential({
+          clientId: this.config.clientId,
+          tenantId: this.config.tenantId,
+          cacheName,
+          disableAutomaticAuthentication: true, // Force interactive in connect()
+          userPromptCallback: (info: DeviceCodeInfo) => {
+            console.error('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            console.error('  To sign in, open this URL in your browser:');
+            console.error(`  ${info.verificationUri}`);
+            console.error(`  Enter code: ${info.userCode}`);
+            console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+          },
+        });
+
+        const authRecord = await credential.authenticate(this.scopes);
+        this.assertCurrent(generation);
+        if (!authRecord) throw new Error('Authentication failed — no record received');
+        this.state = { kind: 'connected', session: {
+          credential, authRecord, cacheName, emailAddress,
+          lastInteractiveAuthAt: new Date().toISOString(), tokenExpiresAt: null,
+        } };
+      } catch (err) {
+        this.failed(err, previous, generation);
+        throw err;
+      }
+      // Persistence failure is distinct: retain the valid runtime session.
+      await this.persistMetadata(this.session()!, generation);
     });
-
-    this.authRecord = (await this.credential.authenticate(this.scopes)) ?? null;
-    if (!this.authRecord) throw new Error('Authentication failed — no record received');
-    this._lastInteractiveAuthAt = new Date().toISOString();
-    this._needsReauth = false;
-
-    // Persist metadata (not the tokens — those are in OS keychain via MSAL)
-    await this.saveMetadata();
   }
 
   /**
    * Reconnect from a saved AuthenticationRecord (silent, no user interaction).
    */
-  async reconnect(): Promise<void> {
-    const metadata = await this.loadMetadata();
-    if (!metadata) {
-      throw new Error(`No saved credentials for mailbox "${this.mailboxName}". Run: email-agent-mcp configure --mailbox ${this.mailboxName}`);
-    }
+  reconnect(signal?: AbortSignal): Promise<void> {
+    if (this.reconnectFlight?.generation === this.generation) return this.reconnectFlight.promise;
+    const promise = this.serialize(async generation => {
+      signal?.throwIfAborted();
+      const previous = this.stableState();
+      this.state = { kind: 'connecting', previous };
+      try {
+        const metadata = await this.loadMetadata();
+        this.assertCurrent(generation);
+        signal?.throwIfAborted();
+        if (!metadata) {
+          throw new Error(`No saved credentials for mailbox "${this.mailboxName}". Run: email-agent-mcp configure --mailbox ${this.mailboxName}`);
+        }
 
-    this.authRecord = metadata.authenticationRecord;
-    this.cacheName = metadata.cacheName ?? this.getLegacyCacheName();
-    this._lastInteractiveAuthAt = metadata.lastInteractiveAuthAt;
-    this._emailAddress = metadata.emailAddress ?? null;
-    this.credential = this.createPersistentCredential({
-      clientId: metadata.clientId,
-      tenantId: metadata.tenantId,
-      authenticationRecord: this.authRecord,
-      cacheName: this.cacheName,
-      // This is the `serve` path. Without this, a cache that does not cover the
-      // requested scopes makes DeviceCodeCredential silently start an interactive
-      // device flow: it blocks for the whole polling window while the server sits
-      // in `connecting`, and its default prompt callback writes to stdout — which
-      // on an stdio MCP server is the JSON-RPC channel. Fail fast instead.
-      disableAutomaticAuthentication: true,
-      // Belt-and-braces: if a device prompt is ever reached here, keep it off stdout.
-      userPromptCallback: (info: DeviceCodeInfo) => {
-        console.error(`[email-agent-mcp] Interactive sign-in required: ${info.verificationUri} code ${info.userCode}`);
-      },
-    });
+        const cacheName = metadata.cacheName ?? this.getLegacyCacheName();
+        const credential = this.createPersistentCredential({
+          clientId: metadata.clientId,
+          tenantId: metadata.tenantId,
+          authenticationRecord: metadata.authenticationRecord,
+          cacheName,
+          // Serve must fail fast when the cache cannot satisfy the scopes.
+          // MSAL still handles silent cache hits and refresh-token redemption.
+          disableAutomaticAuthentication: true,
+          userPromptCallback: (info: DeviceCodeInfo) => {
+            console.error(`[email-agent-mcp] Interactive sign-in required: ${info.verificationUri} code ${info.userCode}`);
+          },
+        });
 
-    // Verify the token still works
-    try {
-      const token = await this.credential.getToken(this.scopes);
-      this._tokenExpiresAt = token.expiresOnTimestamp;
-      this._needsReauth = false;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const name = err instanceof Error ? err.name : '';
-      // AuthenticationRequiredError is what disableAutomaticAuthentication raises
-      // when the cached token cannot satisfy `this.scopes` — the normal signal for
-      // "this profile's scopes were never consented", not just an expired token.
-      if (name === 'AuthenticationRequiredError'
-        || message.includes('interaction_required')
-        || message.includes('invalid_grant')) {
-        this._needsReauth = true;
-        throw new Error(
-          `Cached credentials do not cover the scopes required by mailbox "${this.mailboxName}" `
-          + `(scope profile "${this.config.scopeProfile ?? getEmailScopeProfile()}"). `
-          + `Run: email-agent-mcp configure --mailbox ${this.mailboxName}`,
-        );
+        const token = signal
+          ? await credential.getToken(this.scopes, { abortSignal: signal })
+          : await credential.getToken(this.scopes);
+        this.assertCurrent(generation);
+        signal?.throwIfAborted();
+        if (!token) throw new Error('Failed to acquire token');
+        this.state = { kind: 'connected', session: {
+          credential, authRecord: metadata.authenticationRecord, cacheName,
+          lastInteractiveAuthAt: metadata.lastInteractiveAuthAt,
+          emailAddress: metadata.emailAddress ?? null, tokenExpiresAt: token.expiresOnTimestamp,
+        } };
+      } catch (err) {
+        this.failed(err, previous, generation);
+        // AuthenticationRequiredError also covers scopes never consented.
+        if (this.terminal(err)) {
+          throw new Error(
+            `Cached credentials do not cover the scopes required by mailbox "${this.mailboxName}" `
+            + `(scope profile "${this.config.scopeProfile ?? getEmailScopeProfile()}"). `
+            + `Run: email-agent-mcp configure --mailbox ${this.mailboxName}`,
+            { cause: err },
+          );
+        }
+        throw err;
       }
-      throw err;
-    }
+    });
+    const flight = { generation: this.generation, promise };
+    this.reconnectFlight = flight;
+    void promise.finally(() => {
+      if (this.reconnectFlight === flight) this.reconnectFlight = null;
+    }).catch(() => {});
+    return promise;
   }
 
   /**
    * Get a valid access token (refreshes automatically via MSAL cache).
    */
-  async getAccessToken(): Promise<string> {
-    if (!this.credential) {
-      throw new Error('Not connected. Call connect() or reconnect() first.');
-    }
-    try {
-      const token = await this.credential.getToken(this.scopes);
-      if (!token) throw new Error('Failed to acquire token');
-      this._tokenExpiresAt = token.expiresOnTimestamp;
-      return token.token;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.includes('interaction_required') || message.includes('invalid_grant')) {
-        this._needsReauth = true;
+  getAccessToken(signal?: AbortSignal): Promise<string> {
+    if (this.tokenFlight?.generation === this.generation) return this.tokenFlight.promise;
+    const promise = this.serialize(async generation => {
+      signal?.throwIfAborted();
+      const previous = this.stableState();
+      const session = this.session();
+      if (!session) {
+        throw new Error('Not connected. Call connect() or reconnect() first.');
       }
-      throw err;
-    }
+      this.state = { kind: 'refreshing', session, previous, promise };
+      try {
+        const token = signal
+          ? await session.credential.getToken(this.scopes, { abortSignal: signal })
+          : await session.credential.getToken(this.scopes);
+        this.assertCurrent(generation);
+        signal?.throwIfAborted();
+        if (!token) throw new Error('Failed to acquire token');
+        this.state = { kind: 'connected', session: { ...session, tokenExpiresAt: token.expiresOnTimestamp } };
+        return token.token;
+      } catch (err) {
+        this.failed(err, previous, generation);
+        throw err;
+      }
+    });
+    const flight = { generation: this.generation, promise };
+    this.tokenFlight = flight;
+    void promise.finally(() => {
+      if (this.tokenFlight === flight) this.tokenFlight = null;
+    }).catch(() => {});
+    return promise;
   }
 
   async refresh(): Promise<void> {
@@ -248,35 +346,31 @@ export class DelegatedAuthManager implements AuthManager {
    * Attempt reconnect with single-flight guard — safe for concurrent callers.
    * Returns true if reconnect succeeded, false if it failed.
    */
-  async tryReconnect(): Promise<boolean> {
-    if (this._reconnectPromise) return this._reconnectPromise;
-    this._reconnectPromise = (async () => {
-      try {
-        console.error(`[email-agent-mcp] Attempting reconnect for mailbox "${this.mailboxName}"...`);
-        await this.reconnect();
-        console.error(`[email-agent-mcp] Reconnect succeeded for mailbox "${this.mailboxName}"`);
-        return true;
-      } catch (err) {
-        console.error(`[email-agent-mcp] Reconnect failed for mailbox "${this.mailboxName}": ${err instanceof Error ? err.message : err}`);
-        return false;
-      } finally {
-        this._reconnectPromise = null;
-      }
-    })();
-    return this._reconnectPromise;
+  async tryReconnect(signal?: AbortSignal): Promise<boolean> {
+    try {
+      console.error(`[email-agent-mcp] Attempting reconnect for mailbox "${this.mailboxName}"...`);
+      await this.reconnect(signal);
+      console.error(`[email-agent-mcp] Reconnect succeeded for mailbox "${this.mailboxName}"`);
+      return true;
+    } catch (err) {
+      console.error(`[email-agent-mcp] Reconnect failed for mailbox "${this.mailboxName}": ${err instanceof Error ? err.message : err}`);
+      return false;
+    }
   }
 
-  async disconnect(): Promise<void> {
-    this.credential = null;
-    this.authRecord = null;
-    this.cacheName = null;
-    this._tokenExpiresAt = null;
-    this._reconnectPromise = null;
+  disconnect(): Promise<void> {
+    const generation = ++this.generation;
+    this.state = { kind: 'disconnecting' };
+    const result = this.mutations.then(() => {
+      if (generation === this.generation) this.state = { kind: 'disconnected', emailAddress: null };
+    });
+    this.mutations = result;
+    return result;
   }
 
   isTokenExpired(): boolean {
-    if (this._needsReauth) return true;
-    if (this._tokenExpiresAt && Date.now() >= this._tokenExpiresAt) return true;
+    if (this.needsReauth) return true;
+    if (this.tokenExpiresAt && Date.now() >= this.tokenExpiresAt) return true;
     return false;
   }
 
@@ -284,14 +378,14 @@ export class DelegatedAuthManager implements AuthManager {
    * Check token health: returns a warning if approaching expiry.
    */
   getTokenHealthWarning(): string | undefined {
-    if (this._needsReauth) {
+    if (this.needsReauth) {
       return `Authentication expired. Run: email-agent-mcp configure --mailbox ${this.mailboxName}`;
     }
-    if (this._tokenExpiresAt && Date.now() > this._tokenExpiresAt) {
+    if (this.tokenExpiresAt && Date.now() > this.tokenExpiresAt) {
       return `Access token expired — next API call will attempt refresh`;
     }
-    if (this._lastInteractiveAuthAt) {
-      const daysSinceAuth = (Date.now() - new Date(this._lastInteractiveAuthAt).getTime()) / (1000 * 60 * 60 * 24);
+    if (this.lastInteractiveAuthAt) {
+      const daysSinceAuth = (Date.now() - new Date(this.lastInteractiveAuthAt).getTime()) / (1000 * 60 * 60 * 24);
       if (daysSinceAuth > 80) {
         return `Token may expire soon (last authenticated ${Math.round(daysSinceAuth)} days ago). Run: email-agent-mcp configure --mailbox ${this.mailboxName}`;
       }
@@ -299,9 +393,9 @@ export class DelegatedAuthManager implements AuthManager {
     return undefined;
   }
 
-  private getMetadataPath(): string {
-    if (this._emailAddress) {
-      return join(getConfigDir(), `${toFilesystemSafeKey(this._emailAddress)}.json`);
+  private getMetadataPath(emailAddress: string | null): string {
+    if (emailAddress) {
+      return join(getConfigDir(), `${toFilesystemSafeKey(emailAddress)}.json`);
     }
     return join(getConfigDir(), `${this.mailboxName}.json`);
   }
@@ -336,20 +430,41 @@ export class DelegatedAuthManager implements AuthManager {
     });
   }
 
-  async saveMetadata(): Promise<void> {
-    const path = this.getMetadataPath();
-    await mkdir(dirname(path), { recursive: true });
+  saveMetadata(): Promise<void> {
+    return this.serialize(async generation => {
+      const session = this.session();
+      if (!session) throw new Error('Not connected. Cannot save metadata.');
+      await this.persistMetadata(session, generation);
+    });
+  }
+
+  private async persistMetadata(session: DelegatedSession, generation: number): Promise<void> {
+    const path = this.getMetadataPath(session.emailAddress);
     const metadata: MailboxMetadata = {
       provider: 'microsoft',
-      authenticationRecord: this.authRecord!,
-      cacheName: this.cacheName ?? undefined,
-      lastInteractiveAuthAt: this._lastInteractiveAuthAt!,
+      authenticationRecord: session.authRecord,
+      cacheName: session.cacheName,
+      lastInteractiveAuthAt: session.lastInteractiveAuthAt,
       clientId: this.config.clientId,
       tenantId: this.config.tenantId,
       mailboxName: this.mailboxName,
-      emailAddress: this._emailAddress ?? undefined,
+      emailAddress: session.emailAddress ?? undefined,
     };
-    await writeFile(path, JSON.stringify(metadata, null, 2), 'utf-8');
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    try {
+      await mkdir(dirname(path), { recursive: true });
+      this.assertCurrent(generation);
+      await writeFile(temporary, JSON.stringify(metadata, null, 2), { encoding: 'utf-8', mode: 0o600 });
+      this.assertCurrent(generation);
+      // No await between the generation check and publication. A disconnect
+      // cannot interleave here; MSAL remains the sole owner of cached tokens.
+      renameSync(temporary, path);
+    } catch (err) {
+      this.assertCurrent(generation);
+      throw new Error('Authenticated, but failed to persist Microsoft mailbox metadata', { cause: err });
+    } finally {
+      await unlink(temporary).catch(() => {});
+    }
   }
 
   private async loadMetadata(): Promise<MailboxMetadata | null> {
@@ -394,10 +509,27 @@ export function isAuthError(err: unknown): boolean {
  * Client credentials auth manager (app-only / daemon).
  * Uses ClientSecretCredential from @azure/identity for real Azure AD authentication.
  */
+interface ClientCredentialsSession {
+  credential: ClientSecretCredential;
+  accessToken: string;
+  expiresAt: number;
+}
+
+type ClientCredentialsStableState =
+  | { kind: 'disconnected' }
+  | { kind: 'connected'; session: ClientCredentialsSession }
+  | { kind: 'reauth_required'; reason: unknown; session: ClientCredentialsSession | null };
+
+type ClientCredentialsAuthState = ClientCredentialsStableState
+  | { kind: 'connecting'; previous: ClientCredentialsStableState }
+  | { kind: 'refreshing'; session: ClientCredentialsSession; previous: ClientCredentialsStableState; promise: Promise<void> }
+  | { kind: 'disconnecting' };
+
 export class ClientCredentialsAuthManager implements AuthManager {
-  private credential: ClientSecretCredential | null = null;
-  private accessToken?: string;
-  private expiresAt?: number;
+  private state: ClientCredentialsAuthState = { kind: 'disconnected' };
+  private generation = 0;
+  private mutations: Promise<unknown> = Promise.resolve();
+  private refreshFlight: { generation: number; promise: Promise<void> } | null = null;
   private readonly config: MicrosoftAuthConfig;
 
   private static readonly GRAPH_SCOPE = 'https://graph.microsoft.com/.default';
@@ -406,48 +538,114 @@ export class ClientCredentialsAuthManager implements AuthManager {
     this.config = config;
   }
 
-  async connect(_credentials: Record<string, string>): Promise<void> {
-    if (!this.config.clientSecret || !this.config.tenantId) {
-      throw new Error('Client credentials require clientSecret and tenantId');
+  private stableState(): ClientCredentialsStableState {
+    switch (this.state.kind) {
+      case 'disconnected':
+      case 'connected':
+      case 'reauth_required': return this.state;
+      case 'connecting':
+      case 'refreshing': return this.state.previous;
+      case 'disconnecting': return { kind: 'disconnected' };
     }
-    this.credential = new ClientSecretCredential(
-      this.config.tenantId,
-      this.config.clientId,
-      this.config.clientSecret,
-    );
-    const tokenResponse = await this.credential.getToken(ClientCredentialsAuthManager.GRAPH_SCOPE);
-    if (!tokenResponse) throw new Error('Failed to acquire token via client credentials');
-    this.accessToken = tokenResponse.token;
-    this.expiresAt = tokenResponse.expiresOnTimestamp;
   }
 
-  async refresh(): Promise<void> {
-    if (!this.credential) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-    const tokenResponse = await this.credential.getToken(ClientCredentialsAuthManager.GRAPH_SCOPE);
-    if (!tokenResponse) throw new Error('Failed to refresh token via client credentials');
-    this.accessToken = tokenResponse.token;
-    this.expiresAt = tokenResponse.expiresOnTimestamp;
+  private assertCurrent(generation: number): void {
+    if (generation !== this.generation) throw new Error('Authentication operation cancelled by disconnect');
   }
 
-  async disconnect(): Promise<void> {
-    this.credential = null;
-    this.accessToken = undefined;
-    this.expiresAt = undefined;
+  private serialize(operation: (generation: number) => Promise<void>): Promise<void> {
+    const generation = this.generation;
+    const result = this.mutations.then(() => {
+      this.assertCurrent(generation);
+      return operation(generation);
+    });
+    this.mutations = result.catch(() => {});
+    return result;
+  }
+
+  private failed(err: unknown, previous: ClientCredentialsStableState, generation: number): void {
+    this.assertCurrent(generation);
+    const terminal = err instanceof Error && (err.name === 'AuthenticationRequiredError'
+      || /invalid_client|invalid_grant|unauthorized_client|interaction_required/.test(err.message));
+    this.state = terminal
+      ? { kind: 'reauth_required', reason: err, session: previous.kind === 'disconnected' ? null : previous.session }
+      : previous;
+  }
+
+  connect(_credentials: Record<string, string>): Promise<void> {
+    return this.serialize(async generation => {
+      const previous = this.stableState();
+      this.state = { kind: 'connecting', previous };
+      if (!this.config.clientSecret || !this.config.tenantId || !this.config.clientId) {
+        this.state = { kind: 'reauth_required', reason: 'Missing client credentials', session: null };
+        throw new Error('Client credentials require clientSecret and tenantId (and clientId)');
+      }
+      try {
+        const credential = new ClientSecretCredential(this.config.tenantId, this.config.clientId, this.config.clientSecret);
+        const token = await credential.getToken(ClientCredentialsAuthManager.GRAPH_SCOPE);
+        this.assertCurrent(generation);
+        if (!token) throw new Error('Failed to acquire token via client credentials');
+        this.state = { kind: 'connected', session: { credential, accessToken: token.token, expiresAt: token.expiresOnTimestamp } };
+      } catch (err) {
+        this.failed(err, previous, generation);
+        throw err;
+      }
+    });
+  }
+
+  refresh(): Promise<void> {
+    if (this.refreshFlight?.generation === this.generation) return this.refreshFlight.promise;
+    const promise = this.serialize(async generation => {
+      const previous = this.stableState();
+      const session = previous.kind === 'disconnected' ? null : previous.session;
+      if (!session) throw new Error('Not connected. Call connect() first.');
+      this.state = { kind: 'refreshing', session, previous, promise };
+      try {
+        const token = await session.credential.getToken(ClientCredentialsAuthManager.GRAPH_SCOPE);
+        this.assertCurrent(generation);
+        if (!token) throw new Error('Failed to refresh token via client credentials');
+        this.state = { kind: 'connected', session: { ...session, accessToken: token.token, expiresAt: token.expiresOnTimestamp } };
+      } catch (err) {
+        this.failed(err, previous, generation);
+        throw err;
+      }
+    });
+    const flight = { generation: this.generation, promise };
+    this.refreshFlight = flight;
+    void promise.finally(() => {
+      if (this.refreshFlight === flight) this.refreshFlight = null;
+    }).catch(() => {});
+    return promise;
+  }
+
+  disconnect(): Promise<void> {
+    const generation = ++this.generation;
+    this.state = { kind: 'disconnecting' };
+    const result = this.mutations.then(() => {
+      if (generation === this.generation) this.state = { kind: 'disconnected' };
+    });
+    this.mutations = result;
+    return result;
   }
 
   isTokenExpired(): boolean {
-    if (!this.expiresAt) return true;
-    return Date.now() >= this.expiresAt;
+    const state = this.stableState();
+    return state.kind !== 'connected' || Date.now() >= state.session.expiresAt;
   }
 
   async getAccessToken(): Promise<string | undefined> {
-    if (!this.credential) return undefined;
+    if (this.state.kind === 'disconnecting') return undefined;
+    const generation = this.generation;
+    await (this.refreshFlight?.generation === generation ? this.refreshFlight.promise : this.mutations);
+    this.assertCurrent(generation);
+    const prior = this.stableState();
+    if (prior.kind === 'disconnected' || !prior.session) return undefined;
     if (this.isTokenExpired()) {
       await this.refresh();
     }
-    return this.accessToken;
+    this.assertCurrent(generation);
+    const state = this.stableState();
+    return state.kind === 'connected' ? state.session.accessToken : undefined;
   }
 }
 

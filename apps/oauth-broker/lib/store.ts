@@ -17,6 +17,8 @@
 
 import { getConfig } from './config.js';
 
+/** Legacy outcome vocabulary retained for source compatibility. Persisted
+ * sessions use the narrower Session discriminant below. */
 export type SessionState =
   | 'pending'
   | 'ready'
@@ -33,17 +35,19 @@ export interface BrokerTokens {
   token_type?: string;
 }
 
-export interface Session {
-  state: SessionState;
+interface SessionBase {
   /** SHA-256(pickup_secret) hex. Never the secret itself. */
   pickupHash: string;
   loginHint?: string;
-  /** Present iff state === 'ready'. */
-  tokens?: BrokerTokens;
-  /** Present for failure states. */
-  errorMessage?: string;
   createdAt: number;
 }
+
+// Expiry, absence and consumption are outcomes, never persisted states.
+export type Session = SessionBase & (
+  | { state: 'pending'; tokens?: never; errorMessage?: never }
+  | { state: 'ready'; tokens: BrokerTokens; errorMessage?: never }
+  | { state: 'denied' | 'exchange_failed'; errorMessage: string; tokens?: never }
+);
 
 export type CreateResult =
   | { created: true }
@@ -70,10 +74,6 @@ export interface SessionStore {
   claim(sessionId: string, pickupSecret: string): Promise<ClaimResult>;
 }
 
-function ttlSeconds(): number {
-  return Math.ceil(getConfig().ticketTtlMs / 1000);
-}
-
 async function sha256Hex(input: string): Promise<string> {
   const enc = new TextEncoder().encode(input);
   const buf = await crypto.subtle.digest('SHA-256', enc);
@@ -83,22 +83,122 @@ async function sha256Hex(input: string): Promise<string> {
 }
 
 function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < 64; i += 1) {
+    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
   }
   return diff === 0;
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function validTokens(value: unknown): value is BrokerTokens {
+  return isObject(value) && typeof value.access_token === 'string' && value.access_token.length > 0
+    && typeof value.expires_in === 'number' && Number.isFinite(value.expires_in) && value.expires_in > 0
+    && ['refresh_token', 'scope', 'token_type'].every(key => value[key] === undefined || typeof value[key] === 'string');
+}
+
+function validSession(value: unknown): value is Session {
+  if (!isObject(value) || typeof value.pickupHash !== 'string' || !/^[a-f0-9]{64}$/.test(value.pickupHash)
+    || typeof value.createdAt !== 'number' || !Number.isFinite(value.createdAt)
+    || (value.loginHint !== undefined && typeof value.loginHint !== 'string')) return false;
+  switch (value.state) {
+    case 'pending': return value.tokens === undefined && value.errorMessage === undefined;
+    case 'ready': return validTokens(value.tokens) && value.errorMessage === undefined;
+    case 'denied':
+    case 'exchange_failed': return value.tokens === undefined && typeof value.errorMessage === 'string';
+    default: return false;
+  }
+}
+
+type Terminal = { state: 'ready'; tokens: BrokerTokens }
+  | { state: 'denied' | 'exchange_failed'; errorMessage: string };
+
+function advance(current: unknown, terminal: Terminal): Session | null {
+  return validSession(current) && current.state === 'pending' ? { ...current, ...terminal } : null;
+}
+
+function claimResult(current: unknown, hash: string): ClaimResult {
+  if (!validSession(current)) return { ok: false, reason: 'consumed' };
+  switch (current.state) {
+    case 'pending': return { ok: false, reason: 'pending' };
+    case 'denied':
+    case 'exchange_failed': return { ok: false, reason: current.state, errorMessage: current.errorMessage };
+    case 'ready': return constantTimeEqual(current.pickupHash, hash)
+      ? { ok: true, tokens: current.tokens } : { ok: false, reason: 'invalid_secret' };
+  }
+}
+
+// Keep these predicates aligned with validSession/validTokens. cjson.decode is
+// guarded: malformed persisted records must never yield credentials or throw.
+const LUA_VALIDATION = `
+local function finite(n) return type(n) == 'number' and n == n and math.abs(n) < math.huge end
+local function tokens(t)
+  if type(t) ~= 'table' or type(t.access_token) ~= 'string' or #t.access_token == 0
+    or not finite(t.expires_in) or t.expires_in <= 0 then return false end
+  for _, k in ipairs({'refresh_token', 'scope', 'token_type'}) do
+    if t[k] ~= nil and type(t[k]) ~= 'string' then return false end
+  end
+  return true
+end
+local function valid(s)
+  if type(s) ~= 'table' or type(s.pickupHash) ~= 'string' or #s.pickupHash ~= 64
+    or string.find(s.pickupHash, '[^a-f0-9]') or not finite(s.createdAt)
+    or (s.loginHint ~= nil and type(s.loginHint) ~= 'string') then return false end
+  if s.state == 'pending' then return s.tokens == nil and s.errorMessage == nil end
+  if s.state == 'ready' then return tokens(s.tokens) and s.errorMessage == nil end
+  if s.state == 'denied' or s.state == 'exchange_failed' then
+    return s.tokens == nil and type(s.errorMessage) == 'string'
+  end
+  return false
+end
+local raw = redis.call('GET', KEYS[1])
+`;
+
+const ADVANCE_LUA = LUA_VALIDATION + `
+if not raw then return 0 end
+local ok, s = pcall(cjson.decode, raw)
+if not ok or not valid(s) or s.state ~= 'pending' then return 0 end
+local next = cjson.decode(ARGV[1])
+s.state = next.state
+s.tokens = next.tokens
+s.errorMessage = next.errorMessage
+if not valid(s) or s.state == 'pending' then return 0 end
+-- No expiry reset, including when the callback arrives just before expiration.
+redis.call('SET', KEYS[1], cjson.encode(s), 'KEEPTTL')
+return 1
+`;
+
+const CLAIM_LUA = LUA_VALIDATION + `
+local function failure(reason) return cjson.encode({ok=false, reason=reason}) end
+if not raw then return failure('not_found') end
+local ok, s = pcall(cjson.decode, raw)
+if not ok or not valid(s) then return failure('consumed') end
+if s.state == 'pending' then return failure('pending') end
+if s.state == 'denied' or s.state == 'exchange_failed' then
+  return cjson.encode({ok=false, reason=s.state, errorMessage=s.errorMessage})
+end
+-- Full fixed-width comparison: no early exit on a mismatching byte.
+local hash = ARGV[1]
+local diff = bit.bxor(#s.pickupHash, #hash)
+for i = 1, 64 do
+  diff = bit.bor(diff, bit.bxor(string.byte(s.pickupHash, i) or 0, string.byte(hash, i) or 0))
+end
+if diff ~= 0 then return failure('invalid_secret') end
+redis.call('DEL', KEYS[1])
+return cjson.encode({ok=true, tokens=s.tokens})
+`;
+
 class MemoryStore implements SessionStore {
-  private map = new Map<string, { session: Session; expiresAt: number; claiming?: boolean }>();
+  private map = new Map<string, { session: Session; expiresAt: number }>();
 
   async create(sessionId: string, session: Session): Promise<CreateResult> {
     if (this.map.has(sessionId) && this.map.get(sessionId)!.expiresAt > Date.now()) {
       return { created: false, reason: 'collision' };
     }
-    this.map.set(sessionId, { session, expiresAt: Date.now() + getConfig().ticketTtlMs });
+    this.map.set(sessionId, { session: structuredClone(session), expiresAt: Date.now() + getConfig().ticketTtlMs });
     return { created: true };
   }
 
@@ -109,22 +209,24 @@ class MemoryStore implements SessionStore {
       this.map.delete(sessionId);
       return null;
     }
-    return entry.session;
+    return validSession(entry.session) ? structuredClone(entry.session) : null;
   }
 
   async setReady(sessionId: string, tokens: BrokerTokens): Promise<boolean> {
     const entry = this.map.get(sessionId);
-    if (!entry || entry.expiresAt <= Date.now() || entry.session.state !== 'pending') return false;
-    entry.session.state = 'ready';
-    entry.session.tokens = tokens;
+    if (!entry || entry.expiresAt <= Date.now() || !validTokens(tokens)) return false;
+    const next = advance(entry.session, { state: 'ready', tokens });
+    if (!next) return false;
+    entry.session = structuredClone(next);
     return true;
   }
 
   async setFailed(sessionId: string, state: 'denied' | 'exchange_failed', message: string): Promise<boolean> {
     const entry = this.map.get(sessionId);
-    if (!entry || entry.expiresAt <= Date.now() || entry.session.state !== 'pending') return false;
-    entry.session.state = state;
-    entry.session.errorMessage = message;
+    if (!entry || entry.expiresAt <= Date.now() || typeof message !== 'string') return false;
+    const next = advance(entry.session, { state, errorMessage: message });
+    if (!next) return false;
+    entry.session = structuredClone(next);
     return true;
   }
 
@@ -135,31 +237,16 @@ class MemoryStore implements SessionStore {
       this.map.delete(sessionId);
       return { ok: false, reason: 'expired' };
     }
-    const session = entry.session;
-    if (session.state === 'pending') return { ok: false, reason: 'pending' };
-    if (session.state === 'denied' || session.state === 'exchange_failed') {
-      return { ok: false, reason: session.state, errorMessage: session.errorMessage };
-    }
-    if (session.state !== 'ready') return { ok: false, reason: 'consumed' };
-
-    // sha256Hex awaits, which yields the event loop — a second concurrent
-    // claim() for the same session can run its own checks in that window.
-    // Synchronously stake a claim BEFORE the await so at most one caller
-    // ever reaches the hash comparison; everyone else fails closed as if
-    // the session were already consumed. On an invalid secret we release
-    // the stake so a subsequent correct attempt can still succeed.
-    if (entry.claiming) return { ok: false, reason: 'consumed' };
-    entry.claiming = true;
-
-    const expectedHash = session.pickupHash;
     const presentedHash = await sha256Hex(pickupSecret);
-    if (!constantTimeEqual(expectedHash, presentedHash)) {
-      entry.claiming = false;
-      return { ok: false, reason: 'invalid_secret' };
+    // Hashing yields. Never delete a replacement or release an expired ticket.
+    if (this.map.get(sessionId) !== entry) return { ok: false, reason: 'not_found' };
+    if (entry.expiresAt <= Date.now()) {
+      this.map.delete(sessionId);
+      return { ok: false, reason: 'expired' };
     }
-    this.map.delete(sessionId);
-    if (!session.tokens) return { ok: false, reason: 'consumed' };
-    return { ok: true, tokens: session.tokens };
+    const result = claimResult(entry.session, presentedHash);
+    if (result.ok) this.map.delete(sessionId);
+    return structuredClone(result);
   }
 }
 
@@ -178,53 +265,34 @@ class KvStore implements SessionStore {
   async create(sessionId: string, session: Session): Promise<CreateResult> {
     const kv = await this.kv();
     // SET NX gives us collision detection in a single round trip.
-    const ok = await kv.set(this.key(sessionId), session, { ex: ttlSeconds(), nx: true });
+    const ok = await kv.set(this.key(sessionId), session, { px: getConfig().ticketTtlMs, nx: true });
     return ok ? { created: true } : { created: false, reason: 'collision' };
   }
 
   async get(sessionId: string): Promise<Session | null> {
     const kv = await this.kv();
-    return (await kv.get<Session>(this.key(sessionId))) ?? null;
+    const session = await kv.get<unknown>(this.key(sessionId));
+    return validSession(session) ? session : null;
   }
 
   async setReady(sessionId: string, tokens: BrokerTokens): Promise<boolean> {
     const kv = await this.kv();
-    const current = await kv.get<Session>(this.key(sessionId));
-    if (!current || current.state !== 'pending') return false;
-    const next: Session = { ...current, state: 'ready', tokens };
-    // Preserve the original TTL by passing keepTtl. Upstash accepts it as KEEPTTL.
-    await kv.set(this.key(sessionId), next, { ex: ttlSeconds() });
-    return true;
+    if (!validTokens(tokens)) return false;
+    return (await kv.eval(ADVANCE_LUA, [this.key(sessionId)], [JSON.stringify({ state: 'ready', tokens })])) === 1;
   }
 
   async setFailed(sessionId: string, state: 'denied' | 'exchange_failed', message: string): Promise<boolean> {
     const kv = await this.kv();
-    const current = await kv.get<Session>(this.key(sessionId));
-    if (!current || current.state !== 'pending') return false;
-    const next: Session = { ...current, state, errorMessage: message };
-    await kv.set(this.key(sessionId), next, { ex: ttlSeconds() });
-    return true;
+    if (typeof message !== 'string') return false;
+    return (await kv.eval(ADVANCE_LUA, [this.key(sessionId)], [JSON.stringify({ state, errorMessage: message })])) === 1;
   }
 
   async claim(sessionId: string, pickupSecret: string): Promise<ClaimResult> {
     const kv = await this.kv();
-    const current = await kv.get<Session>(this.key(sessionId));
-    if (!current) return { ok: false, reason: 'not_found' };
-    if (current.state === 'pending') return { ok: false, reason: 'pending' };
-    if (current.state === 'denied' || current.state === 'exchange_failed') {
-      return { ok: false, reason: current.state, errorMessage: current.errorMessage };
-    }
-    if (current.state !== 'ready') return { ok: false, reason: 'consumed' };
-
     const presentedHash = await sha256Hex(pickupSecret);
-    if (!constantTimeEqual(current.pickupHash, presentedHash)) {
-      return { ok: false, reason: 'invalid_secret' };
-    }
-    // GETDEL is a single Redis command, so two concurrent claims with the
-    // correct secret cannot both succeed: only one observes the value.
-    const claimed = await (kv as unknown as { getdel<T>(key: string): Promise<T | null> }).getdel<Session>(this.key(sessionId));
-    if (!claimed || !claimed.tokens) return { ok: false, reason: 'consumed' };
-    return { ok: true, tokens: claimed.tokens };
+    // @vercel/kv passes strings through unchanged and automatically decodes
+    // the JSON result. Verification and DEL operate on the same current record.
+    return kv.eval<unknown[], ClaimResult>(CLAIM_LUA, [this.key(sessionId)], [presentedHash]);
   }
 }
 

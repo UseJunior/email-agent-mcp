@@ -20,6 +20,7 @@ export {
   listConfiguredGmailMailboxes,
   loadGmailMailboxMetadata,
   saveGmailMailboxMetadata,
+  createGmailMetadataWriter,
   toFilesystemSafeKey,
   getConfigDir,
 } from './config.js';

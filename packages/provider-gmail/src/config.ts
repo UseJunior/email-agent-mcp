@@ -1,4 +1,5 @@
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile, rename, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -196,10 +197,69 @@ export async function loadGmailMailboxMetadata(identifier: string): Promise<Gmai
 export async function saveGmailMailboxMetadata(metadata: GmailMailboxMetadata): Promise<void> {
   const filename = `${toFilesystemSafeKey(metadata.emailAddress)}.json`;
   const path = join(getConfigDir(), filename);
+  await serializeMetadata(path, () => atomicWriteMetadata(path, metadata));
+}
+
+const metadataWrites = new Map<string, Promise<void>>();
+
+async function serializeMetadata(key: string, write: () => Promise<void>): Promise<void> {
+  const prior = metadataWrites.get(key) ?? Promise.resolve();
+  const next = prior.catch(() => {}).then(write);
+  metadataWrites.set(key, next);
+  try { await next; } finally {
+    if (metadataWrites.get(key) === next) metadataWrites.delete(key);
+  }
+}
+
+async function atomicWriteMetadata(path: string, metadata: GmailMailboxMetadata): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(
-    path,
-    JSON.stringify({ ...metadata, provider: 'gmail' }, null, 2) + '\n',
-    'utf-8',
-  );
+  const temp = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temp, JSON.stringify({ ...metadata, provider: 'gmail' }, null, 2) + '\n',
+      { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
+    await rename(temp, path);
+  } finally {
+    await rm(temp, { force: true });
+  }
+}
+
+/** Process-local ordered compare-and-replace at the existing metadata route.
+ * Atomic rename prevents partial files; this is not a cross-process CAS.
+ */
+export function createGmailMetadataWriter(metadata: GmailMailboxMetadata):
+  (refreshToken: string, previousRefreshToken: string) => Promise<void> {
+  const directory = getConfigDir();
+  const canonicalPath = join(directory, `${toFilesystemSafeKey(metadata.emailAddress)}.json`);
+  let expected = metadata.refreshToken;
+  return async refreshToken => {
+    await serializeMetadata(canonicalPath, async () => {
+      const files = await readdir(directory);
+      const canonical = `${toFilesystemSafeKey(metadata.emailAddress)}.json`;
+      const ordered = [canonical, ...files.filter(file => file.endsWith('.json') && file !== canonical)];
+      for (const file of ordered) {
+        const path = join(directory, file);
+        let current: GmailMailboxMetadata | null;
+        try { current = normalizeGmailMailboxMetadata(JSON.parse(await readFile(path, 'utf-8'))); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          // The canonical target must not be overwritten if corrupt. Other
+          // candidates may belong to unrelated mailboxes/providers; discovery
+          // already skips those, so they must not prevent a valid alias rotation.
+          if (file === canonical) throw error;
+          continue;
+        }
+        if (!current || current.emailAddress !== metadata.emailAddress) continue;
+        // Refuse stale rotations and changes to the configured OAuth identity.
+        if (current.refreshToken !== expected ||
+            JSON.stringify({ ...current, refreshToken: '' }) !==
+              JSON.stringify({ ...normalizeGmailMailboxMetadata(metadata), refreshToken: '' })) {
+          throw new Error('Gmail metadata changed; refusing stale token rotation');
+        }
+        await atomicWriteMetadata(path, { ...current, refreshToken });
+        expected = refreshToken;
+        return;
+      }
+      throw new Error('Gmail metadata no longer exists');
+    });
+  };
 }

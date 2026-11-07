@@ -16,7 +16,7 @@ the data-residency cost: **email content never touches the broker**.
 | `POST /api/sessions` `{session_id, pickup_hash, login_hint?}` | Pre-register a session before opening the browser. `pickup_hash` is SHA-256 of a `pickup_secret` the CLI keeps locally; the secret itself never traverses the network. Returns 201 on create, 409 on collision. |
 | `GET /api/start?session=<session_id>` | Browser entry point. Looks up the registered session, redirects to Google's consent screen with `state=<session_id>`. 410 if the session is missing/expired/already-advanced. |
 | `GET /api/callback?code=...&state=<session_id>` | Google's redirect target. Exchanges the code for tokens (using the server-held `client_secret`), advances the session to `ready` (or `denied` / `exchange_failed`), shows the user a "return to terminal" page. |
-| `POST /api/tickets/claim` `{session_id, pickup_secret}` | One-shot ticket pickup. Verifies SHA-256(`pickup_secret`) against the stored hash in constant time, then atomically deletes the session record (Redis `GETDEL` on KV) and returns the tokens. Distinguishable response statuses: 200 ready, 202 pending, 403 invalid_secret, 404 not_found, 410 + status (`denied` / `exchange_failed` / `expired` / `consumed`). |
+| `POST /api/tickets/claim` `{session_id, pickup_secret}` | One-shot ticket pickup. Atomically validates the current session, verifies SHA-256(`pickup_secret`) against the stored hash in constant work, and deletes the same record (Redis Lua on KV). Distinguishable response statuses: 200 ready, 202 pending, 403 invalid_secret, 404 not_found, 410 + status (`denied` / `exchange_failed` / `expired` / `consumed`). |
 | `POST /api/refresh` `{refresh_token}` | Stateless refresh-token relay. Returns the new access_token. Broker never persists refresh tokens. |
 
 ## Why session_id ≠ pickup_secret
@@ -34,15 +34,47 @@ attacks on the verification step.
 
 ## Atomic one-shot claim
 
-On Redis-backed deployments, after the hash check succeeds the broker
-calls `GETDEL session:<id>` — a single Redis command — which atomically
-returns the tokens and removes the key. Two concurrent claims with the
-correct secret therefore cannot both succeed: only one observes the
-value, the other gets back `null` and surfaces 410 `consumed`.
+On Redis-backed deployments, one Lua operation reads and validates the
+current session, compares all 64 hash bytes without early exit, and deletes
+that same record only on success. Wrong secrets do not consume tickets;
+malformed state never returns tokens. Two concurrent valid claims yield
+at most one success. Without a consumed tombstone, subsequent claims may
+return 404 `not_found` (memory may also report 410 `expired`).
+
+Callbacks advance only pending sessions, using Lua `SET KEEPTTL` to preserve
+the original millisecond expiry. The first terminal callback wins; losing
+callbacks return 410 without overwriting its state.
 
 The in-memory backend (used only for `vercel dev` and unit tests)
 relies on Node's single-threaded execution model: `Map.get` followed
-by `Map.delete` between awaits is effectively atomic.
+by validation and `Map.delete` between awaits is effectively atomic. After
+asynchronous hashing it rechecks entry identity and expiry before deciding.
+
+The exported `SessionStore` methods, `CreateResult`, `ClaimResult`,
+`SessionState` vocabulary and HTTP wire fields remain available. `Session`
+is now a discriminated union: ready requires tokens, failures require an
+error message, and consumed/expired are outcomes rather than stored states.
+Callers constructing inconsistent sessions must narrow their types. This
+implements [#241](https://github.com/UseJunior/email-agent-mcp/issues/241),
+group 1 of the approved `harden-email-state-machines` OpenSpec proposal.
+
+## Store regression tests
+
+`npm run test:run -w email-agent-mcp-oauth-broker` runs memory and route tests.
+For the real Lua/SDK conformance suite, run:
+
+```sh
+REDIS_SERVER=/path/to/redis-server npm run test:redis -w email-agent-mcp-oauth-broker
+```
+
+This starts Redis with persistence disabled in a temporary directory and
+removes it on completion. No global installation is needed. Alternatively,
+set `REDIS_URL=redis://127.0.0.1:6379` to a **disposable** local Redis 7+
+instance (the test writes synthetic `session:*` keys). The `broker-redis` CI
+job provides an ephemeral Redis service. Tests exercise the production
+`@vercel/kv` SDK through a local REST bridge that executes commands on real
+Redis, covering SDK argument serialization and JSON result decoding as well
+as Lua behavior. The bridge is test-only; no hosted Redis credentials are used.
 
 ## Deploying
 

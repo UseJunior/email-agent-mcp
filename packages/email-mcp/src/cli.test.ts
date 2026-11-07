@@ -113,6 +113,7 @@ vi.mock('node:http', () => ({
         if (event === 'error') onceErrorHandler = callback;
         return server;
       }),
+      removeListener: vi.fn(() => server),
       listen: vi.fn((_port: number, _host: string, callback?: () => void) => {
         if (httpMockState.listenError) {
           queueMicrotask(() => {
@@ -129,12 +130,16 @@ vi.mock('node:http', () => ({
             const query = httpMockState.callbackQueryFactory?.();
             if (!query) return;
 
+            let finish: (() => void) | undefined;
             const response = {
               statusCode: 0,
               setHeader: vi.fn(),
+              writeHead: (status: number) => { response.statusCode = status; return response; },
+              once: (_event: string, callback: () => void) => { finish = callback; return response; },
               end: (body?: string) => {
                 httpMockState.lastResponseStatus = response.statusCode;
                 httpMockState.lastResponseBody = body ?? null;
+                finish?.();
               },
             };
 
@@ -164,6 +169,7 @@ vi.mock('@usejunior/provider-microsoft', async (importOriginal) => {
     constructor(_config: Record<string, unknown>, _mailboxName: string) {}
     async reconnect() { watcherMockState.auth.reconnectCalls++; }
     async getAccessToken() { return watcherMockState.auth.getAccessTokenResult; }
+    async disconnect() {}
     async tryReconnect() {
       watcherMockState.auth.tryReconnectCalls++;
       if (watcherMockState.auth.shutdownOnTryReconnect) {
@@ -2046,7 +2052,9 @@ describe('cli/Watcher Token Error Recovery', () => {
       expect(await runWatch({ command: 'watch', pollInterval: 2 })).toBe(0);
       expect(watcherMockState.pollCount).toBeGreaterThan(0);
       expect(fetchSpy).not.toHaveBeenCalled();
-      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('allowlist-blocked'));
+      // The runner no longer emits the old aggregate poll counter; startup
+      // still identifies the fail-closed policy, and the real wake path stays idle.
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Invalid receive allowlist'));
     } finally {
       fetchSpy.mockRestore();
       watcherMockState.newMessages = [];

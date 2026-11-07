@@ -8,6 +8,7 @@ import type {
   OutboundAttachment,
   SendResult,
   DraftResult,
+  DraftSnapshot,
   EmailError,
   ListOptions,
   ReplyOptions,
@@ -215,7 +216,7 @@ const CANONICAL_RULE_ACTIONS: Record<string, string> = {
 const FOLDER_SELECT = '$select=id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount,isHidden';
 
 export interface GraphApiClient {
-  get(url: string): Promise<{ value?: unknown[]; [key: string]: unknown }>;
+  get(url: string, signal?: AbortSignal): Promise<{ value?: unknown[]; [key: string]: unknown }>;
   post(url: string, body?: unknown): Promise<{ id?: string; [key: string]: unknown }>;
   patch(url: string, body: unknown): Promise<void>;
   delete(url: string): Promise<void>;
@@ -277,10 +278,10 @@ export interface DeltaResult {
  * Used when connected to a real mailbox via DelegatedAuthManager.
  */
 export class RealGraphApiClient implements GraphApiClient {
-  private getToken: () => Promise<string>;
-  private onAuthError?: () => Promise<boolean>;
+  private getToken: (signal?: AbortSignal) => Promise<string>;
+  private onAuthError?: (signal?: AbortSignal) => Promise<boolean>;
 
-  constructor(getToken: () => Promise<string>, onAuthError?: () => Promise<boolean>) {
+  constructor(getToken: (signal?: AbortSignal) => Promise<string>, onAuthError?: (signal?: AbortSignal) => Promise<boolean>) {
     this.getToken = getToken;
     this.onAuthError = onAuthError;
   }
@@ -302,11 +303,14 @@ export class RealGraphApiClient implements GraphApiClient {
 
   /** Fetch with automatic retry on 401 if onAuthError callback is provided. */
   private async fetchWithAuthRetry(url: string, init: RequestInit): Promise<Response> {
+    init.signal?.throwIfAborted();
     const resp = await fetch(url, init);
     if (resp.status === 401 && this.onAuthError) {
-      const ok = await this.onAuthError();
+      init.signal?.throwIfAborted();
+      const ok = await this.onAuthError(init.signal ?? undefined);
       if (ok) {
-        const newToken = await this.getToken();
+        const newToken = await this.getToken(init.signal ?? undefined);
+        init.signal?.throwIfAborted();
         const retryHeaders = { ...(init.headers as Record<string, string>), Authorization: `Bearer ${newToken}` };
         return fetch(url, { ...init, headers: retryHeaders });
       }
@@ -314,10 +318,13 @@ export class RealGraphApiClient implements GraphApiClient {
     return resp;
   }
 
-  async get(url: string): Promise<{ value?: unknown[]; [key: string]: unknown }> {
-    const token = await this.getToken();
+  async get(url: string, signal?: AbortSignal): Promise<{ value?: unknown[]; [key: string]: unknown }> {
+    signal?.throwIfAborted();
+    const token = await this.getToken(signal);
+    signal?.throwIfAborted();
     const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
     const resp = await this.fetchWithAuthRetry(fullUrl, {
+      ...(signal ? { signal } : {}),
       headers: { Authorization: `Bearer ${token}`, Prefer: IMMUTABLE_ID_PREFER },
     });
     if (!resp.ok) {
@@ -474,11 +481,66 @@ function graphDeliveryError(
   };
 }
 
+type FolderSnapshot = { folders: EmailFolder[]; truncated: boolean };
+
+type FolderCacheState<T> =
+  | { kind: 'empty' }
+  | { kind: 'loading'; generation: number; promise: Promise<T> }
+  | { kind: 'ready'; expiresAt: number; data: T };
+
+/** Process-local single-flight cache; invalidated completions must retry. */
+class FolderCache<T> {
+  private generation = 0;
+  private state: FolderCacheState<T> = { kind: 'empty' };
+
+  invalidate(): void {
+    this.generation += 1;
+    this.state = { kind: 'empty' };
+  }
+
+  async get(load: () => Promise<T>, complete: (data: T) => boolean, fresh = false): Promise<T> {
+    // Fresh validation bypasses a completed snapshot, but joins an active load.
+    // Only a completed structural mutation advances the generation.
+    if (fresh && this.state.kind === 'ready') this.state = { kind: 'empty' };
+    for (;;) {
+      if (this.state.kind === 'ready' && this.state.expiresAt > Date.now()) {
+        return this.state.data;
+      }
+      if (this.state.kind !== 'loading') {
+        // Defer the loader until the shared state is installed, including when
+        // a loader throws synchronously before making its first request.
+        this.state = {
+          kind: 'loading', generation: this.generation,
+          promise: Promise.resolve().then(load),
+        };
+      }
+      const loading = this.state;
+      let data: T;
+      try {
+        data = await loading.promise;
+      } catch (err) {
+        if (this.state === loading) this.state = { kind: 'empty' };
+        if (loading.generation !== this.generation) continue;
+        throw err;
+      }
+      // A structural mutation can finish while Graph is still traversing.
+      // Neither publish nor return that generation as the current snapshot.
+      if (loading.generation !== this.generation) continue;
+      if (this.state === loading) {
+        this.state = complete(data)
+          ? { kind: 'ready', expiresAt: Date.now() + FOLDER_CACHE_TTL_MS, data }
+          : { kind: 'empty' };
+      }
+      return data;
+    }
+  }
+}
+
 export class GraphEmailProvider implements EmailReader, EmailSender, EmailScheduledSender, EmailCategorizer, EmailAttachmentHandler, EmailFolderManager, EmailRuleManager {
   private client: GraphApiClient;
   private basePath: string;
-  private folderCache?: { expiresAt: number; folders: EmailFolder[] };
-  private systemFolderIdsCache?: { expiresAt: number; idsByName: Map<string, string> };
+  private folderCache = new FolderCache<FolderSnapshot>();
+  private systemFolderIdsCache = new FolderCache<Map<string, string>>();
 
   constructor(client: GraphApiClient, userId = 'me') {
     this.client = client;
@@ -862,12 +924,13 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
     // Resolve folder destinations to opaque ids and reject mail-discarding ones.
     // resolveRuleDestinationId does the destructive check on the canonical
     // resolved folder, closing alias/slash/case bypasses like `/trash/`.
-    for (const folderAction of ['moveToFolder', 'copyToFolder'] as const) {
+    // Start both validations together so move/copy share a fresh traversal.
+    await Promise.all((['moveToFolder', 'copyToFolder'] as const).map(async folderAction => {
       const destination = actions[folderAction];
       if (typeof destination === 'string') {
         actions[folderAction] = await this.resolveRuleDestinationId(destination);
       }
-    }
+    }));
 
     // Graph rejects sequence 0 (`MessageRuleValidationError` on Field 'Sequence'),
     // which is exactly the value it assigns when a POST omits sequence. The tool
@@ -1006,7 +1069,10 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
           : '';
         return {
           success: false,
-          error: { ...err.emailError, message: err.emailError.message + detail },
+          messageId: err.draftId,
+          error: { ...err.emailError,
+            code: err.emailError.code === 'DRAFT_PREPARATION_FAILED' ? 'REPLY_FAILED' : err.emailError.code,
+            message: err.emailError.message + detail },
         };
       }
       const message = err instanceof Error ? err.message : 'Failed to prepare reply';
@@ -1330,102 +1396,144 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
     );
     if (!draft.id) throw new Error(`${endpoint} did not return a draft id`);
 
-    let draftBody = draft.body as { contentType?: string; content?: string } | undefined;
-    let draftTo = (draft.toRecipients as GraphRecipient[] | undefined) ?? [];
-    let draftCc = (draft.ccRecipients as GraphRecipient[] | undefined) ?? [];
-    let draftBcc = (draft.bccRecipients as GraphRecipient[] | undefined) ?? [];
+    try {
+      let draftBody = draft.body as { contentType?: string; content?: string } | undefined;
+      let draftTo = (draft.toRecipients as GraphRecipient[] | undefined) ?? [];
+      let draftCc = (draft.ccRecipients as GraphRecipient[] | undefined) ?? [];
+      let draftBcc = (draft.bccRecipients as GraphRecipient[] | undefined) ?? [];
 
-    // Fallback GET when the POST response lacks a usable HTML body. Graph defaults
-    // to HTML on `Get message` so no Prefer header is needed.
-    if (typeof draftBody?.content !== 'string' || draftBody.contentType?.toLowerCase() !== 'html') {
-      const fetched = await this.client.get(`${this.basePath}/messages/${encodeGraphPathId(draft.id)}`);
-      draftBody = fetched.body as { contentType?: string; content?: string } | undefined;
-      draftTo = (fetched.toRecipients as GraphRecipient[] | undefined) ?? [];
-      draftCc = (fetched.ccRecipients as GraphRecipient[] | undefined) ?? [];
-      draftBcc = (fetched.bccRecipients as GraphRecipient[] | undefined) ?? [];
-    }
-
-    const draftContent = typeof draftBody?.content === 'string' ? draftBody.content : '';
-    const callerFragment = opts?.bodyHtml !== undefined
-      ? stripHtmlBodyWrappers(opts.bodyHtml)
-      : wrapPlainTextAsHtml(body);
-    const merged = mergeQuotedReplyHtml(draftContent, callerFragment);
-
-    const patch: Record<string, unknown> = {
-      body: { contentType: 'HTML', content: truncateBody(merged) },
-      singleValueExtendedProperties: [
-        { id: DRAFT_ORIGIN_PROPERTY, value: 'reply' },
-      ],
-    };
-
-    // `to` REPLACES Graph's auto-populated recipients; `cc`/`bcc` below MERGE
-    // with the thread's. The asymmetry is deliberate (issue #164): merging a
-    // caller-supplied To would leave the parent's sender on the To line, which
-    // is exactly the failure being fixed — a reply to your own sent message
-    // stays addressed to yourself. Absent `to`, the patch omits toRecipients
-    // entirely and Graph's derived To stands, unchanged from before.
-    // mergeRecipients([], …) is reused only for its EmailAddress →
-    // GraphRecipient conversion and case-insensitive dedupe.
-    const hasExplicitTo = Boolean(opts?.to && opts.to.length > 0);
-
-    // Anyone on `bcc` comes off the visible lines Graph derived, so a thread
-    // participant can be moved to Bcc without restating the audience (issue
-    // #214). Bcc wins over a derived To/Cc.
-    const hidden = new Set((opts?.bcc ?? []).map(a => a.email.toLowerCase()));
-    const isVisible = (r: GraphRecipient): boolean =>
-      !hidden.has(r.emailAddress?.address?.toLowerCase() ?? '');
-
-    if (hasExplicitTo) {
-      patch.toRecipients = mergeRecipients([], opts!.to!).filter(isVisible);
-    } else if (draftTo.some(r => !isVisible(r))) {
-      // Only touch toRecipients when something must come off it; otherwise
-      // Graph's derived To stands untouched, as before.
-      patch.toRecipients = draftTo.filter(isVisible);
-    }
-
-    // Replacing the To line must not silently drop anyone. On the reply-all
-    // endpoint Graph puts the parent's sender AND its other To participants on
-    // the draft's To; an explicit `to` displaces all of them, so demote the
-    // displaced ones to Cc — reply-all means the thread stays on the message,
-    // and `to` only decides who it is addressed to. This also brings Microsoft
-    // in line with Gmail, which already carries the thread's participants on Cc
-    // under reply-all. On the sender-only endpoint there is nothing to preserve:
-    // Graph's To is just the parent's sender, and replacing that is the point of
-    // a narrowed redirect.
-    const displacedTo = hasExplicitTo && opts?.replyAll !== false
-      ? draftTo.filter(r => {
-        const address = r.emailAddress?.address?.toLowerCase();
-        return address ? !opts!.to!.some(a => a.email.toLowerCase() === address) : false;
-      })
-      : [];
-
-    const ccMerged = mergeRecipients([...draftCc, ...displacedTo], opts?.cc ?? []).filter(isVisible);
-    if (ccMerged.length > 0 || draftCc.some(r => !isVisible(r))) patch.ccRecipients = ccMerged;
-
-    const bccMerged = mergeRecipients(draftBcc, opts?.bcc ?? []);
-    if (bccMerged.length > 0) patch.bccRecipients = bccMerged;
-
-    await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(draft.id)}`, patch);
-
-    // Two-step attachment upload: the draft now exists, so POST each file to
-    // its /attachments collection. A failure here leaves a created-but-
-    // incomplete draft — surface its id so the caller can inspect or retry.
-    if (opts?.attachments && opts.attachments.length > 0) {
-      try {
-        await this.postDraftAttachments(draft.id, opts.attachments);
-      } catch (err) {
-        throw new GraphAttachmentError(
-          {
-            code: 'ATTACHMENT_UPLOAD_FAILED',
-            message: `Reply draft was created but attaching files failed: ${err instanceof Error ? err.message : String(err)}`,
-            recoverable: false,
-          },
-          draft.id,
-        );
+      // Fallback GET when the POST response lacks a usable HTML body. Graph defaults
+      // to HTML on `Get message` so no Prefer header is needed.
+      if (typeof draftBody?.content !== 'string' || draftBody.contentType?.toLowerCase() !== 'html') {
+        const fetched = await this.client.get(`${this.basePath}/messages/${encodeGraphPathId(draft.id)}`);
+        draftBody = fetched.body as { contentType?: string; content?: string } | undefined;
+        draftTo = (fetched.toRecipients as GraphRecipient[] | undefined) ?? [];
+        draftCc = (fetched.ccRecipients as GraphRecipient[] | undefined) ?? [];
+        draftBcc = (fetched.bccRecipients as GraphRecipient[] | undefined) ?? [];
       }
-    }
 
-    return draft.id;
+      const draftContent = typeof draftBody?.content === 'string' ? draftBody.content : '';
+      const callerFragment = opts?.bodyHtml !== undefined
+        ? stripHtmlBodyWrappers(opts.bodyHtml)
+        : wrapPlainTextAsHtml(body);
+      const merged = mergeQuotedReplyHtml(draftContent, callerFragment);
+
+      const patch: Record<string, unknown> = {
+        body: { contentType: 'HTML', content: truncateBody(merged) },
+        singleValueExtendedProperties: [
+          { id: DRAFT_ORIGIN_PROPERTY, value: 'reply' },
+        ],
+      };
+
+      // `to` REPLACES Graph's auto-populated recipients; `cc`/`bcc` below MERGE
+      // with the thread's. The asymmetry is deliberate (issue #164): merging a
+      // caller-supplied To would leave the parent's sender on the To line, which
+      // is exactly the failure being fixed — a reply to your own sent message
+      // stays addressed to yourself. Absent `to`, the patch omits toRecipients
+      // entirely and Graph's derived To stands, unchanged from before.
+      // mergeRecipients([], …) is reused only for its EmailAddress →
+      // GraphRecipient conversion and case-insensitive dedupe.
+      const hasExplicitTo = Boolean(opts?.to && opts.to.length > 0);
+
+      // Anyone on `bcc` comes off the visible lines Graph derived, so a thread
+      // participant can be moved to Bcc without restating the audience (issue
+      // #214). Bcc wins over a derived To/Cc.
+      const hidden = new Set((opts?.bcc ?? []).map(a => a.email.toLowerCase()));
+      const isVisible = (r: GraphRecipient): boolean =>
+        !hidden.has(r.emailAddress?.address?.toLowerCase() ?? '');
+
+      if (hasExplicitTo) {
+        patch.toRecipients = mergeRecipients([], opts!.to!).filter(isVisible);
+      } else if (draftTo.some(r => !isVisible(r))) {
+        // Only touch toRecipients when something must come off it; otherwise
+        // Graph's derived To stands untouched, as before.
+        patch.toRecipients = draftTo.filter(isVisible);
+      }
+
+      // Replacing the To line must not silently drop anyone. On the reply-all
+      // endpoint Graph puts the parent's sender AND its other To participants on
+      // the draft's To; an explicit `to` displaces all of them, so demote the
+      // displaced ones to Cc — reply-all means the thread stays on the message,
+      // and `to` only decides who it is addressed to. This also brings Microsoft
+      // in line with Gmail, which already carries the thread's participants on Cc
+      // under reply-all. On the sender-only endpoint there is nothing to preserve:
+      // Graph's To is just the parent's sender, and replacing that is the point of
+      // a narrowed redirect.
+      const displacedTo = hasExplicitTo && opts?.replyAll !== false
+        ? draftTo.filter(r => {
+          const address = r.emailAddress?.address?.toLowerCase();
+          return address ? !opts!.to!.some(a => a.email.toLowerCase() === address) : false;
+        })
+        : [];
+
+      const ccMerged = mergeRecipients([...draftCc, ...displacedTo], opts?.cc ?? []).filter(isVisible);
+      if (ccMerged.length > 0 || draftCc.some(r => !isVisible(r))) patch.ccRecipients = ccMerged;
+
+      const bccMerged = mergeRecipients(draftBcc, opts?.bcc ?? []);
+      if (bccMerged.length > 0) patch.bccRecipients = bccMerged;
+
+      await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(draft.id)}`, patch);
+
+      // Two-step attachment upload: the draft now exists, so POST each file to
+      // its /attachments collection. A failure here leaves a created-but-
+      // incomplete draft — surface its id so the caller can inspect or retry.
+      if (opts?.attachments && opts.attachments.length > 0) {
+        try {
+          await this.postDraftAttachments(draft.id, opts.attachments);
+        } catch (err) {
+          throw new GraphAttachmentError(
+            {
+              code: 'ATTACHMENT_UPLOAD_FAILED',
+              message: `Reply draft was created but attaching files failed: ${err instanceof Error ? err.message : String(err)}`,
+              recoverable: false,
+            },
+            draft.id,
+          );
+        }
+      }
+
+      return draft.id;
+    } catch (err) {
+      if (err instanceof GraphAttachmentError) throw err;
+      throw new GraphAttachmentError({
+        code: 'DRAFT_PREPARATION_FAILED',
+        message: `Reply draft was created but preparation failed: ${err instanceof Error ? err.message : String(err)}`,
+        recoverable: false,
+      }, draft.id);
+    }
+  }
+
+  async getDraft(draftId: string): Promise<EmailMessage> {
+    // Preserve the existing expanded attachment/unique-body preview reader.
+    const message = await this.getMessage(draftId);
+    if (message.isDraft !== true) throw new MessageNotFoundError(`Editable draft ${draftId} not found`);
+    return message;
+  }
+
+  async getDraftSnapshot(draftId: string): Promise<DraftSnapshot> {
+    let metadata: GraphMessage;
+    try {
+      metadata = await this.client.get(
+        `${this.basePath}/messages/${encodeGraphPathId(draftId)}`
+        + `?$select=${MESSAGE_SELECT},conversationIndex,changeKey`
+        + `&$expand=singleValueExtendedProperties($filter=id eq '${DRAFT_ORIGIN_PROPERTY}' or id eq '${DEFERRED_SEND_PROPERTY}')`,
+      ) as unknown as GraphMessage;
+    } catch (err) {
+      if (err instanceof GraphApiError && err.status === 404) throw new MessageNotFoundError(`Draft ${draftId} not found`);
+      throw err;
+    }
+    const scheduledSendAt = findDeferredSendProperty(metadata)?.value;
+    const pending = scheduledSendAt !== undefined && Number.isFinite(Date.parse(scheduledSendAt))
+      && Date.parse(scheduledSendAt) > Date.now();
+    return {
+      draftId: metadata.id,
+      messageId: metadata.id,
+      message: mapGraphMessage(metadata),
+      revision: metadata.changeKey,
+      lifecycle: metadata.isDraft === true ? (pending ? 'deferred' : 'editable') : 'indeterminate',
+      origin: this.draftOrigin(metadata),
+      scheduledSendAt,
+    };
   }
 
   async getDraftReplyStatus(draftId: string): Promise<DraftReplyStatus> {
@@ -1444,8 +1552,10 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       throw err;
     }
 
-    if (metadata.isDraft !== true) return 'indeterminate';
+    return metadata.isDraft === true ? this.draftOrigin(metadata) : 'indeterminate';
+  }
 
+  private draftOrigin(metadata: GraphMessage): DraftReplyStatus {
     // Duplicate stamps are ambiguous: taking the first match would make the
     // answer depend on the order Graph returns the collection. Only a single,
     // unanimous stamp is authoritative.
@@ -1492,7 +1602,15 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       }
     }
 
-    await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(draftId)}`, patch);
+    try {
+      await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(draftId)}`, patch);
+    } catch (err) {
+      return { success: false, draftId, error: {
+        code: 'UPDATE_DRAFT_FAILED',
+        message: err instanceof Error ? err.message : String(err),
+        recoverable: false,
+      } };
+    }
 
     if (msg.attachments !== undefined) {
       try {
@@ -1524,16 +1642,50 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
   }
 
   /**
-   * Get new inbox messages received after a given timestamp.
-   * Uses simple $filter=receivedDateTime gt {since} — instant, no full-inbox sync.
+   * Retrieve a complete inclusive timestamp window; partial results never escape.
+   * The optional end preserves existing callers while bounding every invocation.
    * This is the primary method for the watcher polling loop.
    */
-  async getNewMessages(since: string): Promise<EmailMessage[]> {
-    const filter = `receivedDateTime ge ${since}`;
+  async getNewMessages(since: string, end = new Date().toISOString(), signal?: AbortSignal): Promise<EmailMessage[]> {
+    if (!Number.isFinite(Date.parse(since)) || !Number.isFinite(Date.parse(end)) || Date.parse(since) > Date.parse(end)) {
+      throw new Error('Invalid watcher timestamp window');
+    }
+    const filter = `receivedDateTime ge ${since} and receivedDateTime le ${end}`;
     const params = `$filter=${encodeURIComponent(filter)}&$orderby=receivedDateTime desc&$top=50&${DELTA_SELECT}`;
-    const url = `${this.basePath}/mailFolders/Inbox/messages?${params}`;
-    const response = await this.client.get(url);
-    return ((response.value ?? []) as GraphMessage[]).map(mapGraphMessage);
+    let url: string | undefined = `${this.basePath}/mailFolders/Inbox/messages?${params}`;
+    const seen = new Set<string>();
+    const messages: EmailMessage[] = [];
+    while (url) {
+      signal?.throwIfAborted();
+      if (seen.has(url) || seen.size >= 1000) throw new Error('Watcher pagination repeated a link or exceeded 1000 pages');
+      seen.add(url);
+      const response = await this.client.get(url, signal);
+      signal?.throwIfAborted();
+      if (!Array.isArray(response.value)) throw new Error('Invalid watcher message page');
+      for (const raw of response.value) {
+        // The general mapper supplies defaults for other actions. Watcher
+        // windows must validate source identity/time before those defaults.
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+          throw new Error('Invalid watcher message identity or timestamp');
+        }
+        const message = raw as Record<string, unknown>;
+        if (typeof message.id !== 'string' || !message.id.trim()
+          || !Object.hasOwn(message, 'receivedDateTime')
+          || typeof message.receivedDateTime !== 'string' || !message.receivedDateTime.trim()
+          || !Number.isFinite(Date.parse(message.receivedDateTime))) {
+          throw new Error('Invalid watcher message identity or timestamp');
+        }
+        messages.push(mapGraphMessage(raw as GraphMessage));
+      }
+      const next = response['@odata.nextLink'];
+      if (next !== undefined && (typeof next !== 'string' || !next)) throw new Error('Invalid watcher nextLink');
+      url = next as string | undefined;
+    }
+    return messages.filter(message => {
+      const received = Date.parse(message.receivedAt);
+      if (!Number.isFinite(received)) throw new Error('Invalid watcher message timestamp');
+      return received >= Date.parse(since) && received <= Date.parse(end);
+    });
   }
 
   /**
@@ -1547,9 +1699,14 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
 
     const allMessages: EmailMessage[] = [];
     let finalDeltaLink = '';
+    const visited = new Set<string>();
 
     // Page through all results (follow @odata.nextLink until @odata.deltaLink)
     while (url) {
+      if (visited.has(url) || visited.size >= 100) {
+        throw new ProviderError('PAGINATION_LIMIT', 'Delta pagination exceeded its safety limit', 'microsoft', false);
+      }
+      visited.add(url);
       const response = await this.client.get(url) as DeltaPageResponse;
       const items = response.value ?? [];
 
@@ -1567,14 +1724,13 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
         // More pages to fetch
         url = response['@odata.nextLink'];
       } else {
-        // No nextLink and no deltaLink — shouldn't happen, but break to avoid infinite loop
-        break;
+        throw new ProviderError('INVALID_DELTA_RESPONSE', 'Delta response omitted the terminal cursor', 'microsoft', false);
       }
     }
 
     return {
       messages: allMessages,
-      nextDeltaLink: finalDeltaLink || url,
+      nextDeltaLink: finalDeltaLink,
     };
   }
 
@@ -1593,25 +1749,18 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       : [];
   }
 
-  private async getFolderSnapshot(): Promise<{ folders: EmailFolder[]; truncated: boolean }> {
-    const now = Date.now();
-    if (this.folderCache && this.folderCache.expiresAt > now) {
-      return { folders: this.folderCache.folders, truncated: false };
-    }
-
-    const budget = { remaining: MAX_FOLDER_REQUESTS_PER_SNAPSHOT, truncated: false };
-    const folders = await this.fetchFolderCollection(
-      `${this.basePath}/mailFolders?${FOLDER_SELECT}&$top=100&includeHiddenFolders=true`,
-      '',
-      new Set<string>(),
-      budget,
-    );
-    // Never cache a partial tree — a truncated snapshot would otherwise make
-    // "folder not found" sticky for 60s on a folder that does exist.
-    if (!budget.truncated) {
-      this.folderCache = { expiresAt: now + FOLDER_CACHE_TTL_MS, folders };
-    }
-    return { folders, truncated: budget.truncated };
+  private async getFolderSnapshot(fresh = false): Promise<FolderSnapshot> {
+    return this.folderCache.get(async () => {
+      const budget = { remaining: MAX_FOLDER_REQUESTS_PER_SNAPSHOT, truncated: false };
+      const folders = await this.fetchFolderCollection(
+        `${this.basePath}/mailFolders?${FOLDER_SELECT}&$top=100&includeHiddenFolders=true`,
+        '',
+        new Set<string>(),
+        budget,
+      );
+      // A partial tree cannot establish absence or uniqueness.
+      return { folders, truncated: budget.truncated };
+    }, snapshot => !snapshot.truncated, fresh);
   }
 
   private async fetchFolderCollection(
@@ -1664,13 +1813,10 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
   /**
    * Resolve a folder name/path/id to a Graph folder id.
    *
-   * `forWrite` is reserved for operations that MUTATE the folder tree
-   * (createFolder's parent, deleteFolder's target): these are low-frequency and
-   * high-harm — deleting or nesting under a stale-cached id is unrecoverable —
-   * so they re-fetch to get a current path→id mapping. Message moves and rule
-   * destinations deliberately do NOT pass forWrite: they don't change the tree,
-   * they run in high-volume loops, and their worst-case staleness (the 60s
-   * rename race) is the same recoverable risk we already accept for reads.
+   * Structural writes and persistent rule destinations bypass ready snapshots
+   * for fresh path→id validation, sharing any active traversal. Message moves
+   * retain the ordinary 60s cache. Validation does not invalidate system IDs or
+   * advance generations; successful structural mutations invalidate both caches.
    */
   private async resolveFolderId(folder: string, forWrite = false): Promise<string> {
     const trimmed = folder.trim();
@@ -1679,8 +1825,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       ?? (SYSTEM_FOLDER_NAME_SET.has(normalized) ? normalized : undefined);
     if (wellKnown) return wellKnown;
 
-    if (forWrite) this.invalidateFolderCaches();
-    const { folders, truncated } = await this.getFolderSnapshot();
+    const { folders, truncated } = await this.getFolderSnapshot(forWrite);
 
     // Exact id match is safe even against a truncated tree — ids are globally
     // unique, so a visible match is THE match regardless of unseen folders.
@@ -1812,11 +1957,10 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
 
   /** Well-known-name -> resolved id for every provisioned system folder. */
   private async getSystemFolderIdMap(): Promise<Map<string, string>> {
-    const now = Date.now();
-    if (this.systemFolderIdsCache && this.systemFolderIdsCache.expiresAt > now) {
-      return this.systemFolderIdsCache.idsByName;
-    }
+    return this.systemFolderIdsCache.get(() => this.fetchSystemFolderIdMap(), () => true);
+  }
 
+  private async fetchSystemFolderIdMap(): Promise<Map<string, string>> {
     const idsByName = new Map<string, string>();
     for (const name of SYSTEM_FOLDER_NAMES) {
       try {
@@ -1831,7 +1975,6 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       }
     }
 
-    this.systemFolderIdsCache = { expiresAt: now + FOLDER_CACHE_TTL_MS, idsByName };
     return idsByName;
   }
 
@@ -1856,8 +1999,8 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
   }
 
   private invalidateFolderCaches(): void {
-    this.folderCache = undefined;
-    this.systemFolderIdsCache = undefined;
+    this.folderCache.invalidate();
+    this.systemFolderIdsCache.invalidate();
   }
 }
 
@@ -1925,6 +2068,7 @@ function scheduledSendNotFoundError(): ProviderError {
 
 interface GraphMessage {
   id: string;
+  changeKey?: string;
   subject: string;
   from?: { emailAddress: { address: string; name?: string } };
   toRecipients?: Array<{ emailAddress: { address: string; name?: string } }>;

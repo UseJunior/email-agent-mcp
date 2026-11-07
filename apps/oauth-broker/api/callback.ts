@@ -31,6 +31,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       dur_ms: Date.now() - startedAt,
     });
   };
+  const lostTransition = (): void => {
+    logOnce(410, 'invalid_state');
+    renderTerminalPage(res, 410, 'This authentication session has expired or already completed. Re-run configure.');
+  };
 
   try {
     if (req.method !== 'GET') {
@@ -55,14 +59,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // — this is what gives the CLI a distinguishable signal beyond "still
     // pending".
     if (error) {
-      await getStore().setFailed(state, 'denied', `User cancelled or denied: ${error}`);
+      if (!await getStore().setFailed(state, 'denied', `User cancelled or denied: ${error}`)) {
+        lostTransition();
+        return;
+      }
       logOnce(400, 'denied');
       renderTerminalPage(res, 400, `Authentication cancelled or denied: ${error}`);
       return;
     }
 
     if (!code) {
-      await getStore().setFailed(state, 'exchange_failed', 'Google callback did not include a code.');
+      if (!await getStore().setFailed(state, 'exchange_failed', 'Google callback did not include a code.')) {
+        lostTransition();
+        return;
+      }
       logOnce(400, 'exchange_failed');
       renderTerminalPage(res, 400, 'Invalid OAuth callback: missing code.');
       return;
@@ -80,15 +90,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       if (!advanced) {
         // Session was missing, expired, or already advanced — nothing the
         // user can do at this point.
-        logOnce(410, 'invalid_state');
-        renderTerminalPage(res, 410, 'This authentication session has expired. Re-run configure.');
+        lostTransition();
         return;
       }
       logOnce(200, 'ready');
       renderTerminalPage(res, 200, 'Authentication complete. You can return to your terminal.');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'token exchange failed';
-      await getStore().setFailed(state, 'exchange_failed', message);
+      if (!await getStore().setFailed(state, 'exchange_failed', message)) {
+        lostTransition();
+        return;
+      }
       logOnce(502, 'exchange_failed');
       renderTerminalPage(res, 502, `Authentication failed: ${message}`);
     }

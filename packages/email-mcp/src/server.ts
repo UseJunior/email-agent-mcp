@@ -544,6 +544,7 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
       {
         listConfiguredGmailMailboxes,
         GmailAuthManager,
+        createGmailMetadataWriter,
         GmailEmailProvider,
         GoogleapisGmailClient,
         formatGmailAuthError,
@@ -621,11 +622,13 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
           metadata.source === 'broker'
             ? {
                 brokerUrl: metadata.brokerUrl,
+                metadataWriter: createGmailMetadataWriter(metadata),
                 mailboxName: mailboxRef,
                 lastInteractiveAuthAt: metadata.lastInteractiveAuthAt,
               }
             : {
                 clientId: metadata.clientId,
+                metadataWriter: createGmailMetadataWriter(metadata),
                 clientSecret: metadata.clientSecret,
                 redirectUri: metadata.redirectUri,
                 mailboxName: mailboxRef,

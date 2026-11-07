@@ -10,7 +10,7 @@
 // In both modes API calls go directly from the user's machine to Gmail
 // with the locally-held access token. Email content never reaches the
 // broker.
-import { CodeChallengeMethod, OAuth2Client } from 'google-auth-library';
+import { CodeChallengeMethod, OAuth2Client, type Credentials } from 'google-auth-library';
 import { createHash, randomBytes } from 'node:crypto';
 import type { AuthManager } from '@usejunior/email-core';
 
@@ -27,6 +27,8 @@ export interface GmailAuthConfig {
 
   mailboxName?: string;
   lastInteractiveAuthAt?: string;
+  /** Called in rotation order. Failure warns but never fails an API operation. */
+  metadataWriter?: (refreshToken: string, previousRefreshToken: string) => Promise<void>;
 }
 
 export interface GmailAuthUrlOptions {
@@ -156,17 +158,32 @@ interface BrokerTokenResponse {
   token_type?: string;
 }
 
+type GmailAuthState =
+  | { kind: 'disconnected' | 'connecting' | 'disconnecting' }
+  | { kind: 'reauth_required'; reason: unknown }
+  | { kind: 'connected'; session: Credentials }
+  | { kind: 'refreshing'; session: Credentials; promise: Promise<void> };
+
+// All library automatic refreshes join the manager's explicit single flight.
+// The transport client used by refresh() is separate, avoiding recursion.
+class ManagedOAuth2Client extends OAuth2Client {
+  managedRefresh?: () => Promise<Credentials>;
+  protected override async refreshToken(refreshToken?: string | null) {
+    if (!this.managedRefresh) return super.refreshToken(refreshToken);
+    return { tokens: await this.managedRefresh(), res: null };
+  }
+}
+
 export class GmailAuthManager implements AuthManager {
   private oauth2Client: OAuth2Client;
-  private accessToken?: string;
-  private refreshToken?: string;
-  private expiresAt?: number;
+  private state: GmailAuthState = { kind: 'disconnected' };
+  private generation = 0;
+  private persistence: Promise<void> = Promise.resolve();
+  private persistenceWarning?: string;
   private readonly mailboxName: string;
   private readonly lastInteractiveAuthAt?: string;
   private readonly mode: GmailAuthMode;
   private readonly brokerUrl?: string;
-  private needsReauth = false;
-  private reconnectPromise: Promise<boolean> | null = null;
 
   constructor(private readonly _config: GmailAuthConfig) {
     if (_config.brokerUrl && _config.clientSecret) {
@@ -183,32 +200,7 @@ export class GmailAuthManager implements AuthManager {
     this.mode = _config.brokerUrl ? 'broker' : 'byok';
     this.brokerUrl = _config.brokerUrl?.replace(/\/$/, '');
 
-    this.oauth2Client = new OAuth2Client(
-      _config.clientId,
-      _config.clientSecret,
-      _config.redirectUri ?? 'urn:ietf:wg:oauth:2.0:oob',
-    );
-
-    if (this.mode === 'broker') {
-      // Route refresh through the broker — never hit Google's token endpoint
-      // without the client_secret. google-auth-library 8.9+ exposes
-      // `refreshHandler` for exactly this. The library only consults the
-      // handler when (a) refresh_token is absent from credentials AND
-      // (b) the access token is missing/expired, so the rest of the file
-      // takes care to keep refresh_token off `oauth2Client.credentials` and
-      // to always populate `expiry_date`.
-      this.oauth2Client.refreshHandler = async () => {
-        await this.brokerRefresh();
-        return {
-          access_token: this.accessToken ?? '',
-          expiry_date: this.expiresAt ?? Date.now() + 3600_000,
-        };
-      };
-      // If a Gmail API call still comes back 401 (e.g. clock skew lets a
-      // pre-emptive refresh through but Google rejects), let the library
-      // re-enter the handler instead of giving up.
-      this.oauth2Client.forceRefreshOnFailure = true;
-    }
+    this.oauth2Client = this.createClient();
 
     this.mailboxName = _config.mailboxName ?? 'gmail';
     this.lastInteractiveAuthAt = _config.lastInteractiveAuthAt;
@@ -217,6 +209,77 @@ export class GmailAuthManager implements AuthManager {
   get clientId(): string | undefined { return this._config.clientId; }
   get authMode(): GmailAuthMode { return this.mode; }
   get broker(): string | undefined { return this.brokerUrl; }
+
+  private get session(): Credentials | undefined {
+    return this.state.kind === 'connected' || this.state.kind === 'refreshing'
+      ? this.state.session : undefined;
+  }
+
+  private createClient(): OAuth2Client {
+    const generation = this.generation;
+    const client = new ManagedOAuth2Client(
+      this._config.clientId, this._config.clientSecret,
+      this._config.redirectUri ?? 'urn:ietf:wg:oauth:2.0:oob',
+    );
+    const refresh = async () => {
+      this.assertGeneration(generation);
+      await this.refresh();
+      this.assertGeneration(generation);
+      return this.clientCredentials(this.session!);
+    };
+    client.managedRefresh = refresh;
+    if (this.mode === 'broker') {
+      client.refreshHandler = async () => {
+        const tokens = await refresh();
+        if (!tokens.access_token) throw new Error('No Gmail access token available');
+        return { access_token: tokens.access_token, expiry_date: tokens.expiry_date ?? Date.now() + 3600000 };
+      };
+      client.forceRefreshOnFailure = true;
+    }
+    client.on?.('tokens', tokens => {
+      if (generation === this.generation && this.session) {
+        this.publish(tokens, generation);
+      }
+    });
+    return client;
+  }
+
+  private assertGeneration(generation: number): void {
+    if (generation !== this.generation) throw new Error('Gmail authentication operation superseded');
+  }
+
+  private clientCredentials(tokens: Credentials): Credentials {
+    if (this.mode === 'broker') {
+      return { access_token: tokens.access_token, expiry_date: tokens.expiry_date };
+    }
+    return { ...tokens };
+  }
+
+  private publish(tokens: Credentials, generation: number): void {
+    this.assertGeneration(generation);
+    const previous = this.session;
+    const session = { ...previous, ...tokens,
+      refresh_token: tokens.refresh_token ?? previous?.refresh_token };
+    if (this.state.kind === 'refreshing') this.state.session = session;
+    else this.state = { kind: 'connected', session };
+    this.oauth2Client.setCredentials(this.clientCredentials(session));
+    if (previous?.refresh_token && session.refresh_token && previous.refresh_token !== session.refresh_token) {
+      const next = session.refresh_token;
+      const old = previous.refresh_token;
+      this.persistence = this.persistence.then(async () => {
+        if (generation !== this.generation) return;
+        try {
+          await this._config.metadataWriter?.(next, old);
+          if (generation === this.generation) this.persistenceWarning = undefined;
+        } catch {
+          if (generation !== this.generation) return;
+          // Do not propagate this into delivery retry paths or log credentials.
+          this.persistenceWarning = `Gmail token rotation could not be saved for mailbox "${this.mailboxName}". Runtime authentication remains available; reconfigure before restarting.`;
+          console.error(this.persistenceWarning);
+        }
+      });
+    }
+  }
 
   /** Returns the underlying OAuth2Client for use with Gmail API. */
   getOAuth2Client(): OAuth2Client { return this.oauth2Client; }
@@ -260,24 +323,12 @@ export class GmailAuthManager implements AuthManager {
       expiryDate = Date.now() + ttlMs;
     }
 
-    if (this.mode === 'broker') {
-      // Only the access_token (+ expiry) goes into the library. The refresh
-      // token is held by us and only ever sent to the broker.
-      this.oauth2Client.setCredentials(
-        accessToken ? { access_token: accessToken, expiry_date: expiryDate } : {},
-      );
-    } else {
-      this.oauth2Client.setCredentials({
-        access_token: accessToken,
-        refresh_token: refreshTokenVal,
-        expiry_date: expiryDate,
-      });
-    }
-
-    this.accessToken = accessToken;
-    this.refreshToken = refreshTokenVal;
-    this.expiresAt = expiryDate;
-    this.needsReauth = false;
+    ++this.generation;
+    this.persistenceWarning = undefined;
+    this.oauth2Client.setCredentials({});
+    this.state = { kind: 'connecting' };
+    this.oauth2Client = this.createClient();
+    this.publish({ access_token: accessToken, refresh_token: refreshTokenVal, expiry_date: expiryDate }, this.generation);
   }
 
   /**
@@ -309,17 +360,29 @@ export class GmailAuthManager implements AuthManager {
     if (this.mode === 'broker') {
       throw new Error('exchangeCode is only available in byok mode. Use pickUpTicket.');
     }
-    const { tokens } = await this.oauth2Client.getToken({
-      code,
-      codeVerifier: options.codeVerifier,
-      redirect_uri: options.redirectUri ?? this._config.redirectUri,
-    });
+    const generation = ++this.generation;
+    this.persistenceWarning = undefined;
+    this.state = { kind: 'connecting' };
+    const exchangeClient = this.oauth2Client;
+    this.oauth2Client.setCredentials({});
+    this.oauth2Client = this.createClient();
+    try {
+      const { tokens } = await exchangeClient.getToken({
+        code,
+        codeVerifier: options.codeVerifier,
+        redirect_uri: options.redirectUri ?? this._config.redirectUri,
+      });
+      this.publish({ ...tokens, expiry_date: tokens.expiry_date ?? Date.now() + 3600000 }, generation);
+    } catch (error) {
+      this.connectionFailed(generation, error);
+      throw error;
+    }
+  }
 
-    this.oauth2Client.setCredentials(tokens);
-    this.accessToken = tokens.access_token ?? undefined;
-    this.refreshToken = tokens.refresh_token ?? this.refreshToken;
-    this.expiresAt = tokens.expiry_date ?? Date.now() + 3600000;
-    this.needsReauth = false;
+  private connectionFailed(generation: number, reason: unknown): void {
+    if (generation !== this.generation) return;
+    this.state = isGmailReauthError(reason) ? { kind: 'reauth_required', reason } : { kind: 'disconnected' };
+    this.oauth2Client.setCredentials({});
   }
 
   /**
@@ -383,89 +446,130 @@ export class GmailAuthManager implements AuthManager {
     if (this.mode !== 'broker') {
       throw new Error('pickUpTicket is only available in broker mode.');
     }
+    const generation = ++this.generation;
+    this.persistenceWarning = undefined;
+    this.state = { kind: 'connecting' };
+    this.oauth2Client.setCredentials({});
+    this.oauth2Client = this.createClient();
     const interval = Math.max(500, opts.intervalMs ?? 1500);
     const deadline = Date.now() + Math.max(interval, opts.timeoutMs ?? 5 * 60 * 1000);
     const url = `${this.brokerUrl}/api/tickets/claim`;
 
-    while (Date.now() < deadline) {
-      if (opts.signal?.aborted) throw new Error('pickUpTicket aborted');
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session_id: session.sessionId,
-          pickup_secret: session.pickupSecret,
-        }),
-        signal: opts.signal,
-      });
+    try {
+      while (Date.now() < deadline) {
+        this.assertGeneration(generation);
+        if (opts.signal?.aborted) throw new Error('pickUpTicket aborted');
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: session.sessionId,
+            pickup_secret: session.pickupSecret,
+          }),
+          signal: opts.signal,
+        });
+        this.assertGeneration(generation);
 
-      if (res.status === 200) {
-        const tokens = (await res.json()) as BrokerTokenResponse;
-        await this.connect(
-          {
-            access_token: tokens.access_token,
-            ...(tokens.refresh_token ? { refresh_token: tokens.refresh_token } : {}),
-          },
-          typeof tokens.expires_in === 'number' ? { expiresInSeconds: tokens.expires_in } : {},
-        );
-        return;
-      }
+        if (res.status === 200) {
+          const tokens = (await res.json()) as BrokerTokenResponse;
+          this.assertGeneration(generation);
+          await this.connect(
+            {
+              access_token: tokens.access_token,
+              ...(tokens.refresh_token ? { refresh_token: tokens.refresh_token } : {}),
+            },
+            typeof tokens.expires_in === 'number' ? { expiresInSeconds: tokens.expires_in } : {},
+          );
+          return;
+        }
 
-      if (res.status === 202) {
-        await sleep(interval, opts.signal);
-        continue;
-      }
+        if (res.status === 202) {
+          await sleep(interval, opts.signal);
+          continue;
+        }
 
-      // Terminal: surface a useful message instead of generic timeout text.
-      const body = await safeReadText(res);
-      let parsed: { status?: string; error?: string; error_description?: string } = {};
-      try { parsed = JSON.parse(body) as typeof parsed; } catch { /* ignore */ }
+        // Terminal: surface a useful message instead of generic timeout text.
+        const body = await safeReadText(res);
+        let parsed: { status?: string; error?: string; error_description?: string } = {};
+        try { parsed = JSON.parse(body) as typeof parsed; } catch { /* ignore */ }
 
-      if (res.status === 403) {
-        throw new Error('Broker rejected the pickup secret — auth was likely intercepted. Re-run configure.');
+        if (res.status === 403) {
+          throw new Error('Broker rejected the pickup secret — auth was likely intercepted. Re-run configure.');
+        }
+        if (res.status === 410) {
+          const reason = parsed.status ?? 'expired';
+          const detail = parsed.error_description ? ` (${parsed.error_description})` : '';
+          throw new Error(`Broker session ${reason}${detail}. Re-run configure.`);
+        }
+        if (res.status === 404) {
+          throw new Error('Broker has no record of this session. Re-run configure.');
+        }
+        throw new Error(`Broker ticket claim failed (${res.status}): ${body}`);
       }
-      if (res.status === 410) {
-        const reason = parsed.status ?? 'expired';
-        const detail = parsed.error_description ? ` (${parsed.error_description})` : '';
-        throw new Error(`Broker session ${reason}${detail}. Re-run configure.`);
-      }
-      if (res.status === 404) {
-        throw new Error('Broker has no record of this session. Re-run configure.');
-      }
-      throw new Error(`Broker ticket claim failed (${res.status}): ${body}`);
+      throw new Error('Broker ticket pickup timed out — user did not complete consent.');
+    } catch (error) {
+      this.connectionFailed(generation, error);
+      throw error;
     }
-    throw new Error('Broker ticket pickup timed out — user did not complete consent.');
   }
 
   async refresh(): Promise<void> {
-    if (!this.refreshToken) {
-      this.needsReauth = true;
-      throw new Error('No refresh token');
-    }
-
-    try {
-      if (this.mode === 'broker') {
-        await this.brokerRefresh();
-      } else {
-        const { credentials } = await this.oauth2Client.refreshAccessToken();
-        this.accessToken = credentials.access_token ?? undefined;
-        this.expiresAt = credentials.expiry_date ?? Date.now() + 3600000;
-        this.needsReauth = false;
+    if (this.state.kind === 'refreshing') return this.state.promise;
+    const session = this.session;
+    if (!session?.refresh_token) {
+      const reason = new Error('No refresh token');
+      if (this.state.kind === 'connected') {
+        this.state = { kind: 'reauth_required', reason };
+        this.oauth2Client.setCredentials({});
       }
-    } catch (err) {
-      if (isGmailReauthError(err)) {
-        this.needsReauth = true;
-      }
-      throw err;
+      throw reason;
     }
+    const generation = this.generation;
+    // Defer the work until the state owns the promise, even with sync mocks.
+    const promise = Promise.resolve().then(async () => {
+      try {
+        this.assertGeneration(generation);
+        let tokens: Credentials;
+        if (this.mode === 'broker') {
+          tokens = await this.brokerRefresh(session.refresh_token!);
+        } else {
+          const transport = new OAuth2Client(this._config.clientId, this._config.clientSecret);
+          transport.setCredentials({ ...session });
+          let eventTokens: Credentials = {};
+          transport.on?.('tokens', update => {
+            if (generation !== this.generation) return;
+            eventTokens = { ...eventTokens, ...update };
+            this.publish(update, generation);
+          });
+          const result = await transport.refreshAccessToken();
+          // The library may put the *old* refresh_token back in its result.
+          tokens = { ...result.credentials, ...eventTokens };
+        }
+        this.publish({ ...tokens, expiry_date: tokens.expiry_date ?? Date.now() + 3600000 }, generation);
+        await this.persistence;
+        this.assertGeneration(generation);
+        this.state = { kind: 'connected', session: this.session! };
+      } catch (err) {
+        if (generation === this.generation) {
+          if (isGmailReauthError(err)) {
+            this.state = { kind: 'reauth_required', reason: err };
+            this.oauth2Client.setCredentials({});
+          } else if (this.state.kind === 'refreshing') {
+            this.state = { kind: 'connected', session: this.state.session };
+          }
+        }
+        throw err;
+      }
+    });
+    this.state = { kind: 'refreshing', session, promise };
+    return promise;
   }
 
-  private async brokerRefresh(): Promise<void> {
-    if (!this.refreshToken) throw new Error('No refresh token');
+  private async brokerRefresh(refreshToken: string): Promise<Credentials> {
     const res = await fetch(`${this.brokerUrl}/api/refresh`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refresh_token: this.refreshToken }),
+      body: JSON.stringify({ refresh_token: refreshToken }),
     });
     if (!res.ok) {
       const body = await safeReadText(res);
@@ -475,79 +579,76 @@ export class GmailAuthManager implements AuthManager {
       throw err;
     }
     const tokens = (await res.json()) as BrokerTokenResponse;
-    this.accessToken = tokens.access_token;
-    if (tokens.refresh_token) this.refreshToken = tokens.refresh_token;
-    this.expiresAt = Date.now() + (tokens.expires_in ?? 3600) * 1000;
-    // Broker mode: keep refresh_token off the OAuth2Client. Setting it would
-    // re-enable refreshAccessTokenAsync() and bypass our refreshHandler on 401.
-    this.oauth2Client.setCredentials({
-      access_token: this.accessToken,
-      expiry_date: this.expiresAt,
-    });
-    this.needsReauth = false;
+    return { access_token: tokens.access_token, refresh_token: tokens.refresh_token,
+      expiry_date: Date.now() + (tokens.expires_in ?? 3600) * 1000 };
   }
 
   async disconnect(): Promise<void> {
-    if (this.mode === 'byok' && this.accessToken) {
+    const accessToken = this.session?.access_token;
+    const client = this.oauth2Client;
+    const generation = ++this.generation;
+    this.persistenceWarning = undefined;
+    this.state = { kind: 'disconnecting' };
+    client.setCredentials({});
+    this.oauth2Client = this.createClient();
+    if (this.mode === 'byok' && accessToken) {
       try {
-        await this.oauth2Client.revokeToken(this.accessToken);
+        await client.revokeToken(accessToken);
       } catch {
         // Best-effort revocation; token may already be invalid.
       }
     }
     // Broker mode: revocation needs Google's revoke endpoint, which still
     // works with just the access token (no client_secret needed).
-    if (this.mode === 'broker' && this.accessToken) {
+    if (this.mode === 'broker' && accessToken) {
       try {
         await fetch(
-          `https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(this.accessToken)}`,
+          `https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(accessToken)}`,
           { method: 'POST' },
         );
       } catch {
         // Best-effort.
       }
     }
-    this.oauth2Client.setCredentials({});
-    this.accessToken = undefined;
-    this.refreshToken = undefined;
-    this.expiresAt = undefined;
-    this.needsReauth = false;
-    this.reconnectPromise = null;
+    if (generation === this.generation) this.state = { kind: 'disconnected' };
   }
 
   isTokenExpired(): boolean {
-    if (this.needsReauth) return true;
-    if (!this.expiresAt) return true;
-    return Date.now() >= this.expiresAt;
+    const session = this.session;
+    return !session?.access_token || !session.expiry_date || Date.now() >= session.expiry_date;
   }
 
   getAccessToken(): string | undefined {
-    return this.accessToken;
+    return this.isTokenExpired() ? undefined : this.session?.access_token ?? undefined;
   }
 
   getRefreshToken(): string | undefined {
-    return this.refreshToken;
+    return this.session?.refresh_token ?? undefined;
+  }
+
+  /** Async valid-token acquisition; getAccessToken remains synchronous. */
+  async getValidAccessToken(): Promise<string> {
+    if (this.isTokenExpired()) await this.refresh();
+    const token = this.getAccessToken();
+    if (!token) throw new Error('No Gmail access token available');
+    return token;
   }
 
   async tryReconnect(): Promise<boolean> {
-    if (this.reconnectPromise) return this.reconnectPromise;
-    this.reconnectPromise = (async () => {
-      try {
-        await this.refresh();
-        return true;
-      } catch {
-        return false;
-      } finally {
-        this.reconnectPromise = null;
-      }
-    })();
-    return this.reconnectPromise;
+    try {
+      await this.refresh();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   getTokenHealthWarning(): string | undefined {
-    if (this.needsReauth) {
+    if (this.state.kind === 'reauth_required') {
       return formatGmailAuthError(new Error('invalid_grant'), this.mailboxName);
     }
+
+    if (this.persistenceWarning) return this.persistenceWarning;
 
     if (this.lastInteractiveAuthAt) {
       const daysSinceAuth = (Date.now() - new Date(this.lastInteractiveAuthAt).getTime()) / (1000 * 60 * 60 * 24);
@@ -560,15 +661,7 @@ export class GmailAuthManager implements AuthManager {
   }
 
   async fetchProfile(): Promise<GmailProfile> {
-    let accessToken = this.getAccessToken();
-    if (!accessToken) {
-      await this.refresh();
-      accessToken = this.getAccessToken();
-    }
-
-    if (!accessToken) {
-      throw new Error('No Gmail access token available');
-    }
+    const accessToken = await this.getValidAccessToken();
 
     const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
       headers: {

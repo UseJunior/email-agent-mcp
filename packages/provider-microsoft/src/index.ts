@@ -6,6 +6,8 @@ export {
   handleValidationToken,
   isDuplicateNotification,
   checkSubscriptionExists,
+  checkSubscriptionStatus,
+  type SubscriptionExistence,
   healthCheckEndpoint,
   createInboxSubscription,
 } from './subscriptions.js';

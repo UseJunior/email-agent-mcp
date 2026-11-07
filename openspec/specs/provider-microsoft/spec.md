@@ -7,9 +7,27 @@ feature: Microsoft Graph Provider
 
 Implements the provider interface for Microsoft Graph API email operations. Supports delegated OAuth (device code/PKCE for end users) and client credentials (for daemon deployments). Handles Graph-specific concerns: createReplyAll for threading, validation token handling (GET + POST), webhook deduplication, zombie subscription detection, size limits, and anti-spoofing via authentication headers.
 ## Requirements
+### Requirement: Graph draft observations and partial preparation
+
+Graph snapshots SHALL capture message identity, changeKey revision, lifecycle, origin, recipients and the deferred property from one metadata response. Preparation or attachment replacement failures after draft creation SHALL preserve the surviving ID. Scheduling transition redesign remains separate.
+
+#### Scenario: Graph snapshot captures revision origin and scheduling observation together
+- **WHEN** Graph returns a future deferred marker on a draft
+- **THEN** the snapshot contains its deferred lifecycle, origin, revision and scheduling observation
+
+#### Scenario: Graph snapshot keeps sent lifecycle independent of stripped origin
+- **WHEN** origin metadata is absent or the message is sent or deleted
+- **THEN** origin stays indeterminate and lifecycle or not-found status reflects the independent observation
+
+#### Scenario: Graph partial reply preparation and attachment replacement retain draft ids
+- **WHEN** preparation or replacement fails after a draft exists
+- **THEN** the result retains the known surviving draft ID
+
 ### Requirement: Delegated OAuth Authentication
 
-The system SHALL support delegated OAuth as the primary auth mode for end users, using device code flow or authorization code flow with PKCE. This avoids requiring users to register an Azure AD daemon app. Refresh tokens SHALL be persisted (encrypted) for session continuity across restarts.
+The system SHALL support delegated OAuth as the primary auth mode for end users, using device code flow or authorization code flow with PKCE. This avoids requiring users to register an Azure AD daemon app. MSAL SHALL own token cache persistence; the existing mailbox metadata route SHALL store only the authentication record, cache identity and profile metadata.
+
+Delegated authentication SHALL use explicit disconnected, connecting, connected, refreshing, reauth_required and disconnecting states. Credential-changing operations SHALL serialize; concurrent token acquisition/refresh callers and concurrent reconnect callers SHALL each share their pending acquisition. Disconnect SHALL immediately invalidate pending operations before draining them, preventing stale credentials, records, expiry or metadata publication. Runtime disconnect SHALL NOT delete saved profiles. Recognized terminal authentication failures SHALL require configuration, transient failures SHALL retain the prior coherent session, and successful authentication SHALL clear stale reauth status. Existing public methods and health getters SHALL remain compatibility projections of these states, without changing MCP wire fields.
 
 #### Scenario: Device code flow
 - **WHEN** `configure_mailbox` is called with `{provider: "microsoft", auth: "delegated"}`
@@ -17,15 +35,67 @@ The system SHALL support delegated OAuth as the primary auth mode for end users,
 
 #### Scenario: Refresh token persistence
 - **WHEN** the MCP server restarts
-- **THEN** the system loads encrypted refresh tokens from the config directory and resumes without re-authentication
+- **THEN** the system loads the authentication record and cache identity from mailbox metadata and silently resumes using the MSAL-owned persistent cache
+
+#### Scenario: Disconnect invalidates delegated acquisition in either completion order
+- **WHEN** connect, reconnect or token acquisition overlaps disconnect
+- **THEN** disconnect clears runtime session projections and stale acquisition cannot restore them
+- **AND** operations invalidated before completion reject without publishing saved metadata
+
+#### Scenario: Concurrent delegated refresh callers share success and failure
+- **WHEN** token acquisition and refresh callers overlap
+- **THEN** one MSAL acquisition supplies all callers with the same success or failure
+- **AND** a later success clears stale reauth status
+
+#### Scenario: Concurrent delegated reconnect callers share success and failure
+- **WHEN** reconnect and tryReconnect callers overlap
+- **THEN** one silent reconnect supplies their results, preserving tryReconnect's boolean API
+
+#### Scenario: Transient delegated failures retain the prior coherent session
+- **WHEN** connect, reconnect or token acquisition fails transiently
+- **THEN** the prior credential, authentication record, expiry and profile remain a coherent session
+
+#### Scenario: Delegated metadata persistence failure retains runtime authentication
+- **WHEN** metadata persistence fails after successful interactive authentication
+- **THEN** the error identifies metadata persistence failure and the valid runtime session remains usable
+- **AND** a later save uses the existing mailbox metadata path
+
+#### Scenario: Disconnect prevents pending delegated metadata publication
+- **WHEN** disconnect occurs while metadata is being staged
+- **THEN** the pending write cannot replace the saved profile and its temporary file is removed
+
+#### Scenario: Unconsented delegated scopes fail silently without stdout prompts
+- **WHEN** cached credentials cannot satisfy the selected scope profile
+- **THEN** reconnect requires configuration without initiating interactive authentication or prompting on stdout
+- **AND** AuthenticationRequiredError marks both reconnect and token acquisition as requiring reauthentication
 
 ### Requirement: Client Credentials Authentication
 
-The system SHALL support client credentials (app-only) authentication for daemon/server deployments requiring admin consent.
+The system SHALL support client credentials (app-only) authentication for daemon/server deployments requiring admin consent. The manager SHALL own an explicit session lifecycle, publish credential/token/expiry together, serialize connect and refresh mutations, and share concurrent refresh work. Disconnect SHALL invalidate pending acquisitions synchronously. Transient failures SHALL retain the prior coherent session; terminal credential failures SHALL require reauthentication until a successful acquisition replaces that state. The existing `getAccessToken(): Promise<string | undefined>` interface SHALL remain available.
 
 #### Scenario: Client credentials
 - **WHEN** `configure_mailbox` is called with `{provider: "microsoft", auth: "client_credentials", clientId: "...", clientSecret: "...", tenantId: "..."}`
 - **THEN** the system authenticates via `ClientSecretCredential`
+
+#### Scenario: Client credentials disconnect invalidates acquisition in both orders
+- **WHEN** disconnect occurs before or after a connect, refresh, or expiry-triggered acquisition completes
+- **THEN** runtime access is revoked immediately and stale completion cannot restore it
+- **AND** disconnect does not delete Microsoft mailbox metadata or manage the MSAL cache
+
+#### Scenario: Concurrent expired client credentials calls share refresh success and failure
+- **WHEN** concurrent token and explicit refresh callers require acquisition
+- **THEN** one acquisition supplies the shared success or failure
+- **AND** token and expiry are published together on success
+
+#### Scenario: Failed client credentials acquisition retains a coherent prior session
+- **WHEN** connect or refresh fails transiently or returns no token
+- **THEN** the prior session remains intact, or the manager remains disconnected if no session existed
+- **AND** missing configuration never creates a partially connected credential
+
+#### Scenario: Successful client credentials acquisition replaces prior reauthentication state
+- **WHEN** acquisition succeeds after a terminal authentication failure
+- **THEN** the new session replaces the prior reauthentication state
+- **AND** a transient retry failure preserves the reauthentication requirement
 
 ### Requirement: Draft-Then-Send via createReplyAll
 
@@ -105,7 +175,7 @@ The system SHALL respond to Graph validation requests on BOTH GET and POST metho
 
 ### Requirement: Webhook Deduplication
 
-The system SHALL deduplicate webhook notifications using an atomic lock and in-memory map keyed by message ID. Graph sends duplicates ~9ms apart. The webhook handler SHALL return `202 Accepted` immediately and process asynchronously.
+The notification helper SHALL synchronously deduplicate using a process-local map keyed by mailbox namespace and message ID. Callers handling several mailboxes SHALL supply a namespace. This helper does not implement an HTTP webhook handler or cross-process deduplication.
 
 #### Scenario: Duplicate notification
 - **WHEN** two notifications for the same message ID arrive 9ms apart
@@ -113,11 +183,11 @@ The system SHALL deduplicate webhook notifications using an atomic lock and in-m
 
 ### Requirement: Zombie Subscription Detection
 
-The system SHALL verify subscription existence via GET before each renewal. A subscription that accepts renewal but doesn't deliver notifications is a "zombie."
+The subscription-check helper SHALL distinguish exists, missing (HTTP404 only), and unknown (including permission, transport and service errors). Renewal/provisioning remains caller-owned. The deprecated boolean helper SHALL throw on unknown rather than encourage duplicate provisioning.
 
 #### Scenario: Zombie detected
 - **WHEN** `GET /subscriptions/{id}` returns 404
-- **THEN** the system logs an alert and recreates the subscription
+- **THEN** the helper reports missing so the caller may decide whether to recreate it; other failures SHALL NOT be reported as missing
 
 ### Requirement: Health Check Before Subscribe
 
@@ -161,15 +231,15 @@ The system SHALL use a custom extended property (`AgentEmailTrackingId`) on outb
 
 ### Requirement: Dual Watch Mode
 
-The system SHALL support two email detection modes: Delta Query polling (default, works behind NAT/local) and webhook-based change notifications (production, requires public HTTPS URL).
+The provider SHALL expose a delta-query helper and webhook subscription helpers for caller orchestration. The shipped watch command uses timestamp polling. Delta retrieval SHALL reject repeated pagination URLs, excessive pages and responses without a terminal cursor, publishing a new cursor only after complete retrieval. These helpers do not start a webhook server or renewal service.
 
 #### Scenario: Delta Query polling (local)
 - **WHEN** no public webhook URL is configured
-- **THEN** the system polls via Delta Query at a configurable interval (default 30s)
+- **THEN** a caller may use the delta helper, while the shipped watch command retains timestamp polling
 
 #### Scenario: Webhook mode (production)
 - **WHEN** a public HTTPS webhook URL is configured
-- **THEN** the system registers for Graph change notifications
+- **THEN** a caller may use the subscription helper to register for Graph change notifications; the helper does not start an HTTP server
 
 ### Requirement: Delta Query Field Selection
 
@@ -211,3 +281,61 @@ The system SHALL document required egress domains for NemoClaw sandbox policy: `
 #### Scenario: NemoClaw egress config
 - **WHEN** running in NemoClaw
 - **THEN** `configure --nemoclaw` adds these domains to the egress policy
+
+### Requirement: Versioned Folder Caches
+
+The provider SHALL share concurrent folder-tree and system-folder ID loads, invalidate both caches on structural mutation, reject superseded results as current, and cache only complete successful loads. This implements issue #108 and approved `harden-email-state-machines` group 14. Public provider signatures and MCP wire fields remain unchanged.
+
+Fresh validation for structural writes and rule destinations SHALL bypass ready folder snapshots and share active traversals without advancing generations or invalidating system-folder IDs. Successful structural mutations SHALL invalidate both caches and fence loads still pending at invalidation. Reads completed before mutation completion may observe the prior tree; this process-local cache does not provide remote atomicity or serialize reads with writes. Truncated trees SHALL remain insufficient to establish name/path uniqueness.
+
+#### Scenario: Fresh rule destinations coalesce without invalidating system IDs
+- **WHEN** concurrent rules resolve custom destinations with a ready folder snapshot and system ID map
+- **THEN** they share a fresh traversal and reuse the system ID map, including concurrent well-known destinations
+
+#### Scenario: Fresh writes refuse name resolution from truncated trees
+- **WHEN** structural writes or rule destinations resolve names from a truncated fresh traversal
+- **THEN** they fail closed without sending mutations, even if the name is visible in the partial tree
+
+#### Scenario: Move and copy rule destinations share fresh validation
+- **WHEN** one rule includes custom move and copy destinations
+- **THEN** both destinations share one fresh folder traversal and one system ID sweep
+
+#### Scenario: Custom structural writes validate fresh and fence pending reads after mutation
+- **WHEN** a custom-parent create or custom-folder delete completes while a pre-mutation traversal remains pending
+- **THEN** validation bypasses the ready snapshot and the pending read retries in the post-mutation generation regardless of completion order
+
+#### Scenario: A read may complete before a custom structural mutation is sent
+- **WHEN** a read shares a traversal with custom-parent validation and finishes before the mutation is sent
+- **THEN** it may return the pre-mutation tree without waiting for the mutation
+
+#### Scenario: Concurrent folder reads share one complete traversal
+- **WHEN** folder reads overlap a cold recursive traversal
+- **THEN** they share its requests and complete result
+
+#### Scenario: Concurrent system folder reads share one ID sweep
+- **WHEN** system-folder resolutions overlap a cold load
+- **THEN** they share one complete ID sweep
+
+#### Scenario: Folder mutation supersedes an in-flight traversal
+- **WHEN** a mutation invalidates a pending traversal
+- **THEN** its callers retry against the current generation and its result cannot replace newer data
+
+#### Scenario: Folder mutation supersedes an in-flight system ID sweep
+- **WHEN** a mutation invalidates a pending system-folder load
+- **THEN** its callers use the current generation and its result cannot replace newer IDs
+
+#### Scenario: Failed folder loads clear shared state and retry
+- **WHEN** a shared folder traversal fails
+- **THEN** callers receive the failure and a subsequent read retries
+
+#### Scenario: Failed system ID loads clear shared state and retry
+- **WHEN** a shared system-folder load fails
+- **THEN** callers receive the failure and a subsequent resolution retries
+
+#### Scenario: Partial folder loads are shared but never cached
+- **WHEN** a traversal reaches its request budget
+- **THEN** overlapping readers may share the partial result but a subsequent read traverses again
+
+#### Scenario: Folder cache expiry is measured from completed load
+- **WHEN** a complete traversal finishes
+- **THEN** its 60 second cache lifetime begins at completion and expired reads share a new load
