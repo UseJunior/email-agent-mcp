@@ -288,6 +288,8 @@ const heldLeases = new Map<string, MailboxLease>();
 const acquiringLeases = new Set<string>();
 
 export async function acquireMailboxLease(mailboxSafeKey: string): Promise<MailboxLease | null> {
+  const previous = heldLeases.get(mailboxSafeKey);
+  if (previous?.released && heldLeases.get(mailboxSafeKey) === previous) heldLeases.delete(mailboxSafeKey);
   if (heldLeases.has(mailboxSafeKey) || acquiringLeases.has(mailboxSafeKey)) return null;
   acquiringLeases.add(mailboxSafeKey);
   try {
