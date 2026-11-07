@@ -71,11 +71,31 @@ Delegated authentication SHALL use explicit disconnected, connecting, connected,
 
 ### Requirement: Client Credentials Authentication
 
-The system SHALL support client credentials (app-only) authentication for daemon/server deployments requiring admin consent.
+The system SHALL support client credentials (app-only) authentication for daemon/server deployments requiring admin consent. The manager SHALL own an explicit session lifecycle, publish credential/token/expiry together, serialize connect and refresh mutations, and share concurrent refresh work. Disconnect SHALL invalidate pending acquisitions synchronously. Transient failures SHALL retain the prior coherent session; terminal credential failures SHALL require reauthentication until a successful acquisition replaces that state. The existing `getAccessToken(): Promise<string | undefined>` interface SHALL remain available.
 
 #### Scenario: Client credentials
 - **WHEN** `configure_mailbox` is called with `{provider: "microsoft", auth: "client_credentials", clientId: "...", clientSecret: "...", tenantId: "..."}`
 - **THEN** the system authenticates via `ClientSecretCredential`
+
+#### Scenario: Client credentials disconnect invalidates acquisition in both orders
+- **WHEN** disconnect occurs before or after a connect, refresh, or expiry-triggered acquisition completes
+- **THEN** runtime access is revoked immediately and stale completion cannot restore it
+- **AND** disconnect does not delete Microsoft mailbox metadata or manage the MSAL cache
+
+#### Scenario: Concurrent expired client credentials calls share refresh success and failure
+- **WHEN** concurrent token and explicit refresh callers require acquisition
+- **THEN** one acquisition supplies the shared success or failure
+- **AND** token and expiry are published together on success
+
+#### Scenario: Failed client credentials acquisition retains a coherent prior session
+- **WHEN** connect or refresh fails transiently or returns no token
+- **THEN** the prior session remains intact, or the manager remains disconnected if no session existed
+- **AND** missing configuration never creates a partially connected credential
+
+#### Scenario: Successful client credentials acquisition replaces prior reauthentication state
+- **WHEN** acquisition succeeds after a terminal authentication failure
+- **THEN** the new session replaces the prior reauthentication state
+- **AND** a transient retry failure preserves the reauthentication requirement
 
 ### Requirement: Draft-Then-Send via createReplyAll
 

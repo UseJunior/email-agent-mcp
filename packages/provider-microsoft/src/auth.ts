@@ -500,10 +500,27 @@ export function isAuthError(err: unknown): boolean {
  * Client credentials auth manager (app-only / daemon).
  * Uses ClientSecretCredential from @azure/identity for real Azure AD authentication.
  */
+interface ClientCredentialsSession {
+  credential: ClientSecretCredential;
+  accessToken: string;
+  expiresAt: number;
+}
+
+type ClientCredentialsStableState =
+  | { kind: 'disconnected' }
+  | { kind: 'connected'; session: ClientCredentialsSession }
+  | { kind: 'reauth_required'; reason: unknown; session: ClientCredentialsSession | null };
+
+type ClientCredentialsAuthState = ClientCredentialsStableState
+  | { kind: 'connecting'; previous: ClientCredentialsStableState }
+  | { kind: 'refreshing'; session: ClientCredentialsSession; previous: ClientCredentialsStableState; promise: Promise<void> }
+  | { kind: 'disconnecting' };
+
 export class ClientCredentialsAuthManager implements AuthManager {
-  private credential: ClientSecretCredential | null = null;
-  private accessToken?: string;
-  private expiresAt?: number;
+  private state: ClientCredentialsAuthState = { kind: 'disconnected' };
+  private generation = 0;
+  private mutations: Promise<unknown> = Promise.resolve();
+  private refreshFlight: { generation: number; promise: Promise<void> } | null = null;
   private readonly config: MicrosoftAuthConfig;
 
   private static readonly GRAPH_SCOPE = 'https://graph.microsoft.com/.default';
@@ -512,48 +529,114 @@ export class ClientCredentialsAuthManager implements AuthManager {
     this.config = config;
   }
 
-  async connect(_credentials: Record<string, string>): Promise<void> {
-    if (!this.config.clientSecret || !this.config.tenantId) {
-      throw new Error('Client credentials require clientSecret and tenantId');
+  private stableState(): ClientCredentialsStableState {
+    switch (this.state.kind) {
+      case 'disconnected':
+      case 'connected':
+      case 'reauth_required': return this.state;
+      case 'connecting':
+      case 'refreshing': return this.state.previous;
+      case 'disconnecting': return { kind: 'disconnected' };
     }
-    this.credential = new ClientSecretCredential(
-      this.config.tenantId,
-      this.config.clientId,
-      this.config.clientSecret,
-    );
-    const tokenResponse = await this.credential.getToken(ClientCredentialsAuthManager.GRAPH_SCOPE);
-    if (!tokenResponse) throw new Error('Failed to acquire token via client credentials');
-    this.accessToken = tokenResponse.token;
-    this.expiresAt = tokenResponse.expiresOnTimestamp;
   }
 
-  async refresh(): Promise<void> {
-    if (!this.credential) {
-      throw new Error('Not connected. Call connect() first.');
-    }
-    const tokenResponse = await this.credential.getToken(ClientCredentialsAuthManager.GRAPH_SCOPE);
-    if (!tokenResponse) throw new Error('Failed to refresh token via client credentials');
-    this.accessToken = tokenResponse.token;
-    this.expiresAt = tokenResponse.expiresOnTimestamp;
+  private assertCurrent(generation: number): void {
+    if (generation !== this.generation) throw new Error('Authentication operation cancelled by disconnect');
   }
 
-  async disconnect(): Promise<void> {
-    this.credential = null;
-    this.accessToken = undefined;
-    this.expiresAt = undefined;
+  private serialize(operation: (generation: number) => Promise<void>): Promise<void> {
+    const generation = this.generation;
+    const result = this.mutations.then(() => {
+      this.assertCurrent(generation);
+      return operation(generation);
+    });
+    this.mutations = result.catch(() => {});
+    return result;
+  }
+
+  private failed(err: unknown, previous: ClientCredentialsStableState, generation: number): void {
+    this.assertCurrent(generation);
+    const terminal = err instanceof Error && (err.name === 'AuthenticationRequiredError'
+      || /invalid_client|invalid_grant|unauthorized_client|interaction_required/.test(err.message));
+    this.state = terminal
+      ? { kind: 'reauth_required', reason: err, session: previous.kind === 'disconnected' ? null : previous.session }
+      : previous;
+  }
+
+  connect(_credentials: Record<string, string>): Promise<void> {
+    return this.serialize(async generation => {
+      const previous = this.stableState();
+      this.state = { kind: 'connecting', previous };
+      if (!this.config.clientSecret || !this.config.tenantId || !this.config.clientId) {
+        this.state = { kind: 'reauth_required', reason: 'Missing client credentials', session: null };
+        throw new Error('Client credentials require clientSecret and tenantId (and clientId)');
+      }
+      try {
+        const credential = new ClientSecretCredential(this.config.tenantId, this.config.clientId, this.config.clientSecret);
+        const token = await credential.getToken(ClientCredentialsAuthManager.GRAPH_SCOPE);
+        this.assertCurrent(generation);
+        if (!token) throw new Error('Failed to acquire token via client credentials');
+        this.state = { kind: 'connected', session: { credential, accessToken: token.token, expiresAt: token.expiresOnTimestamp } };
+      } catch (err) {
+        this.failed(err, previous, generation);
+        throw err;
+      }
+    });
+  }
+
+  refresh(): Promise<void> {
+    if (this.refreshFlight?.generation === this.generation) return this.refreshFlight.promise;
+    const promise = this.serialize(async generation => {
+      const previous = this.stableState();
+      const session = previous.kind === 'disconnected' ? null : previous.session;
+      if (!session) throw new Error('Not connected. Call connect() first.');
+      this.state = { kind: 'refreshing', session, previous, promise };
+      try {
+        const token = await session.credential.getToken(ClientCredentialsAuthManager.GRAPH_SCOPE);
+        this.assertCurrent(generation);
+        if (!token) throw new Error('Failed to refresh token via client credentials');
+        this.state = { kind: 'connected', session: { ...session, accessToken: token.token, expiresAt: token.expiresOnTimestamp } };
+      } catch (err) {
+        this.failed(err, previous, generation);
+        throw err;
+      }
+    });
+    const flight = { generation: this.generation, promise };
+    this.refreshFlight = flight;
+    void promise.finally(() => {
+      if (this.refreshFlight === flight) this.refreshFlight = null;
+    }).catch(() => {});
+    return promise;
+  }
+
+  disconnect(): Promise<void> {
+    const generation = ++this.generation;
+    this.state = { kind: 'disconnecting' };
+    const result = this.mutations.then(() => {
+      if (generation === this.generation) this.state = { kind: 'disconnected' };
+    });
+    this.mutations = result;
+    return result;
   }
 
   isTokenExpired(): boolean {
-    if (!this.expiresAt) return true;
-    return Date.now() >= this.expiresAt;
+    const state = this.stableState();
+    return state.kind !== 'connected' || Date.now() >= state.session.expiresAt;
   }
 
   async getAccessToken(): Promise<string | undefined> {
-    if (!this.credential) return undefined;
+    if (this.state.kind === 'disconnecting') return undefined;
+    const generation = this.generation;
+    await (this.refreshFlight?.generation === generation ? this.refreshFlight.promise : this.mutations);
+    this.assertCurrent(generation);
+    const prior = this.stableState();
+    if (prior.kind === 'disconnected' || !prior.session) return undefined;
     if (this.isTokenExpired()) {
       await this.refresh();
     }
-    return this.accessToken;
+    this.assertCurrent(generation);
+    const state = this.stableState();
+    return state.kind === 'connected' ? state.session.accessToken : undefined;
   }
 }
 
