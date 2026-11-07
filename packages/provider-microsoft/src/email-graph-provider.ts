@@ -1679,7 +1679,21 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       const response = await this.client.get(url, signal);
       signal?.throwIfAborted();
       if (!Array.isArray(response.value)) throw new Error('Invalid watcher message page');
-      messages.push(...(response.value as GraphMessage[]).map(mapGraphMessage));
+      for (const raw of response.value) {
+        // The general mapper supplies defaults for other actions. Watcher
+        // windows must validate source identity/time before those defaults.
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+          throw new Error('Invalid watcher message identity or timestamp');
+        }
+        const message = raw as Record<string, unknown>;
+        if (typeof message.id !== 'string' || !message.id.trim()
+          || !Object.hasOwn(message, 'receivedDateTime')
+          || typeof message.receivedDateTime !== 'string' || !message.receivedDateTime.trim()
+          || !Number.isFinite(Date.parse(message.receivedDateTime))) {
+          throw new Error('Invalid watcher message identity or timestamp');
+        }
+        messages.push(mapGraphMessage(raw as GraphMessage));
+      }
       const next = response['@odata.nextLink'];
       if (next !== undefined && (typeof next !== 'string' || !next)) throw new Error('Invalid watcher nextLink');
       url = next as string | undefined;
