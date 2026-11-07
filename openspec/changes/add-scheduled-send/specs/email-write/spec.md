@@ -31,6 +31,25 @@ When scheduling is requested, the system SHALL use a provider-held scheduling ca
 - **THEN** the action returns `SCHEDULE_SEND_STATUS_UNKNOWN` with the pending `messageId`
 - **AND** marks the result non-recoverable so callers do not create a duplicate
 
+#### Scenario: Scheduled partial outcomes retain wire handles without exposing workflow evidence
+- **WHEN** a provider returns accepted, rejected, or unknown scheduling evidence
+- **THEN** the action preserves the existing success, handle, timestamp, and error wire fields
+- **AND** internal workflow fields are omitted
+
+#### Scenario: Unclassified draft scheduling throw retains canonical handle and cannot replay
+- **WHEN** a provider throws without classifying draft scheduling
+- **THEN** the action retains the canonical observed message handle and reports `SCHEDULE_SEND_STATUS_UNKNOWN`
+- **AND** the process-local duplicate guard blocks a repeated request
+
+### Requirement: Pending Scheduled Draft Mutation Guard
+
+Ordinary `update_draft` and `send_draft` SHALL refuse a verified future-deferred draft with `DRAFT_DEFERRED`, including attempts to reschedule through `send_draft`. This observation is not a remote lock and SHALL NOT claim atomicity against remote changes after the snapshot.
+
+#### Scenario: Verified deferred drafts reject ordinary mutation
+- **WHEN** snapshot lifecycle identifies a draft as deferred with a valid future marker
+- **THEN** update, send, and reschedule requests make no provider mutation
+- **AND** return `DRAFT_DEFERRED`
+
 ### Requirement: Scheduled Send Management
 
 The system SHALL provide `list_scheduled_sends` and `cancel_scheduled_send` actions. Listing SHALL return pending provider-held items with `messageId`, subject, recipients, and `scheduledSendAt`. Cancellation SHALL accept the pending `message_id` and cancel only an item the provider verifies is still a scheduled draft.

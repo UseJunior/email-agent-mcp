@@ -372,7 +372,7 @@ export const sendDraftAction: EmailAction<
         }
         return {
           success: result.success,
-          messageId: result.messageId,
+          messageId: result.messageId ?? snapshot.messageId,
           scheduledSendAt: result.scheduledSendAt,
           error: result.error ? {
             code: result.error.code,
@@ -412,11 +412,12 @@ export const sendDraftAction: EmailAction<
       };
     } catch (err) {
       settleClaimFromThrow(claim, err);
-      const handled = handleProviderError(err, 'SEND_STATUS_UNKNOWN');
-      if (ctx.rateLimiter && handled.error.code === 'SEND_STATUS_UNKNOWN') {
+      const unknownCode = scheduledSendAt === undefined ? 'SEND_STATUS_UNKNOWN' : 'SCHEDULE_SEND_STATUS_UNKNOWN';
+      const handled = handleProviderError(err, unknownCode);
+      if (ctx.rateLimiter && handled.error.code === unknownCode) {
         ctx.rateLimiter.recordUsage('send_draft');
       }
-      return handled;
+      return { ...handled, messageId: snapshot.messageId, ...(scheduledSendAt ? { scheduledSendAt } : {}) };
     }
   },
 };
