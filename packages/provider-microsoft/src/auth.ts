@@ -241,14 +241,16 @@ export class DelegatedAuthManager implements AuthManager {
   /**
    * Reconnect from a saved AuthenticationRecord (silent, no user interaction).
    */
-  reconnect(): Promise<void> {
+  reconnect(signal?: AbortSignal): Promise<void> {
     if (this.reconnectFlight?.generation === this.generation) return this.reconnectFlight.promise;
     const promise = this.serialize(async generation => {
+      signal?.throwIfAborted();
       const previous = this.stableState();
       this.state = { kind: 'connecting', previous };
       try {
         const metadata = await this.loadMetadata();
         this.assertCurrent(generation);
+        signal?.throwIfAborted();
         if (!metadata) {
           throw new Error(`No saved credentials for mailbox "${this.mailboxName}". Run: email-agent-mcp configure --mailbox ${this.mailboxName}`);
         }
@@ -267,8 +269,11 @@ export class DelegatedAuthManager implements AuthManager {
           },
         });
 
-        const token = await credential.getToken(this.scopes);
+        const token = signal
+          ? await credential.getToken(this.scopes, { abortSignal: signal })
+          : await credential.getToken(this.scopes);
         this.assertCurrent(generation);
+        signal?.throwIfAborted();
         if (!token) throw new Error('Failed to acquire token');
         this.state = { kind: 'connected', session: {
           credential, authRecord: metadata.authenticationRecord, cacheName,
@@ -300,9 +305,10 @@ export class DelegatedAuthManager implements AuthManager {
   /**
    * Get a valid access token (refreshes automatically via MSAL cache).
    */
-  getAccessToken(): Promise<string> {
+  getAccessToken(signal?: AbortSignal): Promise<string> {
     if (this.tokenFlight?.generation === this.generation) return this.tokenFlight.promise;
     const promise = this.serialize(async generation => {
+      signal?.throwIfAborted();
       const previous = this.stableState();
       const session = this.session();
       if (!session) {
@@ -310,8 +316,11 @@ export class DelegatedAuthManager implements AuthManager {
       }
       this.state = { kind: 'refreshing', session, previous, promise };
       try {
-        const token = await session.credential.getToken(this.scopes);
+        const token = signal
+          ? await session.credential.getToken(this.scopes, { abortSignal: signal })
+          : await session.credential.getToken(this.scopes);
         this.assertCurrent(generation);
+        signal?.throwIfAborted();
         if (!token) throw new Error('Failed to acquire token');
         this.state = { kind: 'connected', session: { ...session, tokenExpiresAt: token.expiresOnTimestamp } };
         return token.token;
@@ -337,10 +346,10 @@ export class DelegatedAuthManager implements AuthManager {
    * Attempt reconnect with single-flight guard — safe for concurrent callers.
    * Returns true if reconnect succeeded, false if it failed.
    */
-  async tryReconnect(): Promise<boolean> {
+  async tryReconnect(signal?: AbortSignal): Promise<boolean> {
     try {
       console.error(`[email-agent-mcp] Attempting reconnect for mailbox "${this.mailboxName}"...`);
-      await this.reconnect();
+      await this.reconnect(signal);
       console.error(`[email-agent-mcp] Reconnect succeeded for mailbox "${this.mailboxName}"`);
       return true;
     } catch (err) {

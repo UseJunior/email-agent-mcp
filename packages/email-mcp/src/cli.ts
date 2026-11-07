@@ -768,234 +768,93 @@ export async function runWatch(opts: CliOptions): Promise<number> {
     getReceiveAllowlistPath,
     WatchedAllowlist,
   } = await import('@usejunior/email-core');
-  const {
-    buildWakePayload,
-    sendWake,
-    isProcessed,
-    markProcessed,
-    loadDeltaState,
-    saveDeltaState,
-    acquireLock,
-    releaseLock,
-    releaseAllLocks,
-  } = await import('./watcher.js');
-
-  // Load receive allowlist with hot-reload
-  const allowlistPath = getReceiveAllowlistPath();
-  const receiveWatcher = new WatchedAllowlist(allowlistPath, loadReceiveAllowlist);
-  await receiveWatcher.start();
-  if (!receiveWatcher.config) {
-    console.error('[email-agent-mcp] WARNING: No receive allowlist configured — accepting all senders');
-  }
-
-  // Get wake token: env var > config > undefined
+  const { sendWake, acquireMailboxLease, releaseLock } = await import('./watcher.js');
+  const { MailboxRunner, WatchShutdown } = await import('./watcher-runner.js');
+  const receiveWatcher = new WatchedAllowlist(getReceiveAllowlistPath(), loadReceiveAllowlist);
   const token = process.env['OPENCLAW_HOOKS_TOKEN'] ?? config.hooksToken;
-
-  // Load all configured mailboxes
-  const allMailboxes = await listConfiguredMailboxesWithMetadata();
-  if (allMailboxes.length === 0) {
-    console.error('[email-agent-mcp] No configured mailboxes found. Run: email-agent-mcp configure');
-    return 1;
-  }
-
-  console.error(`[email-agent-mcp] Found ${allMailboxes.length} configured mailbox(es)`);
-
-  // Track which mailboxes we successfully set up for cleanup
-  interface MailboxWatchState {
-    safeKey: string;
-    emailAddress: string;
-    provider: InstanceType<typeof GraphEmailProvider>;
-    lastCheckedAt: string;
-    auth: InstanceType<typeof DelegatedAuthManager>;
-  }
-
-  const watchStates: MailboxWatchState[] = [];
-  let shuttingDown = false;
-
-  // Graceful shutdown handler
-  const shutdown = async () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    console.error('\n[email-agent-mcp] Shutting down watcher...');
-    receiveWatcher.close();
-    await releaseAllLocks();
-    console.error('[email-agent-mcp] Lock files cleaned up. Goodbye.');
-    process.exit(0);
-  };
-
-  process.on('SIGINT', () => { void shutdown(); });
-  process.on('SIGTERM', () => { void shutdown(); });
-
-  // Set up each mailbox
-  for (const metadata of allMailboxes) {
-    const emailAddress = metadata.emailAddress ?? metadata.mailboxName;
-    const safeKey = metadata.emailAddress
-      ? toFilesystemSafeKey(metadata.emailAddress)
-      : metadata.mailboxName;
-
-    console.error(`[email-agent-mcp] Setting up mailbox: ${emailAddress} (key: ${safeKey})`);
-
-    // Acquire lock
-    const gotLock = await acquireLock(safeKey);
-    if (!gotLock) {
-      console.error(`[email-agent-mcp] ERROR: Mailbox ${emailAddress} is already being watched by another process. Skipping.`);
-      continue;
+  const shutdown = new WatchShutdown(code => process.exit(code));
+  process.on('SIGINT', shutdown.signal);
+  process.on('SIGTERM', shutdown.signal);
+  try {
+    await receiveWatcher.start();
+    if (shutdown.stopping) return 0;
+    if (!receiveWatcher.config) {
+      console.error('[email-agent-mcp] WARNING: No receive allowlist configured — accepting all senders');
     }
-
-    try {
-      // Create auth manager and reconnect
-      const auth = new DelegatedAuthManager(
-        { mode: 'delegated', clientId: metadata.clientId },
-        metadata.mailboxName,
-      );
-      await auth.reconnect();
-
-      // Create Graph client and provider (with auth-aware retry on 401)
-      const graphClient = new RealGraphApiClient(() => auth.getAccessToken(), () => auth.tryReconnect());
-      const provider = new GraphEmailProvider(graphClient);
-
-      // Load last checked timestamp or start from now
-      const savedState = await loadDeltaState(safeKey);
-      let lastCheckedAt: string;
-
-      if (savedState) {
-        lastCheckedAt = savedState.lastUpdated;
-        console.error(`[email-agent-mcp] Resuming watch for ${emailAddress} (last checked: ${lastCheckedAt})`);
-      } else {
-        // First run: start from NOW — no historical sync needed
-        lastCheckedAt = new Date().toISOString();
-        await saveDeltaState(safeKey, { deltaLink: '', lastUpdated: lastCheckedAt });
-        console.error(`[email-agent-mcp] Watching ${emailAddress} for new emails starting now`);
-      }
-
-      watchStates.push({ safeKey, emailAddress, provider, lastCheckedAt, auth });
-    } catch (err) {
-      console.error(`[email-agent-mcp] WARNING: Failed to set up ${emailAddress}: ${err instanceof Error ? err.message : err}`);
-      await releaseLock(safeKey);
-      continue;
+    const allMailboxes = await listConfiguredMailboxesWithMetadata();
+    if (shutdown.stopping) return 0;
+    if (allMailboxes.length === 0) {
+      console.error('[email-agent-mcp] No configured mailboxes found. Run: email-agent-mcp configure');
+      return 1;
     }
-  }
-
-  if (watchStates.length === 0) {
-    console.error('[email-agent-mcp] No mailboxes could be set up for watching.');
-    await releaseAllLocks();
-    return 1;
-  }
-
-  console.error(`[email-agent-mcp] Watching ${watchStates.length} mailbox(es). Starting poll loop...`);
-
-  // Poll loop — uses simple timestamp filtering instead of Delta Query.
-  // Delta Query requires paging through the ENTIRE inbox on first use (even with $deltatoken=latest).
-  // Timestamp-based polling is instant: only fetch emails received after lastCheckedAt.
-  const poll = async () => {
-    for (const state of watchStates) {
-      if (shuttingDown) break;
-
-      const now = new Date().toISOString();
-      console.error(`[email-agent-mcp] [${now}] Polling ${state.emailAddress} (since ${state.lastCheckedAt})...`);
-
-      // Proactive token refresh if expiring soon
-      if (state.auth.isTokenExpiringSoon) {
-        console.error(`[email-agent-mcp] Token expiring soon for ${state.emailAddress}, refreshing...`);
-        const ok = await state.auth.tryReconnect();
-        if (!ok) {
-          console.error(`[email-agent-mcp] WARNING: Proactive refresh failed for ${state.emailAddress}. Run: email-agent-mcp configure`);
-          continue;
-        }
-      }
-
-      try {
-        const newMessages = await state.provider.getNewMessages(state.lastCheckedAt);
-
-        let wakeCount = 0;
-        let skippedDedup = 0;
-        let skippedAllowlist = 0;
-        let wakeFailed = false;
-
-        for (const msg of newMessages) {
-          // Dedup
-          if (isProcessed(msg.id)) {
-            skippedDedup++;
-            continue;
-          }
-
-          // Receive allowlist check
-          const senderEmail = msg.from?.email ?? '';
-          if (!isAllowedSender(senderEmail, receiveWatcher.config)) {
-            skippedAllowlist++;
-            markProcessed(msg.id);
-            console.error(`[email-agent-mcp] Skipping email from ${senderEmail} (not on receive allowlist)`);
-            continue;
-          }
-
-          // Build and send wake
-          const payload = buildWakePayload(state.emailAddress, msg);
-          console.error(`[email-agent-mcp] WAKE: ${payload.text.split('\n')[0]}`);
-
-          const result = await sendWake(wakeUrl, payload, token);
-          if (result.success) {
-            markProcessed(msg.id);
-            wakeCount++;
-          } else {
-            console.error(`[email-agent-mcp] WARNING: Wake POST failed for ${msg.id}: ${result.error} — will retry next poll`);
-            wakeFailed = true;
-          }
-        }
-
-        // Only advance timestamp if all wakes succeeded
-        if (!wakeFailed) {
-          state.lastCheckedAt = now;
-          await saveDeltaState(state.safeKey, {
-            deltaLink: '', // Not using delta anymore — kept for interface compat
-            lastUpdated: now,
-          });
-        }
-
-        if (newMessages.length > 0) {
-          console.error(
-            `[email-agent-mcp] Poll: ${newMessages.length} new, ${wakeCount} wakes, ` +
-            `${skippedDedup} dedup, ${skippedAllowlist} allowlist-blocked`,
+    const runners = allMailboxes.map(metadata => {
+      const emailAddress = metadata.emailAddress ?? metadata.mailboxName;
+      const safeKey = metadata.emailAddress ? toFilesystemSafeKey(metadata.emailAddress) : metadata.mailboxName;
+      const runner = new MailboxRunner({
+        provider: 'microsoft', mailbox: safeKey, receivingEmail: emailAddress, intervalMs: pollIntervalMs,
+        acquire: async () => {
+          const lease = await acquireMailboxLease(safeKey);
+          return lease ? {
+            signal: lease.signal, assertHeld: () => lease.assertHeld(), release: () => releaseLock(safeKey),
+          } : null;
+        },
+        setup: async (signal, assertHeld) => {
+          const auth = new DelegatedAuthManager(
+            { mode: 'delegated', clientId: metadata.clientId }, metadata.mailboxName,
           );
-        }
-      } catch (err) {
-        if (isAuthError(err)) {
-          console.error(`[email-agent-mcp] Token error for ${state.emailAddress}, attempting reconnect...`);
-          const ok = await state.auth.tryReconnect();
-          if (ok) {
-            console.error(`[email-agent-mcp] Reconnect succeeded for ${state.emailAddress}`);
-          } else {
-            console.error(`[email-agent-mcp] WARNING: Reconnect failed for ${state.emailAddress}. Run: email-agent-mcp configure`);
+          try {
+            assertHeld();
+            await auth.reconnect(signal);
+            assertHeld();
+            const graphClient = new RealGraphApiClient(
+              requestSignal => { assertHeld(); return auth.getAccessToken(requestSignal); },
+              requestSignal => { assertHeld(); return auth.tryReconnect(requestSignal); },
+            );
+            const provider = new GraphEmailProvider(graphClient);
+            return {
+              prepare: async (requestSignal) => {
+                assertHeld();
+                if (!auth.isTokenExpiringSoon) return;
+                console.error(`[email-agent-mcp] Token expiring soon for ${emailAddress}, refreshing...`);
+                if (!await auth.tryReconnect(requestSignal)) {
+                  throw new Error(`WARNING: Proactive refresh failed for ${emailAddress}. Run: email-agent-mcp configure`);
+                }
+              },
+              getNewMessages: (since, end, requestSignal) => provider.getNewMessages(since, end, requestSignal),
+              recover: async (error, requestSignal) => {
+                if (!isAuthError(error)) return;
+                assertHeld();
+                console.error(`[email-agent-mcp] Token error for ${emailAddress}, attempting reconnect...`);
+                const recovered = await auth.tryReconnect(requestSignal);
+                console.error(recovered
+                  ? `[email-agent-mcp] Reconnect succeeded for ${emailAddress}`
+                  : `[email-agent-mcp] WARNING: Reconnect failed for ${emailAddress}. Run: email-agent-mcp configure`);
+              },
+              close: () => auth.disconnect(),
+            };
+          } catch (error) {
+            await auth.disconnect();
+            throw error;
           }
-          continue;
-        }
-        console.error(`[email-agent-mcp] WARNING: Poll error for ${state.emailAddress}: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-  };
-
-  // Recursive poll loop — schedules next poll only after the current one completes,
-  // preventing overlapping polls that can cause duplicate wakes and state corruption.
-  async function pollLoop() {
-    await poll();
-    if (!shuttingDown) {
-      setTimeout(() => { void pollLoop(); }, pollIntervalMs);
-    }
+        },
+        allowed: message => isAllowedSender(message.from?.email ?? '', receiveWatcher.config),
+        wake: (payload, signal) => sendWake(wakeUrl, payload, token, signal),
+        onError: error => console.error(
+          `[email-agent-mcp] Watcher ${emailAddress}: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      });
+      shutdown.add(runner);
+      return runner;
+    });
+    const results = await Promise.all(runners.map(runner => runner.start()));
+    return shutdown.stopping || results.some(result => result.kind === 'stopped') ? 0 : 1;
+  } finally {
+    // All setup/poll/wake/checkpoint work has settled before shared cleanup.
+    receiveWatcher.close();
+    shutdown.dispose();
+    process.removeListener('SIGINT', shutdown.signal);
+    process.removeListener('SIGTERM', shutdown.signal);
   }
-
-  // Start the poll loop
-  void pollLoop();
-
-  // Keep the process alive — wait for shutdown signal
-  return new Promise<number>((resolve) => {
-    const checkShutdown = () => {
-      if (shuttingDown) {
-        resolve(0);
-      } else {
-        setTimeout(checkShutdown, 500);
-      }
-    };
-    checkShutdown();
-  });
 }
 
 type GmailAuthSetup =

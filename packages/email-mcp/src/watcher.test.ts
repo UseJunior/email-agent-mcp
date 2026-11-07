@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { readFile, writeFile, mkdir, unlink, rm } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, unlink, rm, stat } from 'node:fs/promises';
 import {
   getWatchMode,
   buildWakePayload,
@@ -49,6 +49,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  await releaseAllLocks();
   // Clean up test state files
   try { await unlink(getDeltaStatePath(TEST_SAFE_KEY)); } catch { /* OK */ }
   try { await unlink(getLockFilePath(TEST_SAFE_KEY)); } catch { /* OK */ }
@@ -224,7 +225,7 @@ describe('email-watcher/Delta State Persistence', () => {
     // Load it back
     const loaded = await loadDeltaState(TEST_SAFE_KEY);
     expect(loaded).not.toBeNull();
-    expect(loaded!.deltaLink).toBe('https://graph.microsoft.com/v1.0/delta?token=abc123');
+    expect(loaded!.deltaLink).toBe(''); // Deprecated cursor adapter; disk is timestamp v1.
     expect(loaded!.lastUpdated).toBe('2024-03-15T10:00:00Z');
   });
 
@@ -277,21 +278,13 @@ describe('email-watcher/Lock File Management', () => {
 
     // Verify lock file exists
     const lockPath = getLockFilePath(TEST_SAFE_KEY);
-    const content = await readFile(lockPath, 'utf-8');
-    const lockData = JSON.parse(content) as { pid: number };
-    expect(lockData.pid).toBe(process.pid);
+    expect((await stat(`${lockPath}.lease`)).isDirectory()).toBe(true);
 
     // Release
     await releaseLock(TEST_SAFE_KEY);
 
     // Verify lock file is gone
-    const afterRelease = await loadDeltaState(TEST_SAFE_KEY); // repurposed to check file
-    try {
-      await readFile(lockPath, 'utf-8');
-      expect.fail('Lock file should have been deleted');
-    } catch {
-      // Expected — file doesn't exist
-    }
+    await expect(stat(`${lockPath}.lease`)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('Scenario: releaseAllLocks cleans up locks for this PID', async () => {

@@ -13,6 +13,7 @@ const mockDeviceCodeState = vi.hoisted(() => ({
   getTokenCalls: 0,
   authenticateScopes: [] as string[][],
   getTokenScopes: [] as string[][],
+  getTokenOptions: [] as Array<{ abortSignal?: AbortSignal } | undefined>,
   constructorOptions: [] as Record<string, unknown>[],
 }));
 
@@ -28,9 +29,10 @@ vi.mock('@azure/identity', () => {
       mockDeviceCodeState.constructorOptions.push(options);
     }
 
-    async getToken(scopes: string[]) {
+    async getToken(scopes: string[], options?: { abortSignal?: AbortSignal }) {
       mockDeviceCodeState.getTokenCalls++;
       mockDeviceCodeState.getTokenScopes.push(scopes);
+      mockDeviceCodeState.getTokenOptions.push(options);
       return { token: 'mock-access-token', expiresOnTimestamp: Date.now() + 3600000 };
     }
 
@@ -109,6 +111,7 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
     mockDeviceCodeState.getTokenCalls = 0;
     mockDeviceCodeState.authenticateScopes.length = 0;
     mockDeviceCodeState.getTokenScopes.length = 0;
+    mockDeviceCodeState.getTokenOptions.length = 0;
     mockDeviceCodeState.constructorOptions.length = 0;
   });
 
@@ -119,6 +122,21 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
       process.env['EMAIL_AGENT_MCP_HOME'] = savedAgentEmailHome;
     }
     await rm(testHome, { recursive: true, force: true });
+  });
+
+  it('propagates watcher cancellation to Azure token acquisition', async () => {
+    const auth = new DelegatedAuthManager({ mode: 'delegated', clientId: 'test-client-id' }, 'cancellation');
+    await auth.connect({});
+    const controller = new AbortController();
+    await auth.reconnect(controller.signal);
+    await auth.getAccessToken(controller.signal);
+    await auth.tryReconnect(controller.signal);
+    expect(mockDeviceCodeState.getTokenOptions).toHaveLength(3);
+    expect(mockDeviceCodeState.getTokenOptions.every(options => options?.abortSignal === controller.signal)).toBe(true);
+    controller.abort();
+    await expect(auth.getAccessToken(controller.signal)).rejects.toThrow();
+    await expect(auth.reconnect(controller.signal)).rejects.toThrow();
+    expect(mockDeviceCodeState.getTokenOptions).toHaveLength(3);
   });
 
   it('Scenario: Device code flow', async () => {
