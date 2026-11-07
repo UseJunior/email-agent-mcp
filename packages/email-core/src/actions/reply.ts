@@ -260,6 +260,7 @@ export const replyToEmailAction: EmailAction<
       // non-idempotent provider endpoints with no idempotency key, so an
       // automatic retry after an ambiguous failure (timeout/5xx post-
       // acceptance) could deliver duplicates. Fail fast instead.
+      claim.markDispatched();
       const result = await ctx.provider.replyToMessage(input.message_id, bodyPlain, {
         cc: parsed.cc,
         bodyHtml,

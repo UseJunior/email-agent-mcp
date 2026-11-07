@@ -94,6 +94,7 @@ export {
 export type {
   SendAttempt,
   SendAttemptState,
+  SendLeaseState,
   SendClaim,
   SendOutcome,
   ClaimResult,
