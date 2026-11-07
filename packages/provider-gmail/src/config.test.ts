@@ -1,14 +1,26 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, stat, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { OAuth2Client } from 'google-auth-library';
+import { GmailAuthManager } from './auth.js';
 import {
   listConfiguredGmailMailboxes,
   loadGmailMailboxMetadata,
   saveGmailMailboxMetadata,
+  createGmailMetadataWriter,
   toFilesystemSafeKey,
   type GmailMailboxMetadata,
 } from './config.js';
+
+const fsFailure = vi.hoisted(() => ({ rename: false }));
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, rename: async (...args: Parameters<typeof actual.rename>) => {
+    if (fsFailure.rename) throw new Error('synthetic rename failure');
+    return actual.rename(...args);
+  } };
+});
 
 let tempHome: string;
 
@@ -33,11 +45,83 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  fsFailure.rename = false;
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   delete process.env['EMAIL_AGENT_MCP_HOME'];
   await rm(tempHome, { recursive: true, force: true });
 });
 
 describe('provider-gmail/Config Discovery', () => {
+  it('Scenario: Gmail failed atomic rotation preserves metadata and removes temporary files', async () => {
+    const metadata = gmailMailbox();
+    await saveGmailMailboxMetadata(metadata);
+    const writer = createGmailMetadataWriter(metadata);
+    fsFailure.rename = true;
+    await expect(writer('rotation-1', metadata.refreshToken)).rejects.toThrow('synthetic rename failure');
+    expect((await loadGmailMailboxMetadata('personal'))?.refreshToken).toBe(metadata.refreshToken);
+    expect(await readdir(join(tempHome, 'tokens'))).toEqual([`${toFilesystemSafeKey(metadata.emailAddress)}.json`]);
+    fsFailure.rename = false;
+    // A later runtime rotation can recover after the first write failed.
+    await writer('rotation-2', 'rotation-1');
+    expect((await loadGmailMailboxMetadata('personal'))?.refreshToken).toBe('rotation-2');
+  });
+
+  it('Scenario: Gmail rotations atomically replace the existing metadata route', async () => {
+    const metadata = gmailMailbox();
+    // Legacy alias filenames remain the storage route; do not fork credentials.
+    const path = join(tempHome, 'tokens', 'personal.json');
+    await writeFile(path, JSON.stringify(metadata));
+    const writer = createGmailMetadataWriter(metadata);
+    await Promise.all([writer('rotation-1', metadata.refreshToken), writer('rotation-2', 'rotation-1')]);
+    expect((await loadGmailMailboxMetadata('personal'))?.refreshToken).toBe('rotation-2');
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    expect(await readdir(join(tempHome, 'tokens'))).toEqual(['personal.json']);
+  });
+
+  it('Scenario: Gmail stale writers cannot overwrite newer rotations', async () => {
+    const metadata = gmailMailbox();
+    await saveGmailMailboxMetadata(metadata);
+    const first = createGmailMetadataWriter(metadata);
+    const stale = createGmailMetadataWriter(metadata);
+    await first('newer', metadata.refreshToken);
+    await expect(stale('stale', metadata.refreshToken)).rejects.toThrow('refusing stale');
+    expect((await loadGmailMailboxMetadata('personal'))?.refreshToken).toBe('newer');
+    await first('newest', 'newer');
+    expect((await loadGmailMailboxMetadata('personal'))?.refreshToken).toBe('newest');
+    const files = await readdir(join(tempHome, 'tokens'));
+    expect(files).toEqual([`${toFilesystemSafeKey(metadata.emailAddress)}.json`]);
+  });
+
+  it('Scenario: Gmail rotations preserve broker and BYOK metadata isolation', async () => {
+    const broker: GmailMailboxMetadata = {
+      provider: 'gmail', source: 'broker', mailboxName: 'broker', emailAddress: 'broker@example.com',
+      brokerUrl: 'https://broker.test', refreshToken: 'old',
+    };
+    for (const metadata of [gmailMailbox(), broker]) {
+      await saveGmailMailboxMetadata(metadata);
+      vi.spyOn(OAuth2Client.prototype, 'refreshAccessToken').mockImplementation(async function(this: OAuth2Client) {
+        this.emit('tokens', { access_token: 'new-access', refresh_token: 'rotated', expiry_date: Date.now() + 3600000 });
+        return { credentials: { access_token: 'new-access', refresh_token: metadata.refreshToken }, res: null };
+      });
+      const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+        access_token: 'new-access', refresh_token: 'rotated', expires_in: 3600,
+      })));
+      vi.stubGlobal('fetch', fetchMock);
+      const auth = new GmailAuthManager({
+        ...(metadata.source === 'broker' ? { brokerUrl: metadata.brokerUrl } :
+          { clientId: metadata.clientId, clientSecret: metadata.clientSecret }),
+        metadataWriter: createGmailMetadataWriter(metadata),
+      });
+      await auth.connect({ refresh_token: metadata.refreshToken });
+      await auth.refresh();
+      expect(auth.getRefreshToken()).toBe('rotated');
+      expect(auth.getOAuth2Client().credentials.refresh_token).toBe(metadata.source === 'broker' ? undefined : 'rotated');
+      expect(fetchMock).toHaveBeenCalledTimes(metadata.source === 'broker' ? 1 : 0);
+      expect(await loadGmailMailboxMetadata(metadata.emailAddress)).toEqual({ ...metadata, refreshToken: 'rotated' });
+    }
+  });
+
   it('Scenario: listConfiguredGmailMailboxes ignores Microsoft token files', async () => {
     const tokensDir = join(tempHome, 'tokens');
 
@@ -95,6 +179,25 @@ describe('provider-gmail/Config Discovery', () => {
 });
 
 describe('mailbox-config/Configure Mailbox', () => {
+  it('rotates a valid alias despite an unrelated malformed profile', async () => {
+    const metadata = gmailMailbox({ emailAddress: 'synthetic@example.com' });
+    const path = join(tempHome, 'tokens', 'personal.json');
+    await writeFile(path, JSON.stringify(metadata));
+    await writeFile(join(tempHome, 'tokens', 'aaa-unrelated.json'), '{bad');
+    expect(await listConfiguredGmailMailboxes()).toHaveLength(1);
+    await createGmailMetadataWriter(metadata)('rotated', metadata.refreshToken);
+    expect(JSON.parse(await readFile(path, 'utf8')).refreshToken).toBe('rotated');
+    expect(await readdir(join(tempHome, 'tokens'))).toEqual(['aaa-unrelated.json', 'personal.json']);
+  });
+
+  it('refuses to overwrite a corrupt canonical target while scanning aliases', async () => {
+    const metadata = gmailMailbox({ emailAddress: 'synthetic@example.com' });
+    const path = join(tempHome, 'tokens', `${toFilesystemSafeKey(metadata.emailAddress)}.json`);
+    await writeFile(path, '{bad');
+    await writeFile(join(tempHome, 'tokens', 'personal.json'), JSON.stringify(metadata));
+    await expect(createGmailMetadataWriter(metadata)('rotated', metadata.refreshToken)).rejects.toThrow();
+    expect(await readFile(path, 'utf8')).toBe('{bad');
+  });
   async function writeRaw(filename: string, body: Record<string, unknown>): Promise<void> {
     await writeFile(join(tempHome, 'tokens', filename), JSON.stringify(body, null, 2) + '\n');
   }

@@ -3,7 +3,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { createServer } from 'node:http';
+import { startLoopbackOAuthListener } from './oauth-loopback.js';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -168,11 +168,13 @@ async function getGmailReauthWarning(summary: ConfiguredMailboxSummary): Promise
       metadata.source === 'broker'
         ? {
             brokerUrl: metadata.brokerUrl,
+            metadataWriter: gmail.createGmailMetadataWriter(metadata),
             mailboxName: mailboxRef,
             lastInteractiveAuthAt: metadata.lastInteractiveAuthAt,
           }
         : {
             clientId: metadata.clientId,
+            metadataWriter: gmail.createGmailMetadataWriter(metadata),
             clientSecret: metadata.clientSecret,
             redirectUri: metadata.redirectUri,
             mailboxName: mailboxRef,
@@ -272,111 +274,6 @@ async function addEmailToSendAllowlist(emailAddress: string): Promise<void> {
   await writeFile(allowlistPath, JSON.stringify({ entries }, null, 2) + '\n', 'utf-8');
 }
 
-interface OAuthCallbackResult {
-  code: string;
-  state?: string;
-}
-
-async function startLoopbackOAuthListener(timeoutMs = 5 * 60 * 1000): Promise<{
-  redirectUri: string;
-  waitForCallback: Promise<OAuthCallbackResult>;
-}> {
-  const callbackPath = '/oauth2callback';
-  let resolveCallback!: (value: OAuthCallbackResult) => void;
-  let rejectCallback!: (reason?: unknown) => void;
-  const waitForCallback = new Promise<OAuthCallbackResult>((resolve, reject) => {
-    resolveCallback = resolve;
-    rejectCallback = reject;
-  });
-
-  let settled = false;
-  let activePort = 0;
-
-  const settle = (handler: () => void) => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timeoutId);
-    server.close(() => {
-      handler();
-    });
-  };
-
-  const server = createServer((req, res) => {
-    const requestUrl = new URL(req.url ?? '/', `http://127.0.0.1:${activePort || 80}`);
-    if (requestUrl.pathname !== callbackPath) {
-      res.statusCode = 404;
-      res.end('Not found.');
-      return;
-    }
-
-    const error = requestUrl.searchParams.get('error');
-    if (error) {
-      res.statusCode = 400;
-      res.setHeader('content-type', 'text/html; charset=utf-8');
-      res.end('<html><body><h1>Authentication failed</h1><p>You can return to the terminal.</p></body></html>');
-      settle(() => {
-        rejectCallback(new Error(`Google OAuth returned ${error}`));
-      });
-      return;
-    }
-
-    const code = requestUrl.searchParams.get('code');
-    if (!code) {
-      res.statusCode = 400;
-      res.setHeader('content-type', 'text/html; charset=utf-8');
-      res.end('<html><body><h1>Missing authorization code</h1><p>You can return to the terminal.</p></body></html>');
-      settle(() => {
-        rejectCallback(new Error('Google OAuth callback did not include an authorization code'));
-      });
-      return;
-    }
-
-    res.statusCode = 200;
-    res.setHeader('content-type', 'text/html; charset=utf-8');
-    res.end('<html><body><h1>Authentication complete</h1><p>You can return to the terminal and close this tab.</p></body></html>');
-    settle(() => {
-      resolveCallback({
-        code,
-        state: requestUrl.searchParams.get('state') ?? undefined,
-      });
-    });
-  });
-
-  server.on('error', err => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timeoutId);
-    rejectCallback(err);
-  });
-
-  const timeoutId = setTimeout(() => {
-    settle(() => {
-      rejectCallback(new Error('Timed out waiting for the Google OAuth callback'));
-    });
-  }, timeoutMs);
-  timeoutId.unref();
-
-  await new Promise<void>((resolve, reject) => {
-    server.listen(0, '127.0.0.1', () => {
-      resolve();
-    });
-    server.once('error', reject);
-  });
-
-  const address = server.address();
-  if (!address || typeof address === 'string') {
-    settle(() => {
-      rejectCallback(new Error('Could not determine the local OAuth callback port'));
-    });
-    throw new Error('Could not determine the local OAuth callback port');
-  }
-
-  activePort = address.port;
-  return {
-    redirectUri: `http://127.0.0.1:${address.port}${callbackPath}`,
-    waitForCallback,
-  };
-}
 
 export function parseCliArgs(args: string[]): CliOptions {
   const opts: CliOptions = { command: '' };
@@ -773,7 +670,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
     markProcessed,
     loadDeltaState,
     saveDeltaState,
-    acquireLock,
+    acquireMailboxLease,
     releaseLock,
     releaseAllLocks,
   } = await import('./watcher.js');
@@ -805,6 +702,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
     provider: InstanceType<typeof GraphEmailProvider>;
     lastCheckedAt: string;
     auth: InstanceType<typeof DelegatedAuthManager>;
+    lease: import('./mailbox-lease.js').MailboxLease;
   }
 
   const watchStates: MailboxWatchState[] = [];
@@ -834,8 +732,8 @@ export async function runWatch(opts: CliOptions): Promise<number> {
     console.error(`[email-agent-mcp] Setting up mailbox: ${emailAddress} (key: ${safeKey})`);
 
     // Acquire lock
-    const gotLock = await acquireLock(safeKey);
-    if (!gotLock) {
+    const lease = await acquireMailboxLease(safeKey);
+    if (!lease) {
       console.error(`[email-agent-mcp] ERROR: Mailbox ${emailAddress} is already being watched by another process. Skipping.`);
       continue;
     }
@@ -866,7 +764,8 @@ export async function runWatch(opts: CliOptions): Promise<number> {
         console.error(`[email-agent-mcp] Watching ${emailAddress} for new emails starting now`);
       }
 
-      watchStates.push({ safeKey, emailAddress, provider, lastCheckedAt, auth });
+      lease.assertHeld();
+      watchStates.push({ safeKey, emailAddress, provider, lastCheckedAt, auth, lease });
     } catch (err) {
       console.error(`[email-agent-mcp] WARNING: Failed to set up ${emailAddress}: ${err instanceof Error ? err.message : err}`);
       await releaseLock(safeKey);
@@ -888,6 +787,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
   const poll = async () => {
     for (const state of watchStates) {
       if (shuttingDown) break;
+      if (!state.lease.held) continue;
 
       const now = new Date().toISOString();
       console.error(`[email-agent-mcp] [${now}] Polling ${state.emailAddress} (since ${state.lastCheckedAt})...`);
@@ -911,6 +811,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
         let wakeFailed = false;
 
         for (const msg of newMessages) {
+          state.lease.assertHeld();
           // Dedup
           if (isProcessed(msg.id)) {
             skippedDedup++;
@@ -942,6 +843,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
 
         // Only advance timestamp if all wakes succeeded
         if (!wakeFailed) {
+          state.lease.assertHeld();
           state.lastCheckedAt = now;
           await saveDeltaState(state.safeKey, {
             deltaLink: '', // Not using delta anymore — kept for interface compat
@@ -1093,9 +995,11 @@ async function runGmailConfigure(opts: CliOptions): Promise<number> {
     clientSecret: setup.clientSecret,
     mailboxName,
   });
-  const { redirectUri, waitForCallback } = await startLoopbackOAuthListener();
   const { codeVerifier, codeChallenge } = await auth.generateCodeVerifierAsync();
   const state = randomUUID();
+  const listener = await startLoopbackOAuthListener(state);
+  const { redirectUri, waitForCallback } = listener;
+  try {
   const authUrl = auth.generateAuthUrl({
     scopes: provider.GMAIL_OAUTH_SCOPES,
     redirectUri,
@@ -1144,6 +1048,9 @@ async function runGmailConfigure(opts: CliOptions): Promise<number> {
 
   await finalizeGmailMailbox(emailAddress, toFilesystemSafeKey);
   return 0;
+  } finally {
+    listener.cancel();
+  }
 }
 
 async function runGmailBrokerConfigure(args: {
