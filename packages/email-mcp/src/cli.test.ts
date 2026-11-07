@@ -168,6 +168,7 @@ vi.mock('@usejunior/provider-microsoft', async (importOriginal) => {
     constructor(_config: Record<string, unknown>, _mailboxName: string) {}
     async reconnect() { watcherMockState.auth.reconnectCalls++; }
     async getAccessToken() { return watcherMockState.auth.getAccessTokenResult; }
+    async disconnect() {}
     async tryReconnect() {
       watcherMockState.auth.tryReconnectCalls++;
       if (watcherMockState.auth.shutdownOnTryReconnect) {

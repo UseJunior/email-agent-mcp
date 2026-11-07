@@ -225,7 +225,7 @@ describe('email-watcher/Delta State Persistence', () => {
     // Load it back
     const loaded = await loadDeltaState(TEST_SAFE_KEY);
     expect(loaded).not.toBeNull();
-    expect(loaded!.deltaLink).toBe('https://graph.microsoft.com/v1.0/delta?token=abc123');
+    expect(loaded!.deltaLink).toBe(''); // Deprecated cursor adapter; disk is timestamp v1.
     expect(loaded!.lastUpdated).toBe('2024-03-15T10:00:00Z');
   });
 

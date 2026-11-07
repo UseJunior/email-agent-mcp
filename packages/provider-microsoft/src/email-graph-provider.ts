@@ -218,7 +218,7 @@ const CANONICAL_RULE_ACTIONS: Record<string, string> = {
 const FOLDER_SELECT = '$select=id,displayName,parentFolderId,childFolderCount,unreadItemCount,totalItemCount,isHidden';
 
 export interface GraphApiClient {
-  get(url: string): Promise<{ value?: unknown[]; [key: string]: unknown }>;
+  get(url: string, signal?: AbortSignal): Promise<{ value?: unknown[]; [key: string]: unknown }>;
   post(url: string, body?: unknown): Promise<{ id?: string; [key: string]: unknown }>;
   patch(url: string, body: unknown): Promise<void>;
   delete(url: string): Promise<void>;
@@ -280,10 +280,10 @@ export interface DeltaResult {
  * Used when connected to a real mailbox via DelegatedAuthManager.
  */
 export class RealGraphApiClient implements GraphApiClient {
-  private getToken: () => Promise<string>;
-  private onAuthError?: () => Promise<boolean>;
+  private getToken: (signal?: AbortSignal) => Promise<string>;
+  private onAuthError?: (signal?: AbortSignal) => Promise<boolean>;
 
-  constructor(getToken: () => Promise<string>, onAuthError?: () => Promise<boolean>) {
+  constructor(getToken: (signal?: AbortSignal) => Promise<string>, onAuthError?: (signal?: AbortSignal) => Promise<boolean>) {
     this.getToken = getToken;
     this.onAuthError = onAuthError;
   }
@@ -305,11 +305,14 @@ export class RealGraphApiClient implements GraphApiClient {
 
   /** Fetch with automatic retry on 401 if onAuthError callback is provided. */
   private async fetchWithAuthRetry(url: string, init: RequestInit): Promise<Response> {
+    init.signal?.throwIfAborted();
     const resp = await fetch(url, init);
     if (resp.status === 401 && this.onAuthError) {
-      const ok = await this.onAuthError();
+      init.signal?.throwIfAborted();
+      const ok = await this.onAuthError(init.signal ?? undefined);
       if (ok) {
-        const newToken = await this.getToken();
+        const newToken = await this.getToken(init.signal ?? undefined);
+        init.signal?.throwIfAborted();
         const retryHeaders = { ...(init.headers as Record<string, string>), Authorization: `Bearer ${newToken}` };
         return fetch(url, { ...init, headers: retryHeaders });
       }
@@ -317,10 +320,13 @@ export class RealGraphApiClient implements GraphApiClient {
     return resp;
   }
 
-  async get(url: string): Promise<{ value?: unknown[]; [key: string]: unknown }> {
-    const token = await this.getToken();
+  async get(url: string, signal?: AbortSignal): Promise<{ value?: unknown[]; [key: string]: unknown }> {
+    signal?.throwIfAborted();
+    const token = await this.getToken(signal);
+    signal?.throwIfAborted();
     const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
     const resp = await this.fetchWithAuthRetry(fullUrl, {
+      ...(signal ? { signal } : {}),
       headers: { Authorization: `Bearer ${token}`, Prefer: IMMUTABLE_ID_PREFER },
     });
     if (!resp.ok) {
@@ -1630,16 +1636,50 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
   }
 
   /**
-   * Get new inbox messages received after a given timestamp.
-   * Uses simple $filter=receivedDateTime gt {since} — instant, no full-inbox sync.
+   * Retrieve a complete inclusive timestamp window; partial results never escape.
+   * The optional end preserves existing callers while bounding every invocation.
    * This is the primary method for the watcher polling loop.
    */
-  async getNewMessages(since: string): Promise<EmailMessage[]> {
-    const filter = `receivedDateTime ge ${since}`;
+  async getNewMessages(since: string, end = new Date().toISOString(), signal?: AbortSignal): Promise<EmailMessage[]> {
+    if (!Number.isFinite(Date.parse(since)) || !Number.isFinite(Date.parse(end)) || Date.parse(since) > Date.parse(end)) {
+      throw new Error('Invalid watcher timestamp window');
+    }
+    const filter = `receivedDateTime ge ${since} and receivedDateTime le ${end}`;
     const params = `$filter=${encodeURIComponent(filter)}&$orderby=receivedDateTime desc&$top=50&${DELTA_SELECT}`;
-    const url = `${this.basePath}/mailFolders/Inbox/messages?${params}`;
-    const response = await this.client.get(url);
-    return ((response.value ?? []) as GraphMessage[]).map(mapGraphMessage);
+    let url: string | undefined = `${this.basePath}/mailFolders/Inbox/messages?${params}`;
+    const seen = new Set<string>();
+    const messages: EmailMessage[] = [];
+    while (url) {
+      signal?.throwIfAborted();
+      if (seen.has(url) || seen.size >= 1000) throw new Error('Watcher pagination repeated a link or exceeded 1000 pages');
+      seen.add(url);
+      const response = await this.client.get(url, signal);
+      signal?.throwIfAborted();
+      if (!Array.isArray(response.value)) throw new Error('Invalid watcher message page');
+      for (const raw of response.value) {
+        // The general mapper supplies defaults for other actions. Watcher
+        // windows must validate source identity/time before those defaults.
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+          throw new Error('Invalid watcher message identity or timestamp');
+        }
+        const message = raw as Record<string, unknown>;
+        if (typeof message.id !== 'string' || !message.id.trim()
+          || !Object.hasOwn(message, 'receivedDateTime')
+          || typeof message.receivedDateTime !== 'string' || !message.receivedDateTime.trim()
+          || !Number.isFinite(Date.parse(message.receivedDateTime))) {
+          throw new Error('Invalid watcher message identity or timestamp');
+        }
+        messages.push(mapGraphMessage(raw as GraphMessage));
+      }
+      const next = response['@odata.nextLink'];
+      if (next !== undefined && (typeof next !== 'string' || !next)) throw new Error('Invalid watcher nextLink');
+      url = next as string | undefined;
+    }
+    return messages.filter(message => {
+      const received = Date.parse(message.receivedAt);
+      if (!Number.isFinite(received)) throw new Error('Invalid watcher message timestamp');
+      return received >= Date.parse(since) && received <= Date.parse(end);
+    });
   }
 
   /**
