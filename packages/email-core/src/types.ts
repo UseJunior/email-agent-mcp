@@ -104,13 +104,38 @@ export interface SendResult {
 
 export interface ScheduledSendResult extends SendResult {
   scheduledSendAt?: string;
+  /** Optional internal evidence; actions preserve the existing wire projection. */
+  workflow?: ScheduledSendWorkflow;
 }
+
+export type ScheduledPreparationPhase = 'preparing' | 'draft_created' | 'attachments_ready' | 'deferred_property_set';
+
+/** A preparation rejection never dispatched mail. A dispatch timeout is unknown,
+ * even if a subsequent observation still finds the draft. IDs are observations,
+ * not a promise that a remote item still exists. */
+export type ScheduledSendWorkflow =
+  | { phase: ScheduledPreparationPhase; draftId?: string; messageId?: string }
+  | { phase: 'dispatching'; draftId: string; messageId: string }
+  | { phase: 'terminal'; outcome: 'rejected'; lastPhase: ScheduledPreparationPhase; draftId?: string; messageId?: string }
+  | { phase: 'terminal'; outcome: 'accepted' | 'rejected' | 'unknown'; lastPhase: 'dispatching'; draftId: string; messageId: string };
 
 export interface ScheduledSend {
   messageId: string;
   subject: string;
   to: EmailAddress[];
   scheduledSendAt: string;
+}
+
+/** Internal provider observation, never projected into tool wire schemas. */
+export interface DraftSnapshot {
+  draftId: string;
+  messageId: string;
+  message: EmailMessage;
+  revision?: string;
+  lifecycle: 'editable' | 'deferred' | 'indeterminate';
+  origin: 'reply' | 'non_reply' | 'indeterminate';
+  /** Raw scheduling observation for scheduling transition ownership (group 9). */
+  scheduledSendAt?: string;
 }
 
 export interface DraftResult {

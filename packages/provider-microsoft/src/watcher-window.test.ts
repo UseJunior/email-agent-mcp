@@ -42,6 +42,34 @@ describe('provider-microsoft/Watcher complete windows', () => {
     await expect(provider(vi.fn()).getNewMessages(end, since)).rejects.toThrow('window');
   });
 
+  describe('email-watcher/Window validation', () => {
+  it('Scenario: Malformed raw messages reject the complete window', async () => {
+    const invalid = [null, [], 'message', 42,
+      { receivedDateTime: since },
+      ...[null, '', ' ', 42, {}, []].map(id => ({ id, receivedDateTime: since })),
+      { id: 'x' },
+      ...[null, '', ' ', 'bad', 42, {}, []].map(receivedDateTime => ({ id: 'x', receivedDateTime })),
+    ];
+    for (const raw of invalid) {
+      const get = vi.fn().mockResolvedValueOnce({
+        value: [{ id: 'valid-lower', receivedDateTime: since }], '@odata.nextLink': 'next',
+      }).mockResolvedValueOnce({ value: [{ id: 'valid-upper', receivedDateTime: end }, raw] });
+      const deliver = vi.fn();
+      const checkpoint = vi.fn();
+      await expect(provider(get).getNewMessages(since, end).then(messages => {
+        messages.forEach(deliver);
+        checkpoint(end);
+      })).rejects.toThrow('Invalid watcher message');
+      expect(deliver).not.toHaveBeenCalled();
+      expect(checkpoint).not.toHaveBeenCalled();
+    }
+    const messages = await provider(vi.fn().mockResolvedValue({ value: [
+      { id: 'lower', receivedDateTime: since }, { id: 'upper', receivedDateTime: end },
+    ] })).getNewMessages(since, end);
+    expect(messages.map(message => message.id)).toEqual(['lower', 'upper']);
+  });
+  });
+
   it('cancels between pages without returning partial results', async () => {
     const abort = new AbortController();
     const get = vi.fn(async () => {
@@ -51,7 +79,7 @@ describe('provider-microsoft/Watcher complete windows', () => {
     expect(get).toHaveBeenCalledTimes(1);
   });
 
-  it('propagates cancellation to token acquisition, reconnect and fetch', async () => {
+  it('propagates cancellation to token acquisition and fetch while recovery is shared', async () => {
     const abort = new AbortController();
     const token = vi.fn(async () => 'token');
     const reconnect = vi.fn(async () => true);
@@ -59,7 +87,7 @@ describe('provider-microsoft/Watcher complete windows', () => {
     vi.stubGlobal('fetch', fetch);
     await new RealGraphApiClient(token, reconnect).get('/me/messages', abort.signal);
     expect(token.mock.calls).toEqual([[abort.signal], [abort.signal]]);
-    expect(reconnect).toHaveBeenCalledWith(abort.signal);
+    expect(reconnect).toHaveBeenCalledWith();
     for (const call of fetch.mock.calls) expect(call[1].signal).toBe(abort.signal);
     abort.abort();
     await expect(new RealGraphApiClient(token).get('/me/messages', abort.signal)).rejects.toThrow();
