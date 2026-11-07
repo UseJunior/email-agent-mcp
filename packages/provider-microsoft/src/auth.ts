@@ -115,12 +115,20 @@ type DelegatedAuthState = DelegatedStableState
   | { kind: 'refreshing'; session: DelegatedSession; previous: DelegatedStableState; promise: Promise<string> }
   | { kind: 'disconnecting' };
 
+interface DelegatedFlight<T> {
+  generation: number;
+  promise: Promise<T>;
+  controller: AbortController;
+  waiters: number;
+  settled: boolean;
+}
+
 export class DelegatedAuthManager implements AuthManager {
   private state: DelegatedAuthState = { kind: 'disconnected', emailAddress: null };
   private generation = 0;
   private mutations: Promise<unknown> = Promise.resolve();
-  private reconnectFlight: { generation: number; promise: Promise<void> } | null = null;
-  private tokenFlight: { generation: number; promise: Promise<string> } | null = null;
+  private reconnectFlight: DelegatedFlight<void> | null = null;
+  private tokenFlight: DelegatedFlight<string> | null = null;
   private readonly config: MicrosoftAuthConfig;
   private readonly mailboxName: string;
   private readonly scopes: string[];
@@ -186,8 +194,37 @@ export class DelegatedAuthManager implements AuthManager {
   }
 
   private terminal(err: unknown): boolean {
-    return err instanceof Error && (err.name === 'AuthenticationRequiredError'
+    return err instanceof Error && err.name !== 'AbortError' && (err.name === 'AuthenticationRequiredError'
       || err.message.includes('interaction_required') || err.message.includes('invalid_grant'));
+  }
+
+  private joinFlight<T>(flight: DelegatedFlight<T>, signal?: AbortSignal): Promise<T> {
+    ++flight.waiters;
+    // Unsignalled callers retain the shared promise identity and own a waiter
+    // until settlement; they cannot be cancelled by another caller.
+    if (!signal) return flight.promise;
+    return new Promise<T>((resolve, reject) => {
+      let waiting = true;
+      const release = () => {
+        if (!waiting) return false;
+        waiting = false;
+        signal.removeEventListener('abort', abort);
+        --flight.waiters;
+        return true;
+      };
+      const abort = () => {
+        if (!release()) return;
+        reject(signal.reason);
+        if (!flight.settled && flight.waiters === 0) flight.controller.abort();
+      };
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort();
+      void flight.promise.then(value => {
+        if (release()) resolve(value);
+      }, error => {
+        if (release()) reject(error);
+      });
+    });
   }
 
   private failed(err: unknown, previous: DelegatedStableState, generation: number): void {
@@ -242,15 +279,20 @@ export class DelegatedAuthManager implements AuthManager {
    * Reconnect from a saved AuthenticationRecord (silent, no user interaction).
    */
   reconnect(signal?: AbortSignal): Promise<void> {
-    if (this.reconnectFlight?.generation === this.generation) return this.reconnectFlight.promise;
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    if (this.reconnectFlight?.generation === this.generation && !this.reconnectFlight.controller.signal.aborted) {
+      return this.joinFlight(this.reconnectFlight, signal);
+    }
+    const controller = new AbortController();
+    const acquisitionSignal = controller.signal;
     const promise = this.serialize(async generation => {
-      signal?.throwIfAborted();
+      acquisitionSignal.throwIfAborted();
       const previous = this.stableState();
       this.state = { kind: 'connecting', previous };
       try {
         const metadata = await this.loadMetadata();
         this.assertCurrent(generation);
-        signal?.throwIfAborted();
+        acquisitionSignal.throwIfAborted();
         if (!metadata) {
           throw new Error(`No saved credentials for mailbox "${this.mailboxName}". Run: email-agent-mcp configure --mailbox ${this.mailboxName}`);
         }
@@ -269,11 +311,9 @@ export class DelegatedAuthManager implements AuthManager {
           },
         });
 
-        const token = signal
-          ? await credential.getToken(this.scopes, { abortSignal: signal })
-          : await credential.getToken(this.scopes);
+        const token = await credential.getToken(this.scopes, { abortSignal: acquisitionSignal });
         this.assertCurrent(generation);
-        signal?.throwIfAborted();
+        acquisitionSignal.throwIfAborted();
         if (!token) throw new Error('Failed to acquire token');
         this.state = { kind: 'connected', session: {
           credential, authRecord: metadata.authenticationRecord, cacheName,
@@ -281,6 +321,7 @@ export class DelegatedAuthManager implements AuthManager {
           emailAddress: metadata.emailAddress ?? null, tokenExpiresAt: token.expiresOnTimestamp,
         } };
       } catch (err) {
+        if (acquisitionSignal.aborted) err = acquisitionSignal.reason;
         this.failed(err, previous, generation);
         // AuthenticationRequiredError also covers scopes never consented.
         if (this.terminal(err)) {
@@ -294,21 +335,27 @@ export class DelegatedAuthManager implements AuthManager {
         throw err;
       }
     });
-    const flight = { generation: this.generation, promise };
+    const flight = { generation: this.generation, promise, controller, waiters: 0, settled: false };
     this.reconnectFlight = flight;
     void promise.finally(() => {
+      flight.settled = true;
       if (this.reconnectFlight === flight) this.reconnectFlight = null;
     }).catch(() => {});
-    return promise;
+    return this.joinFlight(flight, signal);
   }
 
   /**
    * Get a valid access token (refreshes automatically via MSAL cache).
    */
   getAccessToken(signal?: AbortSignal): Promise<string> {
-    if (this.tokenFlight?.generation === this.generation) return this.tokenFlight.promise;
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    if (this.tokenFlight?.generation === this.generation && !this.tokenFlight.controller.signal.aborted) {
+      return this.joinFlight(this.tokenFlight, signal);
+    }
+    const controller = new AbortController();
+    const acquisitionSignal = controller.signal;
     const promise = this.serialize(async generation => {
-      signal?.throwIfAborted();
+      acquisitionSignal.throwIfAborted();
       const previous = this.stableState();
       const session = this.session();
       if (!session) {
@@ -316,25 +363,25 @@ export class DelegatedAuthManager implements AuthManager {
       }
       this.state = { kind: 'refreshing', session, previous, promise };
       try {
-        const token = signal
-          ? await session.credential.getToken(this.scopes, { abortSignal: signal })
-          : await session.credential.getToken(this.scopes);
+        const token = await session.credential.getToken(this.scopes, { abortSignal: acquisitionSignal });
         this.assertCurrent(generation);
-        signal?.throwIfAborted();
+        acquisitionSignal.throwIfAborted();
         if (!token) throw new Error('Failed to acquire token');
         this.state = { kind: 'connected', session: { ...session, tokenExpiresAt: token.expiresOnTimestamp } };
         return token.token;
       } catch (err) {
+        if (acquisitionSignal.aborted) err = acquisitionSignal.reason;
         this.failed(err, previous, generation);
         throw err;
       }
     });
-    const flight = { generation: this.generation, promise };
+    const flight = { generation: this.generation, promise, controller, waiters: 0, settled: false };
     this.tokenFlight = flight;
     void promise.finally(() => {
+      flight.settled = true;
       if (this.tokenFlight === flight) this.tokenFlight = null;
     }).catch(() => {});
-    return promise;
+    return this.joinFlight(flight, signal);
   }
 
   async refresh(): Promise<void> {
@@ -361,6 +408,9 @@ export class DelegatedAuthManager implements AuthManager {
   disconnect(): Promise<void> {
     const generation = ++this.generation;
     this.state = { kind: 'disconnecting' };
+    const cancelled = new Error('Authentication operation cancelled by disconnect');
+    this.tokenFlight?.controller.abort(cancelled);
+    this.reconnectFlight?.controller.abort(cancelled);
     const result = this.mutations.then(() => {
       if (generation === this.generation) this.state = { kind: 'disconnected', emailAddress: null };
     });
