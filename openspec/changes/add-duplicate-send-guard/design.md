@@ -71,13 +71,36 @@ that exercise the default path) so cases stay independent.
 
 ### Decision: claim before dispatch, settle after
 
-The claim is written *before* the provider call, not after, so the in-flight window —
-the exact window in which the acknowledgement gets lost — is covered. A settle
-records the terminal state; a release removes the record.
+The claim is written *before* the provider call, not after. Each lease advances
+`reserved` → `dispatched` → `settled`, or `reserved` → `released`. Delivery and
+scheduling call sites call `markDispatched()` immediately before provider invocation.
+Only a reserved lease can release. First settlement is terminal, including proven
+rejection: duplicate or reordered callbacks cannot remove, downgrade, renew, or
+resurrect evidence. Success takes precedence over a contradictory failure code.
 
-If the action throws between claim and settle, the record stays `in-flight` until its
-TTL expires and then becomes claimable again. Holding rather than releasing is the
-fail-closed direction: a throw after dispatch is precisely the ambiguous case.
+Pending leases do not expire or get evicted. This includes reserved preflight reads:
+letting a reservation expire during an active read would allow a competing claim
+before the original resumes. Owners release preflight failures and settle provider
+results/throws; classified proven-unsent failures remove only their own attempt,
+while unknown throws settle unresolved. Retained settled evidence ages from its
+first settlement under the existing retention window.
+
+`send_draft` retains the input-ID claim before lookup, so replays of consumed IDs
+still report delivery evidence. When the snapshot returns a distinct canonical draft
+ID, the action also claims that identity before dispatch. Alias collisions release
+this call's input reservation. Otherwise both leases advance/settle/release together.
+Identical canonical/input IDs use one claim; `allow_duplicate` creates siblings on
+both keys without erasing prior evidence. This serializes local aliases, not remote
+edits or requests in another process.
+
+### Exported API compatibility (SM-8 / #244)
+
+Approved by the `harden-email-state-machines` proposal (parent #236), group 10.
+`SendClaim.settle` and `release` remain callable closures bound to their original
+entry. For legacy consumers that do not call `markDispatched`, `settle` adapts a
+reserved claim directly to terminal settlement. New consumers can inspect the
+read-only `leaseState` and must mark dispatch before invoking a provider, so a late
+release cannot withdraw an active request. No MCP fields or default settings change.
 
 ## Risks / Trade-offs
 
@@ -85,6 +108,7 @@ fail-closed direction: a throw after dispatch is precisely the ambiguous case.
   `allow_duplicate`, by the 15-minute default, and by the error message naming the
   flag. Repeated identical automated mail (a status ping) is normally further apart
   than the window; an operator who disagrees can set the window to `0`.
-- **Memory growth.** Bounded: entries are pruned by TTL on every access and the map is
-  capped at 512 records, evicting oldest-first.
+- **Memory growth.** Settled entries use the existing TTL and soft cap of 512 records,
+  evicting oldest settled first. Pending leases may exceed the cap until settlement;
+  a request that never returns stays blocking in this process.
 - **A restart clears the ledger.** Documented rather than papered over.

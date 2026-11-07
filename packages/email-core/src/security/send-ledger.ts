@@ -31,7 +31,7 @@ export const DUPLICATE_SEND_WINDOW_ENV = 'AGENT_EMAIL_DUPLICATE_SEND_WINDOW_MS';
  */
 export const DEFAULT_DUPLICATE_SEND_WINDOW_MS = 15 * 60 * 1000;
 
-/** Ledger size cap. Oldest-first eviction keeps memory bounded. */
+/** Soft ledger size cap. Oldest settled entries are evicted; pending leases stay. */
 export const MAX_SEND_LEDGER_ENTRIES = 512;
 
 export const DUPLICATE_SEND_IN_FLIGHT = 'DUPLICATE_SEND_IN_FLIGHT';
@@ -83,6 +83,7 @@ export function isDeliveryProvenUnsent(code: string | undefined): boolean {
 }
 
 export type SendAttemptState = 'in-flight' | 'delivered' | 'unresolved';
+export type SendLeaseState = 'reserved' | 'dispatched' | 'settled' | 'released';
 
 export interface SendAttempt {
   state: SendAttemptState;
@@ -107,6 +108,7 @@ export interface SendAttempt {
  */
 interface LedgerEntry extends SendAttempt {
   readonly id: number;
+  leaseState: SendLeaseState;
 }
 
 export interface SendOutcome {
@@ -115,11 +117,17 @@ export interface SendOutcome {
   errorCode?: string;
 }
 
-/** A successful claim. Exactly one of settle/release should be called. */
+/** A process-local lease. Terminal callbacks are idempotent: first terminal wins. */
 export interface SendClaim {
   ok: true;
   fingerprint: string;
-  /** Record the terminal state, releasing the fingerprint if proven unsent. */
+  readonly leaseState: SendLeaseState;
+  /** Advance immediately before invoking the delivery/scheduling provider. */
+  markDispatched: () => void;
+  /**
+   * Record the terminal outcome, removing this attempt if proven unsent.
+   * Legacy adapter: a reserved claim can settle without markDispatched.
+   */
   settle: (outcome: SendOutcome) => void;
   /**
    * Drop the reservation without recording an attempt.
@@ -266,7 +274,14 @@ export class SendLedger {
    */
   claim(fingerprint: string, opts: { force?: boolean } = {}): ClaimResult {
     if (!this.enabled) {
-      return { ok: true, fingerprint, settle: () => {}, release: () => {} };
+      let state: SendLeaseState = 'reserved';
+      return {
+        ok: true, fingerprint,
+        get leaseState() { return state; },
+        markDispatched: () => { if (state === 'reserved') state = 'dispatched'; },
+        settle: () => { if (state === 'reserved' || state === 'dispatched') state = 'settled'; },
+        release: () => { if (state === 'reserved') state = 'released'; },
+      };
     }
 
     this.prune();
@@ -276,13 +291,19 @@ export class SendLedger {
       if (prior) return { ok: false, fingerprint, prior };
     }
 
-    const entry: LedgerEntry = { id: this.nextId++, state: 'in-flight', startedAt: this.now() };
+    const entry: LedgerEntry = {
+      id: this.nextId++, state: 'in-flight', leaseState: 'reserved', startedAt: this.now(),
+    };
     this.insert(fingerprint, entry);
     this.evictOverflow();
 
     return {
       ok: true,
       fingerprint,
+      get leaseState() { return entry.leaseState; },
+      markDispatched: () => {
+        if (entry.leaseState === 'reserved') entry.leaseState = 'dispatched';
+      },
       settle: (outcome: SendOutcome) => this.settle(fingerprint, entry, outcome),
       release: () => this.release(fingerprint, entry),
     };
@@ -346,7 +367,11 @@ export class SendLedger {
   }
 
   private settle(fingerprint: string, entry: LedgerEntry, outcome: SendOutcome): void {
-    if (isDeliveryProvenUnsent(outcome.errorCode)) {
+    if (entry.leaseState === 'settled' || entry.leaseState === 'released') return;
+    // Compatibility adapter: legacy callers may settle without markDispatched.
+    // New delivery actions explicitly advance before invoking the provider.
+    entry.leaseState = 'settled';
+    if (!outcome.success && isDeliveryProvenUnsent(outcome.errorCode)) {
       // Provably not delivered — this attempt stops blocking. Siblings are
       // untouched: a rejected override must not clear the delivery it overrode.
       this.remove(fingerprint, entry);
@@ -361,9 +386,8 @@ export class SendLedger {
       entry.state = 'unresolved';
     }
 
-    // The attempt may have been pruned or evicted while it was in flight. A
-    // success that lands late is still evidence that mail went out, so put it
-    // back rather than dropping it; its window now runs from settlement.
+    // clear() may have removed the entry while it was in flight. Its first
+    // terminal outcome is still evidence, retained from settlement time.
     const entries = this.attempts.get(fingerprint);
     if (!entries || !entries.includes(entry)) this.insert(fingerprint, entry);
   }
@@ -372,21 +396,22 @@ export class SendLedger {
     // Only a reservation that never reached the provider may be withdrawn. A
     // settled attempt is real history, and a late release would hand a replay
     // the delivery it was meant to be refused.
-    if (entry.state === 'in-flight') this.remove(fingerprint, entry);
+    if (entry.leaseState !== 'reserved') return;
+    entry.leaseState = 'released';
+    this.remove(fingerprint, entry);
   }
 
   /**
    * Drop attempts past the window.
    *
-   * An in-flight attempt is aged from `startedAt`, so an action that throws
-   * between claim and settle stops blocking once the window passes rather than
-   * wedging the fingerprint forever. Holding it until then is the fail-closed
-   * direction: a throw after dispatch is precisely the ambiguous case.
+   * Live leases never age out: elapsed time cannot prove a provider request
+   * (or a preflight read) finished. Actions must release preflight failures and
+   * settle dispatch outcomes. Only settled evidence uses the retention window.
    */
   private prune(): void {
     const cutoff = this.now() - this.windowMs;
     for (const [fingerprint, entries] of this.attempts) {
-      const live = entries.filter(e => (e.settledAt ?? e.startedAt) > cutoff);
+      const live = entries.filter(e => e.leaseState !== 'settled' || e.settledAt! > cutoff);
       if (live.length === 0) this.attempts.delete(fingerprint);
       else if (live.length !== entries.length) this.attempts.set(fingerprint, live);
     }
@@ -400,7 +425,7 @@ export class SendLedger {
    * single worst thing this module can do; and refusing a new claim because
    * the ledger is full would block first-ever sends, which is worse still.
    * So a burst of concurrent sends may briefly carry the map past the cap, and
-   * those entries age out on the ordinary TTL.
+   * settled entries then age out on the ordinary TTL.
    */
   private evictOverflow(): void {
     while (this.size() > this.maxEntries) {
@@ -408,7 +433,7 @@ export class SendLedger {
       let oldest: LedgerEntry | undefined;
       for (const [fingerprint, entries] of this.attempts) {
         for (const entry of entries) {
-          if (entry.state === 'in-flight') continue;
+          if (entry.leaseState !== 'settled') continue;
           if (!oldest || (entry.settledAt ?? entry.startedAt) < (oldest.settledAt ?? oldest.startedAt)) {
             oldest = entry;
             oldestKey = fingerprint;

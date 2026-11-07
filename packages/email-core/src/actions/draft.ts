@@ -2,6 +2,7 @@
 import { z } from 'zod';
 import { readDraftSnapshot, assertDraftMutationEligible } from './draft-eligibility.js';
 import type { EmailAction } from './registry.js';
+import type { SendOutcome } from '../security/send-ledger.js';
 import { checkSendAllowlist } from '../security/send-allowlist.js';
 import { checkReplyThreading } from '../security/reply-validation.js';
 import { truncateBody, BODY_SIZE_LIMIT } from '../content/body-loader.js';
@@ -16,7 +17,6 @@ import {
   checkMailboxRequired,
   resolveComposeFields,
   validateRequiredFields,
-  checkRateLimit,
   handleProviderError,
   parseRecipients,
   checkBccOverlap,
@@ -297,6 +297,9 @@ export const sendDraftAction: EmailAction<
     );
     if ('duplicate' in claimed) return claimed.duplicate;
     const { claim } = claimed;
+    const claims = [claim];
+    const release = () => claims.forEach(lease => lease.release());
+    const settle = (outcome: SendOutcome) => claims.forEach(lease => lease.settle(outcome));
 
     // Fetch draft to check recipients against allowlist (fail closed)
     let snapshot;
@@ -309,7 +312,7 @@ export const sendDraftAction: EmailAction<
       assertDraftMutationEligible(snapshot);
       draftMessage = snapshot.message;
     } catch (err) {
-      claim.release();
+      release();
       if (isProviderError(err) && ['DRAFT_DEFERRED', 'NOT_A_DRAFT'].includes(err.code)) {
         return handleProviderError(err, 'DRAFT_LOOKUP_FAILED');
       }
@@ -323,6 +326,20 @@ export const sendDraftAction: EmailAction<
       };
     }
 
+    // Gmail accepts both a message id and a canonical draft id. Keep the input
+    // guard above for consumed-id replays, and serialize aliases on the canonical
+    // identity too. No await separates this claim from the dispatch below.
+    if (snapshot.draftId !== input.draft_id) {
+      const canonical = claimDelivery(
+        ctx, 'send_draft', { draftId: snapshot.draftId, scheduledSendAt }, input.allow_duplicate, false,
+      );
+      if ('duplicate' in canonical) {
+        release();
+        return canonical.duplicate;
+      }
+      claims.push(canonical.claim);
+    }
+
     // All effective recipients — to, cc, AND bcc — must be gated. Providers now
     // surface bcc on the sender's own copy (issue #102), so a bcc recipient that
     // wasn't checked would be a silent allowlist bypass. Fail closed on every one.
@@ -332,7 +349,7 @@ export const sendDraftAction: EmailAction<
       ...(draftMessage.bcc?.map(a => a.email) ?? []),
     ];
     if (recipients.length === 0) {
-      claim.release();
+      release();
       return {
         success: false,
         error: { code: 'NO_RECIPIENTS', message: 'Draft has no recipients', recoverable: false },
@@ -341,38 +358,26 @@ export const sendDraftAction: EmailAction<
 
     const allowlistError = checkSendAllowlist(recipients, ctx.sendAllowlist);
     if (allowlistError) {
-      claim.release();
+      release();
       return {
         success: false,
         error: { code: 'ALLOWLIST_BLOCKED', message: allowlistError, recoverable: false },
       };
     }
 
-    // Check rate limit
-    const rateLimitError = checkRateLimit(ctx.rateLimiter, 'send_draft');
-    if (rateLimitError) {
-      claim.release();
-      return rateLimitError;
-    }
-
     try {
+      claims.forEach(lease => lease.markDispatched());
       if (scheduledSendAt !== undefined) {
         // Capability presence was checked before draft lookup above.
         const result = await ctx.provider.scheduleDraft!(snapshot.draftId, scheduledSendAt);
-        claim.settle({
+        settle({
           success: result.success,
           ...(result.messageId !== undefined ? { messageId: result.messageId } : {}),
           ...(result.error?.code !== undefined ? { errorCode: result.error.code } : {}),
         });
-        if (
-          ctx.rateLimiter
-          && (result.success || result.error?.code === 'SCHEDULE_SEND_STATUS_UNKNOWN')
-        ) {
-          ctx.rateLimiter.recordUsage('send_draft');
-        }
         return {
           success: result.success,
-          messageId: result.messageId,
+          messageId: result.messageId ?? snapshot.messageId,
           scheduledSendAt: result.scheduledSendAt,
           error: result.error ? {
             code: result.error.code,
@@ -390,15 +395,11 @@ export const sendDraftAction: EmailAction<
       // deliver duplicates. Fail fast instead.
       const result = await ctx.provider.sendDraft(snapshot.draftId);
 
-      claim.settle({
+      settle({
         success: result.success,
         ...(result.messageId !== undefined ? { messageId: result.messageId } : {}),
         ...(result.error?.code !== undefined ? { errorCode: result.error.code } : {}),
       });
-
-      if (ctx.rateLimiter) {
-        ctx.rateLimiter.recordUsage('send_draft');
-      }
 
       return {
         success: result.success,
@@ -411,12 +412,10 @@ export const sendDraftAction: EmailAction<
         } : undefined,
       };
     } catch (err) {
-      settleClaimFromThrow(claim, err);
-      const handled = handleProviderError(err, 'SEND_STATUS_UNKNOWN');
-      if (ctx.rateLimiter && handled.error.code === 'SEND_STATUS_UNKNOWN') {
-        ctx.rateLimiter.recordUsage('send_draft');
-      }
-      return handled;
+      claims.forEach(lease => settleClaimFromThrow(lease, err));
+      const unknownCode = scheduledSendAt === undefined ? 'SEND_STATUS_UNKNOWN' : 'SCHEDULE_SEND_STATUS_UNKNOWN';
+      const handled = handleProviderError(err, unknownCode);
+      return { ...handled, messageId: snapshot.messageId, ...(scheduledSendAt ? { scheduledSendAt } : {}) };
     }
   },
 };

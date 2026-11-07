@@ -14,7 +14,6 @@ import {
   checkMailboxRequired,
   resolveComposeFields,
   validateRequiredFields,
-  checkRateLimit,
   handleProviderError,
   parseRecipients,
   buildDraftPreview,
@@ -213,12 +212,6 @@ export const sendEmailAction: EmailAction<
       };
     }
 
-    // Check rate limit
-    const rateLimitError = checkRateLimit(ctx.rateLimiter, 'send_email');
-    if (rateLimitError) {
-      return rateLimitError;
-    }
-
     const composeMessage = {
       to: parsed.to,
       cc: parsed.cc,
@@ -251,24 +244,19 @@ export const sendEmailAction: EmailAction<
 
     if (scheduledSendAt !== undefined) {
       if (!ctx.provider.scheduleMessage) {
-        claim.settle({ success: false, errorCode: 'NOT_SUPPORTED' });
+        claim.release();
         return scheduledSendNotSupportedError();
       }
       try {
         // Do not retry the two-write draft→send operation as a unit: a lost
         // response after draft creation could otherwise queue a duplicate.
+        claim.markDispatched();
         const result = await ctx.provider.scheduleMessage(composeMessage, scheduledSendAt);
         claim.settle({
           success: result.success,
           ...(result.messageId !== undefined ? { messageId: result.messageId } : {}),
           ...(result.error?.code !== undefined ? { errorCode: result.error.code } : {}),
         });
-        if (
-          ctx.rateLimiter
-          && (result.success || result.error?.code === 'SCHEDULE_SEND_STATUS_UNKNOWN')
-        ) {
-          ctx.rateLimiter.recordUsage('send_email');
-        }
         return {
           success: result.success,
           messageId: result.messageId,
@@ -291,9 +279,6 @@ export const sendEmailAction: EmailAction<
         // catch-all here. Quota is charged on the ambiguous outcome for the
         // same reason the non-throw branch above charges it.
         const handled = handleProviderError(err, 'SCHEDULE_SEND_STATUS_UNKNOWN');
-        if (ctx.rateLimiter && handled.error.code === 'SCHEDULE_SEND_STATUS_UNKNOWN') {
-          ctx.rateLimiter.recordUsage('send_email');
-        }
         return handled;
       }
     }
@@ -305,6 +290,7 @@ export const sendEmailAction: EmailAction<
     // can silently deliver duplicates. Fail fast and surface the structured
     // error instead (mirrors the scheduled-send branch above).
     try {
+      claim.markDispatched();
       const result = await ctx.provider.sendMessage(composeMessage);
 
       claim.settle({
@@ -312,10 +298,6 @@ export const sendEmailAction: EmailAction<
         ...(result.messageId !== undefined ? { messageId: result.messageId } : {}),
         ...(result.error?.code !== undefined ? { errorCode: result.error.code } : {}),
       });
-
-      if (ctx.rateLimiter) {
-        ctx.rateLimiter.recordUsage('send_email');
-      }
 
       return {
         success: result.success,
@@ -331,9 +313,6 @@ export const sendEmailAction: EmailAction<
     } catch (err) {
       settleClaimFromThrow(claim, err);
       const handled = handleProviderError(err, 'SEND_STATUS_UNKNOWN');
-      if (ctx.rateLimiter && handled.error.code === 'SEND_STATUS_UNKNOWN') {
-        ctx.rateLimiter.recordUsage('send_email');
-      }
       return handled;
     }
   },
