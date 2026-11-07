@@ -4,6 +4,7 @@ import {
   isDuplicateNotification,
   resetDedupState,
   checkSubscriptionExists,
+  checkSubscriptionStatus,
   createInboxSubscription,
 } from './subscriptions.js';
 import type { GraphApiClient } from './email-graph-provider.js';
@@ -49,10 +50,21 @@ describe('provider-microsoft/Webhook Deduplication', () => {
 });
 
 describe('provider-microsoft/Zombie Subscription Detection', () => {
+  it.each([403, 429, 500, undefined])('unknown health (%s) never becomes missing', async status => {
+    const cause = Object.assign(new Error('check failed'), { status });
+    const client = { get: vi.fn().mockRejectedValue(cause) } as unknown as GraphApiClient;
+    expect(await checkSubscriptionStatus(client, 'subscription')).toEqual({ status: 'unknown', cause });
+    await expect(checkSubscriptionExists(client, 'subscription')).rejects.toBe(cause);
+  });
+  it('namespaces notification identities', () => {
+    expect(isDuplicateNotification('same-id', 'mailboxA')).toBe(false);
+    expect(isDuplicateNotification('same-id', 'mailboxB')).toBe(false);
+    expect(isDuplicateNotification('same-id', 'mailboxA')).toBe(true);
+  });
   it('Scenario: Zombie detected', async () => {
     // WHEN GET /subscriptions/{id} returns 404
     const client: GraphApiClient = {
-      get: vi.fn().mockRejectedValue(new Error('404 Not Found')),
+      get: vi.fn().mockRejectedValue(Object.assign(new Error('Not Found'), { status: 404 })),
       post: vi.fn().mockResolvedValue({ id: 'new-sub' }),
       patch: vi.fn().mockResolvedValue(undefined),
       delete: vi.fn().mockResolvedValue(undefined),

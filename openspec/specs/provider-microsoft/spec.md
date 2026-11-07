@@ -192,7 +192,7 @@ The system SHALL respond to Graph validation requests on BOTH GET and POST metho
 
 ### Requirement: Webhook Deduplication
 
-The system SHALL deduplicate webhook notifications using an atomic lock and in-memory map keyed by message ID. Graph sends duplicates ~9ms apart. The webhook handler SHALL return `202 Accepted` immediately and process asynchronously.
+The notification helper SHALL synchronously deduplicate using a process-local map keyed by mailbox namespace and message ID. Callers handling several mailboxes SHALL supply a namespace. This helper does not implement an HTTP webhook handler or cross-process deduplication.
 
 #### Scenario: Duplicate notification
 - **WHEN** two notifications for the same message ID arrive 9ms apart
@@ -200,11 +200,11 @@ The system SHALL deduplicate webhook notifications using an atomic lock and in-m
 
 ### Requirement: Zombie Subscription Detection
 
-The system SHALL verify subscription existence via GET before each renewal. A subscription that accepts renewal but doesn't deliver notifications is a "zombie."
+The subscription-check helper SHALL distinguish exists, missing (HTTP404 only), and unknown (including permission, transport and service errors). Renewal/provisioning remains caller-owned. The deprecated boolean helper SHALL throw on unknown rather than encourage duplicate provisioning.
 
 #### Scenario: Zombie detected
 - **WHEN** `GET /subscriptions/{id}` returns 404
-- **THEN** the system logs an alert and recreates the subscription
+- **THEN** the helper reports missing so the caller may decide whether to recreate it; other failures SHALL NOT be reported as missing
 
 ### Requirement: Health Check Before Subscribe
 
@@ -248,15 +248,15 @@ The system SHALL use a custom extended property (`AgentEmailTrackingId`) on outb
 
 ### Requirement: Dual Watch Mode
 
-The system SHALL support two email detection modes: Delta Query polling (default, works behind NAT/local) and webhook-based change notifications (production, requires public HTTPS URL).
+The provider SHALL expose a delta-query helper and webhook subscription helpers for caller orchestration. The shipped watch command uses timestamp polling. Delta retrieval SHALL reject repeated pagination URLs, excessive pages and responses without a terminal cursor, publishing a new cursor only after complete retrieval. These helpers do not start a webhook server or renewal service.
 
 #### Scenario: Delta Query polling (local)
 - **WHEN** no public webhook URL is configured
-- **THEN** the system polls via Delta Query at a configurable interval (default 30s)
+- **THEN** a caller may use the delta helper, while the shipped watch command retains timestamp polling
 
 #### Scenario: Webhook mode (production)
 - **WHEN** a public HTTPS webhook URL is configured
-- **THEN** the system registers for Graph change notifications
+- **THEN** a caller may use the subscription helper to register for Graph change notifications; the helper does not start an HTTP server
 
 ### Requirement: Delta Query Field Selection
 
