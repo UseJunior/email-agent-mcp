@@ -1,4 +1,4 @@
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import lockfile from 'proper-lockfile';
 
@@ -21,6 +21,7 @@ export class MailboxLease {
 
   get signal(): AbortSignal { return this.controller.signal; }
   get held(): boolean { return this.state.phase === 'held'; }
+  get released(): boolean { return this.state.phase === 'released'; }
 
   assertHeld(): void {
     if (!this.held) throw new Error('Mailbox lease is no longer held');
@@ -31,7 +32,7 @@ export class MailboxLease {
       throw new Error('Invalid mailbox lock key');
     }
     await mkdir(directory, { recursive: true });
-    const legacyPath = join(directory, `${mailboxKey}.watcher.lock`);
+    const legacyPath = join(await realpath(directory), `${mailboxKey}.watcher.lock`);
     // Never remove legacy locks here: an old watcher could still own one.
     try {
       const legacy: unknown = JSON.parse(await readFile(legacyPath, 'utf8'));
@@ -48,7 +49,10 @@ export class MailboxLease {
     }
     const lease = new MailboxLease();
     try {
-      const release = await lockfile.lock(directory, {
+      // The library keys its ownership registry by target, not lockfilePath.
+      // A directory-wide target would make mailbox B overwrite mailbox A.
+      const release = await lockfile.lock(legacyPath, {
+        realpath: false, // The parent is canonical; the legacy file need not exist.
         lockfilePath: `${legacyPath}.lease`,
         stale: MAILBOX_LEASE_STALE_MS,
         update: MAILBOX_LEASE_UPDATE_MS,
