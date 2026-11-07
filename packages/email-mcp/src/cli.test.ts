@@ -2052,7 +2052,9 @@ describe('cli/Watcher Token Error Recovery', () => {
       expect(await runWatch({ command: 'watch', pollInterval: 2 })).toBe(0);
       expect(watcherMockState.pollCount).toBeGreaterThan(0);
       expect(fetchSpy).not.toHaveBeenCalled();
-      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('allowlist-blocked'));
+      // The runner no longer emits the old aggregate poll counter; startup
+      // still identifies the fail-closed policy, and the real wake path stays idle.
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Invalid receive allowlist'));
     } finally {
       fetchSpy.mockRestore();
       watcherMockState.newMessages = [];
