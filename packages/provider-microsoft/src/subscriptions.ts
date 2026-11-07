@@ -36,8 +36,9 @@ export function handleValidationToken(validationToken: string): { status: number
 /**
  * Check if a notification is a duplicate (Graph sends duplicates ~9ms apart).
  */
-export function isDuplicateNotification(messageId: string): boolean {
+export function isDuplicateNotification(messageId: string, mailboxNamespace = ''): boolean {
   const now = Date.now();
+  const identity = JSON.stringify([mailboxNamespace, messageId]);
 
   // Clean up old entries
   for (const [key, timestamp] of recentNotifications) {
@@ -46,11 +47,11 @@ export function isDuplicateNotification(messageId: string): boolean {
     }
   }
 
-  if (recentNotifications.has(messageId)) {
+  if (recentNotifications.has(identity)) {
     return true;
   }
 
-  recentNotifications.set(messageId, now);
+  recentNotifications.set(identity, now);
   return false;
 }
 
@@ -64,16 +65,29 @@ export function resetDedupState(): void {
 /**
  * Detect zombie subscription — verify it exists before renewal.
  */
-export async function checkSubscriptionExists(
+export type SubscriptionExistence =
+  | { status: 'exists' }
+  | { status: 'missing' }
+  | { status: 'unknown'; cause: unknown };
+
+export async function checkSubscriptionStatus(
   client: GraphApiClient,
   subscriptionId: string,
-): Promise<boolean> {
+): Promise<SubscriptionExistence> {
   try {
-    await client.get(`/subscriptions/${subscriptionId}`);
-    return true;
-  } catch {
-    return false;
+    await client.get(`/subscriptions/${encodeURIComponent(subscriptionId)}`);
+    return { status: 'exists' };
+  } catch (cause) {
+    return cause && typeof cause === 'object' && 'status' in cause && cause.status === 404
+      ? { status: 'missing' } : { status: 'unknown', cause };
   }
+}
+
+/** @deprecated Use checkSubscriptionStatus; an unknown check is not absence. */
+export async function checkSubscriptionExists(client: GraphApiClient, subscriptionId: string): Promise<boolean> {
+  const result = await checkSubscriptionStatus(client, subscriptionId);
+  if (result.status === 'unknown') throw result.cause;
+  return result.status === 'exists';
 }
 
 /**

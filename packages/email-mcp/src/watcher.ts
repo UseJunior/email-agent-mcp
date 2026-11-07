@@ -184,7 +184,11 @@ export function needsSubscriptionRenewal(
   expiresAt: string,
   bufferMs = 3600000, // 1 hour
 ): boolean {
-  return Date.now() >= new Date(expiresAt).getTime() - bufferMs;
+  const timestamp = Date.parse(expiresAt);
+  if (!Number.isFinite(timestamp) || !Number.isFinite(bufferMs) || bufferMs < 0) {
+    throw new Error('Invalid subscription expiration or renewal buffer');
+  }
+  return Date.now() >= timestamp - bufferMs;
 }
 
 // ─── Delta State Persistence ──────────────────────────────────────────
