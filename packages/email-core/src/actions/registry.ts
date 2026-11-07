@@ -32,7 +32,7 @@ export interface ActionContext {
   allowedDirs?: readonly string[];
   deleteEnabled?: boolean;
   hardDeleteAllowed?: boolean;
-  rateLimiter?: RateLimiter;
+  rateLimiter?: ReservationRateLimiter | RateLimiter;
   /**
    * Duplicate-delivery guard. Optional only so tests can inject an isolated
    * ledger — when absent the delivery actions fall back to the process default
@@ -56,9 +56,24 @@ export interface AllowlistConfig {
   entries: string[]; // e.g., ["*@example.com", "alice@test.com", "*"]
 }
 
+/** @deprecated Inject ReservationRateLimiter for atomic capacity accounting. */
 export interface RateLimiter {
   checkLimit(action: string): { allowed: boolean; retryAfter?: number };
   recordUsage(action: string): void;
+}
+
+export interface RateReservation {
+  /** First terminal call wins. Only use release before dispatch or on proven rejection. */
+  release(): void;
+  consume(): void;
+}
+
+export type RateReservationResult =
+  | { allowed: true; lease: RateReservation }
+  | { allowed: false; retryAfter?: number };
+
+export interface ReservationRateLimiter {
+  tryReserve(action: string): RateReservationResult;
 }
 
 export interface EmailAction<TInput = unknown, TOutput = unknown> {

@@ -89,11 +89,38 @@ The system SHALL check email authentication headers on inbound emails. Configura
 
 ### Requirement: Rate Limiting
 
-The system SHALL enforce configurable rate limits on outbound operations (max sends per time window).
+When a limiter is injected, the system SHALL enforce configurable process-local capacity across outbound operations using atomic `tryReserve(action)` admission. Allowed results SHALL include a lease; denied results SHALL include retry-after guidance. Live reserved capacity SHALL count immediately and SHALL NOT expire before settlement. Shipped adapters SHALL remain unconfigured by default and SHALL NOT construct a new default limiter.
 
 #### Scenario: Rate limit exceeded
 - **WHEN** the agent exceeds the configured send rate
 - **THEN** the system returns an error with retry-after guidance
+
+#### Scenario: Capacity barrier includes reservations immediately across actions
+- **WHEN** concurrent outbound calls compete for the last available capacity
+- **THEN** only available capacity is admitted before provider dispatch
+- **AND** pending reservations count across send, reply, draft send, and scheduled delivery on the same limiter instance
+
+#### Scenario: Terminal accounting is idempotent and live reservations never expire
+- **WHEN** a reservation is released before dispatch or on proven rejection
+- **THEN** its capacity becomes available immediately
+- **WHEN** dispatch succeeds or its acceptance is unknown
+- **THEN** its capacity is consumed until one window after settlement
+- **AND** subsequent terminal callbacks cannot change its accounting
+
+#### Scenario: Draft preflight failure releases capacity
+- **WHEN** lookup, draft eligibility, recipient policy, or canonical duplicate checks refuse a reserved draft send
+- **THEN** the reservation is released without consuming capacity
+- **AND** canonical alias claims do not reserve capacity a second time
+
+#### Scenario: Default clock ignores wall-clock jumps
+- **WHEN** wall time changes during the rate window
+- **THEN** quota expiration uses monotonic elapsed time
+- **AND** zero configured capacity returns a finite denial rather than accessing nonexistent usage
+
+#### Scenario: Legacy adapter preserves check/record but cannot reserve concurrently
+- **WHEN** a caller injects the deprecated `RateLimiter` check/record interface
+- **THEN** the compatibility adapter checks admission and records accepted or unknown outcomes once
+- **AND** the documented legacy check/record protocol does not guarantee atomic concurrency admission
 
 ### Requirement: Validated Allowlist Policy Lifecycle
 

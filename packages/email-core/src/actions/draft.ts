@@ -17,7 +17,6 @@ import {
   checkMailboxRequired,
   resolveComposeFields,
   validateRequiredFields,
-  checkRateLimit,
   handleProviderError,
   parseRecipients,
   checkBccOverlap,
@@ -332,7 +331,7 @@ export const sendDraftAction: EmailAction<
     // identity too. No await separates this claim from the dispatch below.
     if (snapshot.draftId !== input.draft_id) {
       const canonical = claimDelivery(
-        ctx, 'send_draft', { draftId: snapshot.draftId, scheduledSendAt }, input.allow_duplicate,
+        ctx, 'send_draft', { draftId: snapshot.draftId, scheduledSendAt }, input.allow_duplicate, false,
       );
       if ('duplicate' in canonical) {
         release();
@@ -366,13 +365,6 @@ export const sendDraftAction: EmailAction<
       };
     }
 
-    // Check rate limit
-    const rateLimitError = checkRateLimit(ctx.rateLimiter, 'send_draft');
-    if (rateLimitError) {
-      release();
-      return rateLimitError;
-    }
-
     try {
       claims.forEach(lease => lease.markDispatched());
       if (scheduledSendAt !== undefined) {
@@ -383,12 +375,6 @@ export const sendDraftAction: EmailAction<
           ...(result.messageId !== undefined ? { messageId: result.messageId } : {}),
           ...(result.error?.code !== undefined ? { errorCode: result.error.code } : {}),
         });
-        if (
-          ctx.rateLimiter
-          && (result.success || result.error?.code === 'SCHEDULE_SEND_STATUS_UNKNOWN')
-        ) {
-          ctx.rateLimiter.recordUsage('send_draft');
-        }
         return {
           success: result.success,
           messageId: result.messageId ?? snapshot.messageId,
@@ -415,10 +401,6 @@ export const sendDraftAction: EmailAction<
         ...(result.error?.code !== undefined ? { errorCode: result.error.code } : {}),
       });
 
-      if (ctx.rateLimiter) {
-        ctx.rateLimiter.recordUsage('send_draft');
-      }
-
       return {
         success: result.success,
         messageId: result.messageId,
@@ -433,9 +415,6 @@ export const sendDraftAction: EmailAction<
       claims.forEach(lease => settleClaimFromThrow(lease, err));
       const unknownCode = scheduledSendAt === undefined ? 'SEND_STATUS_UNKNOWN' : 'SCHEDULE_SEND_STATUS_UNKNOWN';
       const handled = handleProviderError(err, unknownCode);
-      if (ctx.rateLimiter && handled.error.code === unknownCode) {
-        ctx.rateLimiter.recordUsage('send_draft');
-      }
       return { ...handled, messageId: snapshot.messageId, ...(scheduledSendAt ? { scheduledSendAt } : {}) };
     }
   },
