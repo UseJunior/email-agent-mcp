@@ -81,6 +81,27 @@ Delegated authentication SHALL use explicit disconnected, connecting, connected,
 - **WHEN** disconnect occurs while metadata is being staged
 - **THEN** the pending write cannot replace the saved profile and its temporary file is removed
 
+#### Scenario: Pre-aborted delegated callers neither start nor join acquisition
+- **WHEN** a token or reconnect caller supplies an already aborted signal
+- **THEN** it SHALL reject promptly without starting or joining an acquisition
+
+#### Scenario: Delegated waiters cancel independently in either ownership order
+- **WHEN** a signalled creator or joining waiter aborts while another caller remains
+- **THEN** only that caller SHALL stop waiting and Azure acquisition SHALL continue for the survivor, including unsignalled callers
+
+#### Scenario: All delegated waiters cancelling aborts Azure without publishing late results
+- **WHEN** every token or reconnect waiter cancels
+- **THEN** the shared Azure abort signal SHALL abort and late success or terminal failure SHALL neither publish state nor classify cancellation as terminal reauthentication
+- **AND** a new caller SHALL start a fresh serialized flight after cancelled work drains
+
+#### Scenario: Delegated cancellation drains cooperative Azure work
+- **WHEN** the last caller cancels a token or reconnect request
+- **THEN** cancellation SHALL reach real Azure work through its abortSignal and serialized cleanup SHALL restore the prior coherent session
+
+#### Scenario: Disconnect aborts shared delegated flights and fences late completion
+- **WHEN** disconnect invalidates a pending shared token or reconnect flight
+- **THEN** its Azure abort signal SHALL abort and generation guards SHALL reject late success or failure without overwriting a new generation or clearing its flights
+
 #### Scenario: Unconsented delegated scopes fail silently without stdout prompts
 - **WHEN** cached credentials cannot satisfy the selected scope profile
 - **THEN** reconnect requires configuration without initiating interactive authentication or prompting on stdout
