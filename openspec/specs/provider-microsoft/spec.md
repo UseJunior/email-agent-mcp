@@ -9,7 +9,9 @@ Implements the provider interface for Microsoft Graph API email operations. Supp
 ## Requirements
 ### Requirement: Delegated OAuth Authentication
 
-The system SHALL support delegated OAuth as the primary auth mode for end users, using device code flow or authorization code flow with PKCE. This avoids requiring users to register an Azure AD daemon app. Refresh tokens SHALL be persisted (encrypted) for session continuity across restarts.
+The system SHALL support delegated OAuth as the primary auth mode for end users, using device code flow or authorization code flow with PKCE. This avoids requiring users to register an Azure AD daemon app. MSAL SHALL own token cache persistence; the existing mailbox metadata route SHALL store only the authentication record, cache identity and profile metadata.
+
+Delegated authentication SHALL use explicit disconnected, connecting, connected, refreshing, reauth_required and disconnecting states. Credential-changing operations SHALL serialize; concurrent token acquisition/refresh callers and concurrent reconnect callers SHALL each share their pending acquisition. Disconnect SHALL immediately invalidate pending operations before draining them, preventing stale credentials, records, expiry or metadata publication. Runtime disconnect SHALL NOT delete saved profiles. Recognized terminal authentication failures SHALL require configuration, transient failures SHALL retain the prior coherent session, and successful authentication SHALL clear stale reauth status. Existing public methods and health getters SHALL remain compatibility projections of these states, without changing MCP wire fields.
 
 #### Scenario: Device code flow
 - **WHEN** `configure_mailbox` is called with `{provider: "microsoft", auth: "delegated"}`
@@ -17,15 +19,67 @@ The system SHALL support delegated OAuth as the primary auth mode for end users,
 
 #### Scenario: Refresh token persistence
 - **WHEN** the MCP server restarts
-- **THEN** the system loads encrypted refresh tokens from the config directory and resumes without re-authentication
+- **THEN** the system loads the authentication record and cache identity from mailbox metadata and silently resumes using the MSAL-owned persistent cache
+
+#### Scenario: Disconnect invalidates delegated acquisition in either completion order
+- **WHEN** connect, reconnect or token acquisition overlaps disconnect
+- **THEN** disconnect clears runtime session projections and stale acquisition cannot restore them
+- **AND** operations invalidated before completion reject without publishing saved metadata
+
+#### Scenario: Concurrent delegated refresh callers share success and failure
+- **WHEN** token acquisition and refresh callers overlap
+- **THEN** one MSAL acquisition supplies all callers with the same success or failure
+- **AND** a later success clears stale reauth status
+
+#### Scenario: Concurrent delegated reconnect callers share success and failure
+- **WHEN** reconnect and tryReconnect callers overlap
+- **THEN** one silent reconnect supplies their results, preserving tryReconnect's boolean API
+
+#### Scenario: Transient delegated failures retain the prior coherent session
+- **WHEN** connect, reconnect or token acquisition fails transiently
+- **THEN** the prior credential, authentication record, expiry and profile remain a coherent session
+
+#### Scenario: Delegated metadata persistence failure retains runtime authentication
+- **WHEN** metadata persistence fails after successful interactive authentication
+- **THEN** the error identifies metadata persistence failure and the valid runtime session remains usable
+- **AND** a later save uses the existing mailbox metadata path
+
+#### Scenario: Disconnect prevents pending delegated metadata publication
+- **WHEN** disconnect occurs while metadata is being staged
+- **THEN** the pending write cannot replace the saved profile and its temporary file is removed
+
+#### Scenario: Unconsented delegated scopes fail silently without stdout prompts
+- **WHEN** cached credentials cannot satisfy the selected scope profile
+- **THEN** reconnect requires configuration without initiating interactive authentication or prompting on stdout
+- **AND** AuthenticationRequiredError marks both reconnect and token acquisition as requiring reauthentication
 
 ### Requirement: Client Credentials Authentication
 
-The system SHALL support client credentials (app-only) authentication for daemon/server deployments requiring admin consent.
+The system SHALL support client credentials (app-only) authentication for daemon/server deployments requiring admin consent. The manager SHALL own an explicit session lifecycle, publish credential/token/expiry together, serialize connect and refresh mutations, and share concurrent refresh work. Disconnect SHALL invalidate pending acquisitions synchronously. Transient failures SHALL retain the prior coherent session; terminal credential failures SHALL require reauthentication until a successful acquisition replaces that state. The existing `getAccessToken(): Promise<string | undefined>` interface SHALL remain available.
 
 #### Scenario: Client credentials
 - **WHEN** `configure_mailbox` is called with `{provider: "microsoft", auth: "client_credentials", clientId: "...", clientSecret: "...", tenantId: "..."}`
 - **THEN** the system authenticates via `ClientSecretCredential`
+
+#### Scenario: Client credentials disconnect invalidates acquisition in both orders
+- **WHEN** disconnect occurs before or after a connect, refresh, or expiry-triggered acquisition completes
+- **THEN** runtime access is revoked immediately and stale completion cannot restore it
+- **AND** disconnect does not delete Microsoft mailbox metadata or manage the MSAL cache
+
+#### Scenario: Concurrent expired client credentials calls share refresh success and failure
+- **WHEN** concurrent token and explicit refresh callers require acquisition
+- **THEN** one acquisition supplies the shared success or failure
+- **AND** token and expiry are published together on success
+
+#### Scenario: Failed client credentials acquisition retains a coherent prior session
+- **WHEN** connect or refresh fails transiently or returns no token
+- **THEN** the prior session remains intact, or the manager remains disconnected if no session existed
+- **AND** missing configuration never creates a partially connected credential
+
+#### Scenario: Successful client credentials acquisition replaces prior reauthentication state
+- **WHEN** acquisition succeeds after a terminal authentication failure
+- **THEN** the new session replaces the prior reauthentication state
+- **AND** a transient retry failure preserves the reauthentication requirement
 
 ### Requirement: Draft-Then-Send via createReplyAll
 
