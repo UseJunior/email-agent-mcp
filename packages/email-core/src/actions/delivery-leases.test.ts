@@ -6,6 +6,7 @@ import type { ActionContext } from './registry.js';
 import { sendEmailAction } from './send.js';
 import { replyToEmailAction } from './reply.js';
 import { sendDraftAction } from './draft.js';
+import { SendRateLimiter } from '../security/send-allowlist.js';
 
 function barrier() {
   let open!: () => void;
@@ -23,6 +24,102 @@ class ObservedLedger extends SendLedger {
 }
 
 const paths = ['send', 'schedule-send', 'reply', 'draft', 'schedule-draft'] as const;
+
+describe.each(paths)('email-security/Rate Limiting action integration (%s)', path => {
+  it('Scenario: Capacity barrier prevents concurrent provider dispatch', async () => {
+    const f = await fixture(path);
+    let now = 0;
+    const limiter = new SendRateLimiter(1, 100, () => now);
+    f.ctx.rateLimiter = limiter;
+    const entered = barrier(), finish = barrier();
+    f.dispatch.mockImplementation(async () => {
+      entered.open();
+      await finish.promise;
+      return { success: true, messageId: 'accepted' };
+    });
+    const first = f.run();
+    await entered.promise;
+    now = 1000; // live capacity cannot expire during a slow dispatch
+    const contenders = await Promise.all(Array.from({ length: 8 }, () => f.run(true)));
+    expect(contenders.every(result => result.error?.code === 'RATE_LIMITED' && result.error.retryAfter === 1)).toBe(true);
+    expect(f.dispatch).toHaveBeenCalledTimes(1);
+    finish.open();
+    expect((await first).success).toBe(true);
+    expect((await f.run(true)).error?.code).toBe('RATE_LIMITED');
+    now += 100;
+    expect((await f.run(true)).success).toBe(true);
+  });
+
+  it.each(['accepted', 'unknown', 'throw', 'rejected', 'throw-rejected', 'unclassified-result'] as const)(
+    'Scenario: Dispatch %s has conservative terminal rate accounting', async outcome => {
+      const f = await fixture(path);
+      const limiter = new SendRateLimiter(1, 60_000);
+      f.ctx.rateLimiter = limiter;
+      f.dispatch.mockImplementation(async () => {
+        if (outcome === 'throw') throw new Error('synthetic lost response');
+        if (outcome === 'throw-rejected') throw new ProviderError('INVALID_REQUEST', 'synthetic rejection', 'mock', false);
+        if (outcome === 'accepted') return { success: true, messageId: 'accepted' };
+        if (outcome === 'unclassified-result') return { success: false };
+        return { success: false, error: new ProviderError(outcome === 'rejected' ? 'INVALID_REQUEST' : 'SEND_STATUS_UNKNOWN', 'synthetic outcome', 'mock', false) };
+      });
+      await f.run();
+      const released = outcome === 'rejected' || outcome === 'throw-rejected';
+      expect(limiter.checkLimit('other_action').allowed).toBe(released);
+      await f.run(true);
+      expect(f.dispatch).toHaveBeenCalledTimes(released ? 2 : 1);
+    },
+  );
+
+  it('Scenario: Reservation API is preferred over legacy check and record', async () => {
+    const f = await fixture(path);
+    const consume = vi.fn();
+    const checkLimit = vi.fn(() => ({ allowed: false }));
+    const recordUsage = vi.fn();
+    f.ctx.rateLimiter = { tryReserve: () => ({ allowed: true, lease: { consume, release: vi.fn() } }), checkLimit, recordUsage };
+    f.dispatch.mockResolvedValue({ success: true });
+    await f.run();
+    expect(consume).toHaveBeenCalledTimes(1);
+    expect(checkLimit).not.toHaveBeenCalled();
+    expect(recordUsage).not.toHaveBeenCalled();
+  });
+});
+
+describe('email-security/Rate Limiting preflight', () => {
+  describe.each(['lookup', 'empty', 'allowlist', 'deferred', 'canonical-duplicate'] as const)('%s', failure => {
+    it('Scenario: Draft preflight failure releases capacity', async () => {
+      const f = await fixture('draft', 32);
+      const limiter = new SendRateLimiter(1, 1000);
+      f.ctx.rateLimiter = limiter;
+      const snapshot = await f.provider.getDraftSnapshot('draft-1');
+      const read = vi.spyOn(f.provider, 'getDraftSnapshot').mockResolvedValue({
+        ...snapshot, draftId: 'canonical-draft',
+        ...(failure === 'deferred' ? { lifecycle: 'deferred' as const } : {}),
+        message: { ...snapshot.message, ...(failure === 'empty' ? { to: [] } : {}) },
+      });
+      if (failure === 'lookup') read.mockRejectedValue(new ProviderError('NOT_FOUND', 'synthetic missing', 'mock', false));
+      if (failure === 'allowlist') f.ctx.sendAllowlist = { entries: [] };
+      if (failure === 'canonical-duplicate') {
+        // Establish canonical evidence without charging the limiter.
+        const prior = { ...f.ctx, rateLimiter: undefined };
+        f.dispatch.mockResolvedValue({ success: true });
+        await sendDraftAction.run(prior, { draft_id: 'canonical-draft' });
+        f.dispatch.mockClear();
+      }
+      expect((await f.run()).success).toBe(false);
+      expect(f.dispatch).not.toHaveBeenCalled();
+      expect(limiter.tryReserve('send_email').allowed).toBe(true);
+    });
+  });
+
+  it('Scenario: Unsupported scheduling releases capacity', async () => {
+    const f = await fixture('schedule-send');
+    const limiter = new SendRateLimiter(1, 1000);
+    f.ctx.rateLimiter = limiter;
+    f.provider.scheduleMessage = undefined as never;
+    expect((await f.run()).error?.code).toBe('NOT_SUPPORTED');
+    expect(limiter.tryReserve('send_email').allowed).toBe(true);
+  });
+});
 
 async function fixture(path: typeof paths[number], maxEntries = 1) {
   let now = 0;
@@ -123,7 +220,7 @@ describe.each(paths)('email-write/Delivery lease integration (%s)', path => {
       checkLimit: () => ({ allowed: true }),
       recordUsage: () => { throw new Error('bookkeeping failed'); },
     };
-    await expect(f.run()).rejects.toThrow('bookkeeping failed');
+    expect((await f.run()).success).toBe(true);
     expect((await f.run()).messageId).toBe('accepted');
     expect(f.dispatch).toHaveBeenCalledTimes(1);
   });
