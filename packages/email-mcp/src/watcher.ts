@@ -1,8 +1,11 @@
 // Email watcher — monitors mailboxes and POSTs to wake URL
-import { readFile, writeFile, mkdir, unlink, readdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { EmailMessage, EmailAddress } from '@usejunior/email-core';
+import { MailboxLease } from './mailbox-lease.js';
+
+export { MailboxLease } from './mailbox-lease.js';
 
 const EMAIL_AGENT_MCP_HOME = process.env['EMAIL_AGENT_MCP_HOME'] ?? join(homedir(), '.email-agent-mcp');
 const STATE_DIR = join(EMAIL_AGENT_MCP_HOME, 'state');
@@ -241,63 +244,39 @@ export function getLockFilePath(mailboxSafeKey: string): string {
  * Acquire a lock file for a mailbox.
  * Returns true if lock was acquired, false if already locked by another process.
  */
-export async function acquireLock(mailboxSafeKey: string): Promise<boolean> {
-  const lockPath = getLockFilePath(mailboxSafeKey);
-  await mkdir(STATE_DIR, { recursive: true });
+const heldLeases = new Map<string, MailboxLease>();
+const acquiringLeases = new Set<string>();
 
-  // Check if lock file exists and if the owning process is still alive
+export async function acquireMailboxLease(mailboxSafeKey: string): Promise<MailboxLease | null> {
+  if (heldLeases.has(mailboxSafeKey) || acquiringLeases.has(mailboxSafeKey)) return null;
+  acquiringLeases.add(mailboxSafeKey);
   try {
-    const content = await readFile(lockPath, 'utf-8');
-    const lockData = JSON.parse(content) as { pid: number; startedAt: string };
-    // Check if the process is still running
-    try {
-      process.kill(lockData.pid, 0); // Signal 0 = check if alive
-      // Process exists — lock is held
-      return false;
-    } catch {
-      // Process is dead — stale lock, we can take over
-      console.error(`[email-agent-mcp] Removing stale lock for PID ${lockData.pid}`);
-    }
-  } catch {
-    // No lock file — good, we can acquire
+    const lease = await MailboxLease.acquire(STATE_DIR, mailboxSafeKey);
+    if (lease) heldLeases.set(mailboxSafeKey, lease);
+    return lease;
+  } finally {
+    acquiringLeases.delete(mailboxSafeKey);
   }
+}
 
-  // Write our PID
-  const lockData = { pid: process.pid, startedAt: new Date().toISOString() };
-  await writeFile(lockPath, JSON.stringify(lockData, null, 2), 'utf-8');
-  return true;
+/** @deprecated Use acquireMailboxLease and retain its ownership handle. */
+export async function acquireLock(mailboxSafeKey: string): Promise<boolean> {
+  return (await acquireMailboxLease(mailboxSafeKey)) !== null;
 }
 
 /**
  * Release a lock file for a mailbox.
  */
 export async function releaseLock(mailboxSafeKey: string): Promise<void> {
-  try {
-    await unlink(getLockFilePath(mailboxSafeKey));
-  } catch {
-    // May already be removed
-  }
+  const lease = heldLeases.get(mailboxSafeKey);
+  if (!lease) return;
+  await lease.release();
+  if (heldLeases.get(mailboxSafeKey) === lease) heldLeases.delete(mailboxSafeKey);
 }
 
 /**
  * Release all lock files owned by this process.
  */
 export async function releaseAllLocks(): Promise<void> {
-  try {
-    const files = await readdir(STATE_DIR);
-    for (const file of files) {
-      if (!file.endsWith('.watcher.lock')) continue;
-      try {
-        const content = await readFile(join(STATE_DIR, file), 'utf-8');
-        const lockData = JSON.parse(content) as { pid: number };
-        if (lockData.pid === process.pid) {
-          await unlink(join(STATE_DIR, file));
-        }
-      } catch {
-        // Skip unreadable files
-      }
-    }
-  } catch {
-    // State dir may not exist
-  }
+  await Promise.all([...heldLeases.keys()].map(releaseLock));
 }

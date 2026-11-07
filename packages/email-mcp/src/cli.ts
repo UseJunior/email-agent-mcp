@@ -773,7 +773,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
     markProcessed,
     loadDeltaState,
     saveDeltaState,
-    acquireLock,
+    acquireMailboxLease,
     releaseLock,
     releaseAllLocks,
   } = await import('./watcher.js');
@@ -805,6 +805,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
     provider: InstanceType<typeof GraphEmailProvider>;
     lastCheckedAt: string;
     auth: InstanceType<typeof DelegatedAuthManager>;
+    lease: import('./mailbox-lease.js').MailboxLease;
   }
 
   const watchStates: MailboxWatchState[] = [];
@@ -834,8 +835,8 @@ export async function runWatch(opts: CliOptions): Promise<number> {
     console.error(`[email-agent-mcp] Setting up mailbox: ${emailAddress} (key: ${safeKey})`);
 
     // Acquire lock
-    const gotLock = await acquireLock(safeKey);
-    if (!gotLock) {
+    const lease = await acquireMailboxLease(safeKey);
+    if (!lease) {
       console.error(`[email-agent-mcp] ERROR: Mailbox ${emailAddress} is already being watched by another process. Skipping.`);
       continue;
     }
@@ -866,7 +867,8 @@ export async function runWatch(opts: CliOptions): Promise<number> {
         console.error(`[email-agent-mcp] Watching ${emailAddress} for new emails starting now`);
       }
 
-      watchStates.push({ safeKey, emailAddress, provider, lastCheckedAt, auth });
+      lease.assertHeld();
+      watchStates.push({ safeKey, emailAddress, provider, lastCheckedAt, auth, lease });
     } catch (err) {
       console.error(`[email-agent-mcp] WARNING: Failed to set up ${emailAddress}: ${err instanceof Error ? err.message : err}`);
       await releaseLock(safeKey);
@@ -888,6 +890,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
   const poll = async () => {
     for (const state of watchStates) {
       if (shuttingDown) break;
+      if (!state.lease.held) continue;
 
       const now = new Date().toISOString();
       console.error(`[email-agent-mcp] [${now}] Polling ${state.emailAddress} (since ${state.lastCheckedAt})...`);
@@ -911,6 +914,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
         let wakeFailed = false;
 
         for (const msg of newMessages) {
+          state.lease.assertHeld();
           // Dedup
           if (isProcessed(msg.id)) {
             skippedDedup++;
@@ -942,6 +946,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
 
         // Only advance timestamp if all wakes succeeded
         if (!wakeFailed) {
+          state.lease.assertHeld();
           state.lastCheckedAt = now;
           await saveDeltaState(state.safeKey, {
             deltaLink: '', // Not using delta anymore — kept for interface compat
