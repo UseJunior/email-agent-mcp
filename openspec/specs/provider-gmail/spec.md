@@ -219,3 +219,60 @@ Gmail draft reads and edits SHALL accept the id of a draft's message as well as 
 - **WHEN** `getDraftReplyStatus` or `getDraft` is called with a draft's message id
 - **THEN** it reads the resolved draft
 
+### Requirement: Gmail authentication lifecycle safety
+
+Gmail authentication SHALL have one owner for its connected token object and explicit and library automatic refresh. Concurrent refresh callers SHALL share acquisition. Disconnect SHALL immediately invalidate pending authentication completions. Terminal credential rejection SHALL require configuration; transient failure SHALL retain the coherent prior session. Broker refresh tokens MUST remain absent from OAuth-client credentials.
+
+#### Scenario: Disconnect invalidates an in-flight Gmail refresh
+- **WHEN** disconnect occurs during explicit or library automatic refresh
+- **THEN** the late completion fails without restoring tokens or persisting a stale rotation
+- **AND** both the retired OAuth client and current runtime remain without credentials
+
+#### Scenario: Concurrent explicit and automatic Gmail refresh share one acquisition
+- **WHEN** explicit callers and the OAuth library request refresh concurrently
+- **THEN** they share one provider acquisition and observe the same rotated token object
+
+#### Scenario: Gmail terminal errors require configure while transient errors retain the session
+- **WHEN** refresh fails transiently
+- **THEN** the prior session remains available for retry
+- **WHEN** refresh fails with invalid_grant
+- **THEN** runtime credentials are cleared and configuration is required
+
+### Requirement: Gmail rotation persistence
+
+Gmail SHALL synchronize OAuth token events and refresh results, retaining a rotated refresh token even if the library returns its predecessor. An optional metadata writer SHALL serialize rotations and atomically replace the existing credential file. In-process stale writers MUST NOT overwrite a newer rotation or reconfiguration. File replacement does not promise cross-process compare-and-swap. Persistence failure SHALL warn while preserving valid runtime authentication and SHALL NOT cause delivery replay.
+
+#### Scenario: Gmail token events persist rotations in order
+- **WHEN** successive token events rotate refresh tokens while an earlier write is blocked
+- **THEN** runtime uses the newest token and metadata writes execute in rotation order
+
+#### Scenario: Gmail rotations atomically replace the existing metadata route
+- **WHEN** rotation is persisted for canonical or legacy alias metadata
+- **THEN** the existing path is atomically replaced with private file permissions without creating a second credential file
+
+#### Scenario: Gmail stale writers cannot overwrite newer rotations
+- **WHEN** an older writer attempts to replace metadata already rotated by another in-process writer
+- **THEN** the write is rejected and newer metadata survives
+
+#### Scenario: Gmail failed atomic rotation preserves metadata and removes temporary files
+- **WHEN** atomic replacement fails after writing its temporary file
+- **THEN** the original metadata survives and the temporary file is removed
+- **AND** a later rotation can persist after storage recovers
+
+#### Scenario: Gmail rotation persistence failure preserves runtime authentication
+- **WHEN** a BYOK or broker rotation cannot be persisted
+- **THEN** refresh still succeeds, runtime uses the rotation, and token health reports a storage warning
+- **AND** broker refresh tokens remain absent from OAuth-client credentials
+
+#### Scenario: Gmail rotations preserve broker and BYOK metadata isolation
+- **WHEN** a rotation is persisted
+- **THEN** its original OAuth mode and configuration are preserved
+
+### Requirement: Gmail valid profile token acquisition
+
+Profile lookup SHALL acquire a nonexpired token before calling Gmail. The exported synchronous getAccessToken accessor SHALL remain synchronous, returning undefined when the token is expired or runtime authentication is unavailable. getValidAccessToken SHALL provide asynchronous valid-token acquisition without changing AuthManager or tool wire contracts.
+
+#### Scenario: Gmail expired profile token is refreshed before use
+- **WHEN** profile lookup has a present but expired access token
+- **THEN** it refreshes before sending the profile request
+

@@ -168,11 +168,13 @@ async function getGmailReauthWarning(summary: ConfiguredMailboxSummary): Promise
       metadata.source === 'broker'
         ? {
             brokerUrl: metadata.brokerUrl,
+            metadataWriter: gmail.createGmailMetadataWriter(metadata),
             mailboxName: mailboxRef,
             lastInteractiveAuthAt: metadata.lastInteractiveAuthAt,
           }
         : {
             clientId: metadata.clientId,
+            metadataWriter: gmail.createGmailMetadataWriter(metadata),
             clientSecret: metadata.clientSecret,
             redirectUri: metadata.redirectUri,
             mailboxName: mailboxRef,
