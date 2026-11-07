@@ -1,7 +1,7 @@
 // MCP server — thin transport adapter mapping action registry to MCP tools
 import { stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import type { DeletePolicy, EmailAction, EmailMessage, EmailProvider } from '@usejunior/email-core';
+import type { AllowlistInput, DeletePolicy, EmailAction, EmailMessage, EmailProvider } from '@usejunior/email-core';
 import {
   EMAIL_ACTIONS,
   EmailDraftStatusSchema,
@@ -13,6 +13,7 @@ import {
   profileBlockedActionError,
   parseAllowedDirs,
   ALLOWED_DIRS_ENV,
+  asAllowlistPolicy,
 } from '@usejunior/email-core';
 import { z } from 'zod';
 
@@ -712,7 +713,7 @@ export async function initProvider(state: LazyProviderState): Promise<void> {
  */
 export async function buildLazyActions(
   state: LazyProviderState,
-  getSendAllowlist: () => { entries: string[] } | undefined,
+  getSendAllowlist: () => AllowlistInput,
   getDeletePolicy: () => DeletePolicy | undefined = () => undefined,
 ): Promise<EmailActionDef[]> {
   // Sandbox boundary for body_file / attachment path reads. Resolved once so
@@ -1036,8 +1037,10 @@ export async function buildLazyActions(
 
             const healthWarning = mailbox.auth?.getTokenHealthWarning();
             if (healthWarning) warnings.push(healthWarning);
-            const currentAllowlist = getSendAllowlist();
-            if (!currentAllowlist || currentAllowlist.entries.length === 0) {
+            const currentAllowlist = asAllowlistPolicy(getSendAllowlist());
+            if (currentAllowlist.status === 'invalid') {
+              warnings.push('Send allowlist invalid — all outbound email is disabled');
+            } else if (currentAllowlist.status === 'absent' || currentAllowlist.config.entries.length === 0) {
               warnings.push('Send allowlist not configured — all outbound email is disabled. Run: email-agent-mcp configure');
             }
             return {
@@ -1120,12 +1123,14 @@ export async function runServer(): Promise<void> {
   const { StdioServerTransport } = await import('@modelcontextprotocol/sdk/server/stdio.js');
 
   // Load send allowlist with hot-reload (convention: ~/.email-agent-mcp/send-allowlist.json)
-  const { loadSendAllowlist, getSendAllowlistPath, WatchedAllowlist, getDeletePolicyFromEnv } = await import('@usejunior/email-core');
+  const { loadAllowlistPolicy, getSendAllowlistPath, WatchedAllowlist, getDeletePolicyFromEnv } = await import('@usejunior/email-core');
   const sendAllowlistPath = getSendAllowlistPath();
-  const sendAllowlistWatcher = new WatchedAllowlist(sendAllowlistPath, loadSendAllowlist);
+  const sendAllowlistWatcher = new WatchedAllowlist(sendAllowlistPath, loadAllowlistPolicy);
   await sendAllowlistWatcher.start();
-  const getSendAllowlist = () => sendAllowlistWatcher.config;
-  if (sendAllowlistWatcher.config && sendAllowlistWatcher.config.entries.length > 0) {
+  const getSendAllowlist = () => sendAllowlistWatcher.policy;
+  if (sendAllowlistWatcher.policy.status === 'invalid') {
+    console.error(`[email-agent-mcp] WARNING: Send allowlist invalid at ${sendAllowlistPath} — all outbound email is disabled`);
+  } else if (sendAllowlistWatcher.config && sendAllowlistWatcher.config.entries.length > 0) {
     console.error(`[email-agent-mcp] Send allowlist loaded (watched): ${sendAllowlistWatcher.config.entries.length} entries from ${sendAllowlistPath}`);
   } else {
     console.error(`[email-agent-mcp] WARNING: Send allowlist empty or not found at ${sendAllowlistPath} — all outbound email is disabled`);

@@ -3,22 +3,13 @@ import { WatchedAllowlist } from './watched-allowlist.js';
 import { writeFile, rm, mkdtemp, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { AllowlistConfig } from '../actions/registry.js';
+import { loadAllowlistPolicy } from './allowlist-policy.js';
 
 // Reuse the same loader pattern as the real allowlist files
-async function testLoader(filePath: string): Promise<AllowlistConfig | undefined> {
-  try {
-    const { readFile } = await import('node:fs/promises');
-    const content = await readFile(filePath, 'utf-8');
-    const data = JSON.parse(content) as { entries?: string[] };
-    return { entries: data.entries ?? [] };
-  } catch {
-    return undefined;
-  }
-}
+const testLoader = loadAllowlistPolicy;
 
 // Condition-based waiting — avoids flaky fixed sleeps
-async function waitFor(fn: () => boolean, timeoutMs = 2000): Promise<void> {
+async function waitFor(fn: () => boolean, timeoutMs = 10_000): Promise<void> {
   const start = Date.now();
   while (!fn()) {
     if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out');
@@ -26,7 +17,7 @@ async function waitFor(fn: () => boolean, timeoutMs = 2000): Promise<void> {
   }
 }
 
-describe('security/WatchedAllowlist', () => {
+describe('security/WatchedAllowlist', { timeout: 15_000 }, () => {
   let tmpDir: string;
   let watcher: WatchedAllowlist | null = null;
 
@@ -132,10 +123,13 @@ describe('security/WatchedAllowlist', () => {
     // Delete the file
     await unlink(filePath);
 
-    // Config should reset to undefined
-    await waitFor(() => watcher!.config === undefined);
+    // Observable deletion barrier: do not recreate until the real parent
+    // directory watch has published absence. Bounded for slow FSEvents (#206).
+    await waitFor(() => watcher!.policy.status === 'absent');
 
     expect(watcher.config).toBeUndefined();
+    await writeFile(filePath, JSON.stringify({ entries: ['recreated@test.com'] }));
+    await waitFor(() => watcher!.config?.entries[0] === 'recreated@test.com');
   });
 
   it('Scenario: close() stops watching', async () => {

@@ -507,13 +507,13 @@ function printJsonResult(value: unknown): void {
 export async function runCall(opts: CliOptions): Promise<number> {
   const { createLazyProviderState, buildLazyActions, ensureProvider, executeTool, getActionInputJsonSchema } =
     await import('./server.js');
-  const { loadSendAllowlist, getSendAllowlistPath, getDeletePolicyFromEnv } = await import('@usejunior/email-core');
+  const { loadAllowlistPolicy, getSendAllowlistPath, getDeletePolicyFromEnv } = await import('@usejunior/email-core');
 
   // Match `serve`'s allowlist setup, but DON'T spawn a watcher in a one-shot
   // process — load once and snapshot. (`serve` uses `WatchedAllowlist` for
   // hot-reload; `call` exits before any reload could fire.)
   const sendAllowlistPath = getSendAllowlistPath();
-  const snapshot = await loadSendAllowlist(sendAllowlistPath);
+  const snapshot = await loadAllowlistPolicy(sendAllowlistPath);
   const getSendAllowlist = () => snapshot;
 
   // Resolve delete policy from env once. getDeletePolicyFromEnv emits its own
@@ -659,13 +659,13 @@ export async function runWatch(opts: CliOptions): Promise<number> {
   } = await import('@usejunior/provider-microsoft');
   const {
     isAllowedSender,
-    loadReceiveAllowlist,
+    loadAllowlistPolicy,
     getReceiveAllowlistPath,
     WatchedAllowlist,
   } = await import('@usejunior/email-core');
   const { sendWake, acquireMailboxLease, releaseLock } = await import('./watcher.js');
   const { MailboxRunner, WatchShutdown } = await import('./watcher-runner.js');
-  const receiveWatcher = new WatchedAllowlist(getReceiveAllowlistPath(), loadReceiveAllowlist);
+  const receiveWatcher = new WatchedAllowlist(getReceiveAllowlistPath(), loadAllowlistPolicy);
   const token = process.env['OPENCLAW_HOOKS_TOKEN'] ?? config.hooksToken;
   const shutdown = new WatchShutdown(code => process.exit(code));
   process.on('SIGINT', shutdown.signal);
@@ -673,7 +673,9 @@ export async function runWatch(opts: CliOptions): Promise<number> {
   try {
     await receiveWatcher.start();
     if (shutdown.stopping) return 0;
-    if (!receiveWatcher.config) {
+    if (receiveWatcher.policy.status === 'invalid') {
+      console.error('[email-agent-mcp] WARNING: Invalid receive allowlist — blocking senders until repaired');
+    } else if (receiveWatcher.policy.status === 'absent') {
       console.error('[email-agent-mcp] WARNING: No receive allowlist configured — accepting all senders');
     }
     const allMailboxes = await listConfiguredMailboxesWithMetadata();
@@ -732,7 +734,7 @@ export async function runWatch(opts: CliOptions): Promise<number> {
             throw error;
           }
         },
-        allowed: message => isAllowedSender(message.from?.email ?? '', receiveWatcher.config),
+        allowed: message => isAllowedSender(message.from?.email ?? '', receiveWatcher.policy),
         wake: (payload, signal) => sendWake(wakeUrl, payload, token, signal),
         onError: error => console.error(
           `[email-agent-mcp] Watcher ${emailAddress}: ${error instanceof Error ? error.message : String(error)}`,

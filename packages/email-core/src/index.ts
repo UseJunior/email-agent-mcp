@@ -76,6 +76,9 @@ export {
   SendRateLimiter,
 } from './security/send-allowlist.js';
 export { WatchedAllowlist } from './security/watched-allowlist.js';
+export type { AllowlistLifecycle } from './security/watched-allowlist.js';
+export { loadAllowlistPolicy, asAllowlistPolicy } from './security/allowlist-policy.js';
+export type { AllowlistPolicy, AllowlistInput } from './security/allowlist-policy.js';
 export {
   SendLedger,
   computeSendFingerprint,
