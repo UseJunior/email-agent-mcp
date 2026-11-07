@@ -1683,7 +1683,10 @@ describe('provider-gmail/Draft Deletion', () => {
   function draftClient(overrides: Partial<GmailApiClient> = {}) {
     return createMockGmailClient({
       // Message ids are not draft ids: drafts.get rejects them.
-      getDraft: vi.fn().mockRejectedValue(notFound()),
+      getDraft: vi.fn().mockImplementation(async (id: string) => {
+        if (id !== 'r-target') throw notFound();
+        return { id, message: draftBackingMessage() };
+      }),
       getMessage: vi.fn().mockResolvedValue(draftBackingMessage()),
       listDrafts: vi.fn().mockResolvedValue({
         drafts: [
@@ -1724,7 +1727,10 @@ describe('provider-gmail/Draft Deletion', () => {
     const listDrafts = vi.fn()
       .mockResolvedValueOnce({ drafts: [{ id: 'r-other', messageId: 'msg-other' }], nextPageToken: 'page-2' })
       .mockResolvedValueOnce({ drafts: [{ id: 'r-target', messageId: 'msg-draft-1' }] });
-    const client = draftClient({ getDraft: vi.fn().mockRejectedValue(invalidId()), listDrafts });
+    const client = draftClient({ getDraft: vi.fn().mockImplementation(async (id: string) => {
+      if (id !== 'r-target') throw invalidId();
+      return { id, message: draftBackingMessage() };
+    }), listDrafts });
     const provider = new GmailEmailProvider(client);
 
     await provider.deleteMessage('msg-draft-1');
@@ -1889,11 +1895,55 @@ describe('provider-gmail/Draft Deletion', () => {
   it('Scenario: Draft reply status resolves a Gmail draft message id', async () => {
     const message = draftBackingMessage();
     message.payload.headers.push({ name: 'X-Agent-Draft-Origin', value: 'non_reply' });
-    const client = draftClient({ getMessage: vi.fn().mockResolvedValue(message) });
+    const client = draftClient({
+      getMessage: vi.fn().mockResolvedValue(message),
+      getDraft: vi.fn().mockImplementation(async (id: string) => {
+        if (id !== 'r-target') throw notFound();
+        return { id, message };
+      }),
+    });
     const provider = new GmailEmailProvider(client);
 
     await expect(provider.getDraftReplyStatus('msg-draft-1')).resolves.toBe('non_reply');
     await expect(provider.getDraft('msg-draft-1')).resolves.toMatchObject({ id: 'msg-draft-1', isDraft: true });
+  });
+});
+
+describe('provider-gmail/Draft snapshots', () => {
+  it('Scenario: Gmail snapshot re-reads canonical draft and changed backing message', async () => {
+    const message = { id: 'new-message', threadId: 'thread', historyId: 'revision-2', labelIds: ['DRAFT'],
+      payload: { headers: [{ name: 'X-Agent-Draft-Origin', value: 'non_reply' }] } };
+    const client = createMockGmailClient({
+      getDraft: vi.fn().mockRejectedValueOnce({ code: 404 }).mockResolvedValueOnce({ id: 'canonical', message }),
+      getMessage: vi.fn().mockResolvedValue({ ...message, id: 'old-message' }),
+      listDrafts: vi.fn().mockResolvedValue({ drafts: [{ id: 'canonical', messageId: 'old-message' }] }),
+    });
+    const snapshot = await new GmailEmailProvider(client).getDraftSnapshot('old-message');
+    expect(snapshot).toMatchObject({ draftId: 'canonical', messageId: 'new-message', revision: 'revision-2', lifecycle: 'editable', origin: 'non_reply' });
+    expect(client.getDraft).toHaveBeenNthCalledWith(2, 'canonical');
+  });
+
+  it('Scenario: Gmail snapshot refuses deletion during canonical resolution', async () => {
+    const client = createMockGmailClient({
+      getDraft: vi.fn().mockRejectedValue({ code: 404 }),
+      getMessage: vi.fn().mockResolvedValue({ id: 'old', threadId: 't', labelIds: ['DRAFT'] }),
+      listDrafts: vi.fn().mockResolvedValue({ drafts: [{ id: 'gone', messageId: 'old' }] }),
+    });
+    await expect(new GmailEmailProvider(client).getDraftSnapshot('old')).rejects.toBeInstanceOf(MessageNotFoundError);
+  });
+
+  it('Scenario: Gmail attachment rehydration failure preserves canonical draft id', async () => {
+    const client = createMockGmailClient({
+      getDraft: vi.fn().mockResolvedValue({ id: 'canonical', message: {
+        id: 'backing', threadId: 't', labelIds: ['DRAFT'], payload: { parts: [
+          { mimeType: 'text/plain', filename: 'file.txt', body: { attachmentId: 'attachment', size: 12 } },
+        ] },
+      } }),
+      getAttachment: vi.fn().mockRejectedValue(new Error('Download failed')),
+    });
+    const result = await new GmailEmailProvider(client).updateDraft('alias', { subject: 'Changed' });
+    expect(result).toMatchObject({ success: false, draftId: 'canonical', error: { code: 'UPDATE_DRAFT_FAILED' } });
+    expect(client.updateDraft).not.toHaveBeenCalled();
   });
 });
 

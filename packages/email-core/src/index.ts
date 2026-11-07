@@ -21,6 +21,7 @@ export type {
   ScheduledSend,
   ScheduledSendResult,
   DraftResult,
+  DraftSnapshot,
   EmailError,
   ListOptions,
   ReplyOptions,

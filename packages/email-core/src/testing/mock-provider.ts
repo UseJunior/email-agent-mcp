@@ -6,6 +6,7 @@ import type {
   ComposeMessage,
   SendResult,
   DraftResult,
+  DraftSnapshot,
   ListOptions,
   ReplyOptions,
   Subscription,
@@ -127,6 +128,7 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSchedul
       }));
       return {
         id,
+        isDraft: true,
         subject: draft.subject,
         from: { email: 'me@company.com' },
         to: draft.to,
@@ -355,6 +357,31 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSchedul
     if (this.replyDraftIds.has(draftId)) return 'reply';
     if (this.nonReplyDraftIds.has(draftId)) return 'non_reply';
     return 'indeterminate';
+  }
+
+  async getDraft(draftId: string): Promise<EmailMessage> {
+    if (!this.drafts.has(draftId)) throw new MessageNotFoundError(`Draft ${draftId} not found`);
+    return this.getMessage(draftId);
+  }
+
+  async getDraftSnapshot(draftId: string): Promise<DraftSnapshot> {
+    const origin = await this.getDraftReplyStatus(draftId);
+    const draft = this.drafts.get(draftId);
+    const message: EmailMessage | undefined = draft ? {
+      id: draftId, isDraft: true, subject: draft.subject,
+      from: { email: 'me@company.com' }, to: draft.to, cc: draft.cc, bcc: draft.bcc,
+      body: draft.body, bodyHtml: draft.bodyHtml,
+      receivedAt: new Date().toISOString(), isRead: true, hasAttachments: Boolean(draft.attachments?.length),
+    } : this.messages.find(item => item.id === draftId);
+    if (!message) throw new MessageNotFoundError(`Draft ${draftId} not found`);
+    const scheduledSendAt = this.scheduledSends.find(item => item.messageId === draftId)?.scheduledSendAt;
+    return {
+      draftId, messageId: message.id, message,
+      lifecycle: message.isDraft !== true ? 'indeterminate'
+        : scheduledSendAt && Date.parse(scheduledSendAt) > Date.now() ? 'deferred' : 'editable',
+      origin,
+      scheduledSendAt,
+    };
   }
 
   async updateDraft(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult> {

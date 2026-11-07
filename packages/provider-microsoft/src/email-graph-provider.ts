@@ -8,6 +8,7 @@ import type {
   OutboundAttachment,
   SendResult,
   DraftResult,
+  DraftSnapshot,
   EmailError,
   ListOptions,
   ReplyOptions,
@@ -1062,7 +1063,10 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
           : '';
         return {
           success: false,
-          error: { ...err.emailError, message: err.emailError.message + detail },
+          messageId: err.draftId,
+          error: { ...err.emailError,
+            code: err.emailError.code === 'DRAFT_PREPARATION_FAILED' ? 'REPLY_FAILED' : err.emailError.code,
+            message: err.emailError.message + detail },
         };
       }
       const message = err instanceof Error ? err.message : 'Failed to prepare reply';
@@ -1386,102 +1390,144 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
     );
     if (!draft.id) throw new Error(`${endpoint} did not return a draft id`);
 
-    let draftBody = draft.body as { contentType?: string; content?: string } | undefined;
-    let draftTo = (draft.toRecipients as GraphRecipient[] | undefined) ?? [];
-    let draftCc = (draft.ccRecipients as GraphRecipient[] | undefined) ?? [];
-    let draftBcc = (draft.bccRecipients as GraphRecipient[] | undefined) ?? [];
+    try {
+      let draftBody = draft.body as { contentType?: string; content?: string } | undefined;
+      let draftTo = (draft.toRecipients as GraphRecipient[] | undefined) ?? [];
+      let draftCc = (draft.ccRecipients as GraphRecipient[] | undefined) ?? [];
+      let draftBcc = (draft.bccRecipients as GraphRecipient[] | undefined) ?? [];
 
-    // Fallback GET when the POST response lacks a usable HTML body. Graph defaults
-    // to HTML on `Get message` so no Prefer header is needed.
-    if (typeof draftBody?.content !== 'string' || draftBody.contentType?.toLowerCase() !== 'html') {
-      const fetched = await this.client.get(`${this.basePath}/messages/${encodeGraphPathId(draft.id)}`);
-      draftBody = fetched.body as { contentType?: string; content?: string } | undefined;
-      draftTo = (fetched.toRecipients as GraphRecipient[] | undefined) ?? [];
-      draftCc = (fetched.ccRecipients as GraphRecipient[] | undefined) ?? [];
-      draftBcc = (fetched.bccRecipients as GraphRecipient[] | undefined) ?? [];
-    }
-
-    const draftContent = typeof draftBody?.content === 'string' ? draftBody.content : '';
-    const callerFragment = opts?.bodyHtml !== undefined
-      ? stripHtmlBodyWrappers(opts.bodyHtml)
-      : wrapPlainTextAsHtml(body);
-    const merged = mergeQuotedReplyHtml(draftContent, callerFragment);
-
-    const patch: Record<string, unknown> = {
-      body: { contentType: 'HTML', content: truncateBody(merged) },
-      singleValueExtendedProperties: [
-        { id: DRAFT_ORIGIN_PROPERTY, value: 'reply' },
-      ],
-    };
-
-    // `to` REPLACES Graph's auto-populated recipients; `cc`/`bcc` below MERGE
-    // with the thread's. The asymmetry is deliberate (issue #164): merging a
-    // caller-supplied To would leave the parent's sender on the To line, which
-    // is exactly the failure being fixed — a reply to your own sent message
-    // stays addressed to yourself. Absent `to`, the patch omits toRecipients
-    // entirely and Graph's derived To stands, unchanged from before.
-    // mergeRecipients([], …) is reused only for its EmailAddress →
-    // GraphRecipient conversion and case-insensitive dedupe.
-    const hasExplicitTo = Boolean(opts?.to && opts.to.length > 0);
-
-    // Anyone on `bcc` comes off the visible lines Graph derived, so a thread
-    // participant can be moved to Bcc without restating the audience (issue
-    // #214). Bcc wins over a derived To/Cc.
-    const hidden = new Set((opts?.bcc ?? []).map(a => a.email.toLowerCase()));
-    const isVisible = (r: GraphRecipient): boolean =>
-      !hidden.has(r.emailAddress?.address?.toLowerCase() ?? '');
-
-    if (hasExplicitTo) {
-      patch.toRecipients = mergeRecipients([], opts!.to!).filter(isVisible);
-    } else if (draftTo.some(r => !isVisible(r))) {
-      // Only touch toRecipients when something must come off it; otherwise
-      // Graph's derived To stands untouched, as before.
-      patch.toRecipients = draftTo.filter(isVisible);
-    }
-
-    // Replacing the To line must not silently drop anyone. On the reply-all
-    // endpoint Graph puts the parent's sender AND its other To participants on
-    // the draft's To; an explicit `to` displaces all of them, so demote the
-    // displaced ones to Cc — reply-all means the thread stays on the message,
-    // and `to` only decides who it is addressed to. This also brings Microsoft
-    // in line with Gmail, which already carries the thread's participants on Cc
-    // under reply-all. On the sender-only endpoint there is nothing to preserve:
-    // Graph's To is just the parent's sender, and replacing that is the point of
-    // a narrowed redirect.
-    const displacedTo = hasExplicitTo && opts?.replyAll !== false
-      ? draftTo.filter(r => {
-        const address = r.emailAddress?.address?.toLowerCase();
-        return address ? !opts!.to!.some(a => a.email.toLowerCase() === address) : false;
-      })
-      : [];
-
-    const ccMerged = mergeRecipients([...draftCc, ...displacedTo], opts?.cc ?? []).filter(isVisible);
-    if (ccMerged.length > 0 || draftCc.some(r => !isVisible(r))) patch.ccRecipients = ccMerged;
-
-    const bccMerged = mergeRecipients(draftBcc, opts?.bcc ?? []);
-    if (bccMerged.length > 0) patch.bccRecipients = bccMerged;
-
-    await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(draft.id)}`, patch);
-
-    // Two-step attachment upload: the draft now exists, so POST each file to
-    // its /attachments collection. A failure here leaves a created-but-
-    // incomplete draft — surface its id so the caller can inspect or retry.
-    if (opts?.attachments && opts.attachments.length > 0) {
-      try {
-        await this.postDraftAttachments(draft.id, opts.attachments);
-      } catch (err) {
-        throw new GraphAttachmentError(
-          {
-            code: 'ATTACHMENT_UPLOAD_FAILED',
-            message: `Reply draft was created but attaching files failed: ${err instanceof Error ? err.message : String(err)}`,
-            recoverable: false,
-          },
-          draft.id,
-        );
+      // Fallback GET when the POST response lacks a usable HTML body. Graph defaults
+      // to HTML on `Get message` so no Prefer header is needed.
+      if (typeof draftBody?.content !== 'string' || draftBody.contentType?.toLowerCase() !== 'html') {
+        const fetched = await this.client.get(`${this.basePath}/messages/${encodeGraphPathId(draft.id)}`);
+        draftBody = fetched.body as { contentType?: string; content?: string } | undefined;
+        draftTo = (fetched.toRecipients as GraphRecipient[] | undefined) ?? [];
+        draftCc = (fetched.ccRecipients as GraphRecipient[] | undefined) ?? [];
+        draftBcc = (fetched.bccRecipients as GraphRecipient[] | undefined) ?? [];
       }
-    }
 
-    return draft.id;
+      const draftContent = typeof draftBody?.content === 'string' ? draftBody.content : '';
+      const callerFragment = opts?.bodyHtml !== undefined
+        ? stripHtmlBodyWrappers(opts.bodyHtml)
+        : wrapPlainTextAsHtml(body);
+      const merged = mergeQuotedReplyHtml(draftContent, callerFragment);
+
+      const patch: Record<string, unknown> = {
+        body: { contentType: 'HTML', content: truncateBody(merged) },
+        singleValueExtendedProperties: [
+          { id: DRAFT_ORIGIN_PROPERTY, value: 'reply' },
+        ],
+      };
+
+      // `to` REPLACES Graph's auto-populated recipients; `cc`/`bcc` below MERGE
+      // with the thread's. The asymmetry is deliberate (issue #164): merging a
+      // caller-supplied To would leave the parent's sender on the To line, which
+      // is exactly the failure being fixed — a reply to your own sent message
+      // stays addressed to yourself. Absent `to`, the patch omits toRecipients
+      // entirely and Graph's derived To stands, unchanged from before.
+      // mergeRecipients([], …) is reused only for its EmailAddress →
+      // GraphRecipient conversion and case-insensitive dedupe.
+      const hasExplicitTo = Boolean(opts?.to && opts.to.length > 0);
+
+      // Anyone on `bcc` comes off the visible lines Graph derived, so a thread
+      // participant can be moved to Bcc without restating the audience (issue
+      // #214). Bcc wins over a derived To/Cc.
+      const hidden = new Set((opts?.bcc ?? []).map(a => a.email.toLowerCase()));
+      const isVisible = (r: GraphRecipient): boolean =>
+        !hidden.has(r.emailAddress?.address?.toLowerCase() ?? '');
+
+      if (hasExplicitTo) {
+        patch.toRecipients = mergeRecipients([], opts!.to!).filter(isVisible);
+      } else if (draftTo.some(r => !isVisible(r))) {
+        // Only touch toRecipients when something must come off it; otherwise
+        // Graph's derived To stands untouched, as before.
+        patch.toRecipients = draftTo.filter(isVisible);
+      }
+
+      // Replacing the To line must not silently drop anyone. On the reply-all
+      // endpoint Graph puts the parent's sender AND its other To participants on
+      // the draft's To; an explicit `to` displaces all of them, so demote the
+      // displaced ones to Cc — reply-all means the thread stays on the message,
+      // and `to` only decides who it is addressed to. This also brings Microsoft
+      // in line with Gmail, which already carries the thread's participants on Cc
+      // under reply-all. On the sender-only endpoint there is nothing to preserve:
+      // Graph's To is just the parent's sender, and replacing that is the point of
+      // a narrowed redirect.
+      const displacedTo = hasExplicitTo && opts?.replyAll !== false
+        ? draftTo.filter(r => {
+          const address = r.emailAddress?.address?.toLowerCase();
+          return address ? !opts!.to!.some(a => a.email.toLowerCase() === address) : false;
+        })
+        : [];
+
+      const ccMerged = mergeRecipients([...draftCc, ...displacedTo], opts?.cc ?? []).filter(isVisible);
+      if (ccMerged.length > 0 || draftCc.some(r => !isVisible(r))) patch.ccRecipients = ccMerged;
+
+      const bccMerged = mergeRecipients(draftBcc, opts?.bcc ?? []);
+      if (bccMerged.length > 0) patch.bccRecipients = bccMerged;
+
+      await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(draft.id)}`, patch);
+
+      // Two-step attachment upload: the draft now exists, so POST each file to
+      // its /attachments collection. A failure here leaves a created-but-
+      // incomplete draft — surface its id so the caller can inspect or retry.
+      if (opts?.attachments && opts.attachments.length > 0) {
+        try {
+          await this.postDraftAttachments(draft.id, opts.attachments);
+        } catch (err) {
+          throw new GraphAttachmentError(
+            {
+              code: 'ATTACHMENT_UPLOAD_FAILED',
+              message: `Reply draft was created but attaching files failed: ${err instanceof Error ? err.message : String(err)}`,
+              recoverable: false,
+            },
+            draft.id,
+          );
+        }
+      }
+
+      return draft.id;
+    } catch (err) {
+      if (err instanceof GraphAttachmentError) throw err;
+      throw new GraphAttachmentError({
+        code: 'DRAFT_PREPARATION_FAILED',
+        message: `Reply draft was created but preparation failed: ${err instanceof Error ? err.message : String(err)}`,
+        recoverable: false,
+      }, draft.id);
+    }
+  }
+
+  async getDraft(draftId: string): Promise<EmailMessage> {
+    // Preserve the existing expanded attachment/unique-body preview reader.
+    const message = await this.getMessage(draftId);
+    if (message.isDraft !== true) throw new MessageNotFoundError(`Editable draft ${draftId} not found`);
+    return message;
+  }
+
+  async getDraftSnapshot(draftId: string): Promise<DraftSnapshot> {
+    let metadata: GraphMessage;
+    try {
+      metadata = await this.client.get(
+        `${this.basePath}/messages/${encodeGraphPathId(draftId)}`
+        + `?$select=${MESSAGE_SELECT},conversationIndex,changeKey`
+        + `&$expand=singleValueExtendedProperties($filter=id eq '${DRAFT_ORIGIN_PROPERTY}' or id eq '${DEFERRED_SEND_PROPERTY}')`,
+      ) as unknown as GraphMessage;
+    } catch (err) {
+      if (err instanceof GraphApiError && err.status === 404) throw new MessageNotFoundError(`Draft ${draftId} not found`);
+      throw err;
+    }
+    const scheduledSendAt = findDeferredSendProperty(metadata)?.value;
+    const pending = scheduledSendAt !== undefined && Number.isFinite(Date.parse(scheduledSendAt))
+      && Date.parse(scheduledSendAt) > Date.now();
+    return {
+      draftId: metadata.id,
+      messageId: metadata.id,
+      message: mapGraphMessage(metadata),
+      revision: metadata.changeKey,
+      lifecycle: metadata.isDraft === true ? (pending ? 'deferred' : 'editable') : 'indeterminate',
+      origin: this.draftOrigin(metadata),
+      scheduledSendAt,
+    };
   }
 
   async getDraftReplyStatus(draftId: string): Promise<DraftReplyStatus> {
@@ -1500,8 +1546,10 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       throw err;
     }
 
-    if (metadata.isDraft !== true) return 'indeterminate';
+    return metadata.isDraft === true ? this.draftOrigin(metadata) : 'indeterminate';
+  }
 
+  private draftOrigin(metadata: GraphMessage): DraftReplyStatus {
     // Duplicate stamps are ambiguous: taking the first match would make the
     // answer depend on the order Graph returns the collection. Only a single,
     // unanimous stamp is authoritative.
@@ -1548,7 +1596,15 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       }
     }
 
-    await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(draftId)}`, patch);
+    try {
+      await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(draftId)}`, patch);
+    } catch (err) {
+      return { success: false, draftId, error: {
+        code: 'UPDATE_DRAFT_FAILED',
+        message: err instanceof Error ? err.message : String(err),
+        recoverable: false,
+      } };
+    }
 
     if (msg.attachments !== undefined) {
       try {
@@ -1972,6 +2028,7 @@ function scheduledSendNotFoundError(): ProviderError {
 
 interface GraphMessage {
   id: string;
+  changeKey?: string;
   subject: string;
   from?: { emailAddress: { address: string; name?: string } };
   toRecipients?: Array<{ emailAddress: { address: string; name?: string } }>;

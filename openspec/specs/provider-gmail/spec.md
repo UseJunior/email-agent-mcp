@@ -7,6 +7,22 @@ feature: Gmail Provider
 
 Implements the provider interface for Gmail API email operations. Uses `@googleapis/gmail` (lightweight, ~1.1MB). Supports OAuth2 authentication, Gmail-specific label/star mapping, dual watch mode (Pub/Sub with 7-day auto-renewal + history.list polling fallback), and anti-spoofing via Authentication-Results headers.
 ## Requirements
+### Requirement: Canonical Gmail draft observations
+
+Gmail snapshots SHALL resolve draft/message IDs and re-read the canonical draft resource after message-ID resolution, capturing its current backing message and history revision. Partial attachment rehydration failures SHALL retain the known canonical draft ID.
+
+#### Scenario: Gmail snapshot re-reads canonical draft and changed backing message
+- **WHEN** message-ID resolution finds a draft whose backing message changed
+- **THEN** the snapshot contains the canonical draft ID and newly observed backing message ID
+
+#### Scenario: Gmail snapshot refuses deletion during canonical resolution
+- **WHEN** a draft disappears between list resolution and canonical read
+- **THEN** observation fails as not found
+
+#### Scenario: Gmail attachment rehydration failure preserves canonical draft id
+- **WHEN** preserving attachments fails before draft replacement
+- **THEN** the failure result retains the canonical draft ID
+
 ### Requirement: OAuth2 Authentication
 
 The system SHALL authenticate to Gmail via OAuth2 using `@googleapis/gmail` (NOT the full `googleapis` package at 200MB).
