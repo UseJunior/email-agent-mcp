@@ -251,12 +251,13 @@ export const sendEmailAction: EmailAction<
 
     if (scheduledSendAt !== undefined) {
       if (!ctx.provider.scheduleMessage) {
-        claim.settle({ success: false, errorCode: 'NOT_SUPPORTED' });
+        claim.release();
         return scheduledSendNotSupportedError();
       }
       try {
         // Do not retry the two-write draft→send operation as a unit: a lost
         // response after draft creation could otherwise queue a duplicate.
+        claim.markDispatched();
         const result = await ctx.provider.scheduleMessage(composeMessage, scheduledSendAt);
         claim.settle({
           success: result.success,
@@ -305,6 +306,7 @@ export const sendEmailAction: EmailAction<
     // can silently deliver duplicates. Fail fast and surface the structured
     // error instead (mirrors the scheduled-send branch above).
     try {
+      claim.markDispatched();
       const result = await ctx.provider.sendMessage(composeMessage);
 
       claim.settle({
