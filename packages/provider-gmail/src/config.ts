@@ -242,7 +242,11 @@ export function createGmailMetadataWriter(metadata: GmailMailboxMetadata):
         try { current = normalizeGmailMailboxMetadata(JSON.parse(await readFile(path, 'utf-8'))); }
         catch (error) {
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-          throw error;
+          // The canonical target must not be overwritten if corrupt. Other
+          // candidates may belong to unrelated mailboxes/providers; discovery
+          // already skips those, so they must not prevent a valid alias rotation.
+          if (file === canonical) throw error;
+          continue;
         }
         if (!current || current.emailAddress !== metadata.emailAddress) continue;
         // Refuse stale rotations and changes to the configured OAuth identity.
