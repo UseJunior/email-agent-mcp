@@ -2,6 +2,7 @@
 import { z } from 'zod';
 import type { EmailProvider } from '../providers/provider.js';
 import type { SendLedger } from '../security/send-ledger.js';
+import type { AllowlistInput } from '../security/allowlist-policy.js';
 import { listAttachmentsAction, downloadAttachmentAction, downloadMessageAction } from './attachments.js';
 import { getThreadAction } from './conversation.js';
 import { createDraftAction, sendDraftAction, updateDraftAction } from './draft.js';
@@ -20,8 +21,8 @@ export interface ActionContext {
   provider: EmailProvider;
   mailboxName?: string;
   allMailboxes?: MailboxEntry[];
-  sendAllowlist?: AllowlistConfig;
-  receiveAllowlist?: AllowlistConfig;
+  sendAllowlist?: AllowlistInput;
+  receiveAllowlist?: AllowlistInput;
   safeDir?: string;
   /**
    * Extra absolute roots that caller-supplied `body_file` / attachment paths

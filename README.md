@@ -667,6 +667,22 @@ Agent Email ships with restrictive defaults that you loosen as needed:
 
 - **Send allowlist**: empty by default -- agents cannot send email until you add recipients
 - **Receive allowlist**: accepts all by default -- controls which senders trigger the watcher
+
+Allowlist files must contain an `entries` array of strings. Missing files keep
+the defaults above; an explicitly empty receive array also accepts all senders.
+An unreadable or malformed startup policy blocks the operations it governs.
+During hot reload, an invalid file retains the last good policy; deleting the
+file restores its absent-file default. The watcher monitors the parent directory
+so atomic replacement and recreation are supported. Watch errors retain the
+current policy and disable hot reload with a stderr warning.
+
+For embedders, `loadAllowlistPolicy()` and `WatchedAllowlist.policy` expose
+`absent | valid | invalid` policy states. Pass the policy directly to permission
+checks. The legacy `loadSendAllowlist()` / `loadReceiveAllowlist()` signatures
+and `WatchedAllowlist.config` remain as deprecated adapters; their `undefined`
+result cannot distinguish invalid policy from absence. Watcher lifecycle is
+`unstarted | starting | active | degraded | closed`; startup is shared and
+idempotent, reads are serialized, and close is terminal.
 - **Delete disabled**: agents cannot delete email by default. Two gates must both be satisfied:
   1. operator sets `AGENT_EMAIL_DELETE_ENABLED=true` in the email-agent-mcp process environment (and `AGENT_EMAIL_HARD_DELETE_ENABLED=true` for permanent deletion). Restart required after change. Gmail can delete only drafts, and a draft delete is always permanent; it needs only `AGENT_EMAIL_DELETE_ENABLED`.
   2. the caller passes `user_explicitly_requested_deletion: true` on the tool call.
