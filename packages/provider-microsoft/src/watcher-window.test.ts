@@ -79,7 +79,7 @@ describe('provider-microsoft/Watcher complete windows', () => {
     expect(get).toHaveBeenCalledTimes(1);
   });
 
-  it('propagates cancellation to token acquisition, reconnect and fetch', async () => {
+  it('propagates cancellation to token acquisition and fetch while recovery is shared', async () => {
     const abort = new AbortController();
     const token = vi.fn(async () => 'token');
     const reconnect = vi.fn(async () => true);
@@ -87,7 +87,7 @@ describe('provider-microsoft/Watcher complete windows', () => {
     vi.stubGlobal('fetch', fetch);
     await new RealGraphApiClient(token, reconnect).get('/me/messages', abort.signal);
     expect(token.mock.calls).toEqual([[abort.signal], [abort.signal]]);
-    expect(reconnect).toHaveBeenCalledWith(abort.signal);
+    expect(reconnect).toHaveBeenCalledWith();
     for (const call of fetch.mock.calls) expect(call[1].signal).toBe(abort.signal);
     abort.abort();
     await expect(new RealGraphApiClient(token).get('/me/messages', abort.signal)).rejects.toThrow();

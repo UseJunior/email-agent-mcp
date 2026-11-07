@@ -57,9 +57,11 @@ export {
   parseRetryAfter,
   isRetryable,
   withRetry,
+  withAuthenticatedRetry,
+  withAutoRefresh,
   SEND_STATUS_UNKNOWN,
 } from './providers/provider.js';
-export type { OperationKind, DispatchStage, ClassifiedFailure } from './providers/provider.js';
+export type { OperationKind, DispatchStage, ClassifiedFailure, AuthErrorClassification } from './providers/provider.js';
 export {
   isAllowedSender,
   loadReceiveAllowlist,

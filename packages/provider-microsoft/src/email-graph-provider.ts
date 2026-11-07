@@ -26,6 +26,7 @@ import type {
   ScheduledSendResult,
   EmailScheduledSender,
   DraftReplyStatus,
+  OperationKind,
 } from '@usejunior/email-core';
 import {
   AttachmentNotSupportedError,
@@ -36,6 +37,7 @@ import {
   classifyTransportError,
   parseRetryAfter,
   SEND_STATUS_UNKNOWN,
+  withAuthenticatedRetry,
   validateScheduledSendAt,
   runScheduledWorkflow,
 } from '@usejunior/email-core';
@@ -219,12 +221,12 @@ const FOLDER_SELECT = '$select=id,displayName,parentFolderId,childFolderCount,un
 
 export interface GraphApiClient {
   get(url: string, signal?: AbortSignal): Promise<{ value?: unknown[]; [key: string]: unknown }>;
-  post(url: string, body?: unknown): Promise<{ id?: string; [key: string]: unknown }>;
-  patch(url: string, body: unknown): Promise<void>;
-  delete(url: string): Promise<void>;
+  post(url: string, body?: unknown, signal?: AbortSignal): Promise<{ id?: string; [key: string]: unknown }>;
+  patch(url: string, body: unknown, signal?: AbortSignal): Promise<void>;
+  delete(url: string, signal?: AbortSignal): Promise<void>;
   putUploadChunk?(url: string, content: Buffer, start: number, total: number): Promise<void>;
   /** GET a binary body (e.g. `/messages/{id}/$value`). Optional so test doubles need not implement it. */
-  getBytes?(url: string): Promise<Buffer>;
+  getBytes?(url: string, signal?: AbortSignal): Promise<Buffer>;
 }
 
 /** Delta query select fields for efficiency */
@@ -275,6 +277,10 @@ export interface DeltaResult {
   nextDeltaLink: string;
 }
 
+class GraphAuthRejection extends Error {
+  constructor(readonly response: Response) { super('Graph rejected authentication'); }
+}
+
 /**
  * Real Graph API client using fetch + Bearer token.
  * Used when connected to a real mailbox via DelegatedAuthManager.
@@ -282,6 +288,7 @@ export interface DeltaResult {
 export class RealGraphApiClient implements GraphApiClient {
   private getToken: (signal?: AbortSignal) => Promise<string>;
   private onAuthError?: (signal?: AbortSignal) => Promise<boolean>;
+  private recovery?: Promise<boolean>;
 
   constructor(getToken: (signal?: AbortSignal) => Promise<string>, onAuthError?: (signal?: AbortSignal) => Promise<boolean>) {
     this.getToken = getToken;
@@ -303,63 +310,80 @@ export class RealGraphApiClient implements GraphApiClient {
     return new GraphApiError(resp.status, await resp.text(), retryAfter);
   }
 
-  /** Fetch with automatic retry on 401 if onAuthError callback is provided. */
-  private async fetchWithAuthRetry(url: string, init: RequestInit): Promise<Response> {
-    init.signal?.throwIfAborted();
-    const resp = await fetch(url, init);
-    if (resp.status === 401 && this.onAuthError) {
-      init.signal?.throwIfAborted();
-      const ok = await this.onAuthError(init.signal ?? undefined);
-      if (ok) {
-        const newToken = await this.getToken(init.signal ?? undefined);
-        init.signal?.throwIfAborted();
-        const retryHeaders = { ...(init.headers as Record<string, string>), Authorization: `Bearer ${newToken}` };
-        return fetch(url, { ...init, headers: retryHeaders });
-      }
+  private recoverAuth(): Promise<boolean> {
+    // Shared recovery belongs to the client; cancellation stops an individual
+    // waiter without cancelling another request's credential recovery.
+    if (!this.recovery) {
+      this.recovery = Promise.resolve().then(() => this.onAuthError!()).finally(() => { this.recovery = undefined; });
     }
-    return resp;
+    return this.recovery;
+  }
+
+  /** Only a received 401 authorizes the single auth replay, including delivery. */
+  private async fetchWithAuthRetry(url: string, init: RequestInit, operation: OperationKind): Promise<Response> {
+    const signal = init.signal ?? undefined;
+    try {
+      return await withAuthenticatedRetry(async () => {
+        const token = await this.getToken(signal);
+        signal?.throwIfAborted();
+        const headers = { ...(init.headers as Record<string, string>), Authorization: `Bearer ${token}` };
+        const response = await fetch(url, { ...init, headers });
+        if (response.status === 401) throw new GraphAuthRejection(response);
+        return response;
+      }, {
+        operation,
+        signal,
+        classifyAuthError: error => error instanceof GraphAuthRejection && !!this.onAuthError ? 'rejected' : false,
+        refresh: () => this.recoverAuth(),
+      });
+    } catch (error) {
+      if (error instanceof GraphAuthRejection) return error.response;
+      throw error;
+    }
   }
 
   async get(url: string, signal?: AbortSignal): Promise<{ value?: unknown[]; [key: string]: unknown }> {
     signal?.throwIfAborted();
-    const token = await this.getToken(signal);
-    signal?.throwIfAborted();
     const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
     const resp = await this.fetchWithAuthRetry(fullUrl, {
       ...(signal ? { signal } : {}),
-      headers: { Authorization: `Bearer ${token}`, Prefer: IMMUTABLE_ID_PREFER },
-    });
+      headers: { Prefer: IMMUTABLE_ID_PREFER },
+    }, 'idempotent-read');
     if (!resp.ok) {
       throw await this.errorFrom(resp);
     }
     return resp.json() as Promise<{ value?: unknown[]; [key: string]: unknown }>;
   }
 
-  async getBytes(url: string): Promise<Buffer> {
-    const token = await this.getToken();
+  async getBytes(url: string, signal?: AbortSignal): Promise<Buffer> {
     const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
     const resp = await this.fetchWithAuthRetry(fullUrl, {
-      headers: { Authorization: `Bearer ${token}`, Prefer: IMMUTABLE_ID_PREFER },
-    });
+      signal,
+      headers: { Prefer: IMMUTABLE_ID_PREFER },
+    }, 'idempotent-read');
     if (!resp.ok) {
       throw await this.errorFrom(resp);
     }
     return Buffer.from(await resp.arrayBuffer());
   }
 
-  async post(url: string, body?: unknown): Promise<{ id?: string; [key: string]: unknown }> {
-    const token = await this.getToken();
+  async post(url: string, body?: unknown, signal?: AbortSignal): Promise<{ id?: string; [key: string]: unknown }> {
     const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${token}`,
       Prefer: IMMUTABLE_ID_PREFER,
     };
-    const init: RequestInit = { method: 'POST', headers };
+    const init: RequestInit = { method: 'POST', headers, signal };
     if (body !== undefined) {
       headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(body);
     }
-    const resp = await this.fetchWithAuthRetry(fullUrl, init);
+    // These action endpoints dispatch mail. Other POSTs create/move resources.
+    // Unknown POSTs are conservatively delivery; only known resource actions
+    // are labelled writes. Neither classification enables a non-401 retry.
+    const path = new URL(fullUrl).pathname;
+    const operation: OperationKind = /\/(messages|attachments|mailFolders|messageRules|createReply|createReplyAll|createForward|move|copy|createUploadSession)\/?$/i.test(path)
+      ? 'idempotent-write' : 'delivery';
+    const resp = await this.fetchWithAuthRetry(fullUrl, init, operation);
     // sendMail returns 202 with no body
     if (resp.status === 202) return {};
     if (!resp.ok) {
@@ -369,30 +393,29 @@ export class RealGraphApiClient implements GraphApiClient {
     return text ? JSON.parse(text) as { id?: string; [key: string]: unknown } : {};
   }
 
-  async patch(url: string, body: unknown): Promise<void> {
-    const token = await this.getToken();
+  async patch(url: string, body: unknown, signal?: AbortSignal): Promise<void> {
     const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
     const resp = await this.fetchWithAuthRetry(fullUrl, {
       method: 'PATCH',
+      signal,
       headers: {
-        Authorization: `Bearer ${token}`,
         Prefer: IMMUTABLE_ID_PREFER,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
-    });
+    }, 'idempotent-write');
     if (!resp.ok) {
       throw await this.errorFrom(resp);
     }
   }
 
-  async delete(url: string): Promise<void> {
-    const token = await this.getToken();
+  async delete(url: string, signal?: AbortSignal): Promise<void> {
     const fullUrl = url.startsWith('http') ? url : `https://graph.microsoft.com/v1.0${url}`;
     const resp = await this.fetchWithAuthRetry(fullUrl, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}`, Prefer: IMMUTABLE_ID_PREFER },
-    });
+      signal,
+      headers: { Prefer: IMMUTABLE_ID_PREFER },
+    }, 'idempotent-write');
     if (!resp.ok) {
       throw await this.errorFrom(resp);
     }

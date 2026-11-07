@@ -488,19 +488,26 @@ export async function withRetry<T>(
     baseDelay?: number;
     maxDelay?: number;
     operation?: OperationKind;
+    signal?: AbortSignal;
   } = {},
 ): Promise<T> {
   const maxRetries = opts.maxRetries ?? 3;
   const baseDelay = opts.baseDelay ?? 1000;
   const maxDelay = opts.maxDelay ?? 16000;
   const operation = opts.operation ?? 'idempotent-read';
+  for (const [name, value] of Object.entries({ maxRetries, baseDelay, maxDelay })) {
+    if (!Number.isFinite(value) || value < 0 || (name === 'maxRetries' && !Number.isInteger(value))) {
+      throw new RangeError(`${name} must be finite and nonnegative${name === 'maxRetries' ? ' (integer)' : ''}`);
+    }
+  }
 
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      return await fn();
+      return await waitWithSignal(fn, opts.signal);
     } catch (err) {
+      opts.signal?.throwIfAborted();
       lastError = err;
 
       if (attempt === maxRetries) break;
@@ -508,17 +515,73 @@ export async function withRetry<T>(
 
       // A provider-supplied Retry-After is a floor, not a ceiling: honour it
       // when it exceeds our own backoff, so we do not hammer a throttled API.
-      const backoff = Math.min(baseDelay * Math.pow(2, attempt), maxDelay);
+      const backoff = baseDelay === 0 ? 0 : Math.min(baseDelay * Math.pow(2, attempt), maxDelay);
       const retryAfterMs = isProviderError(err) && typeof err.retryAfter === 'number'
-        ? err.retryAfter * 1000
+        && Number.isFinite(err.retryAfter) && err.retryAfter >= 0
+        ? Math.min(err.retryAfter, Number.MAX_VALUE / 1000) * 1000
         : 0;
-      const delay = Math.max(backoff, retryAfterMs);
-      const jitter = retryAfterMs > backoff ? delay : delay * (0.5 + Math.random() * 0.5);
-      await new Promise(resolve => setTimeout(resolve, jitter));
+      const delay = Math.max(retryAfterMs, backoff * (0.5 + Math.random() * 0.5));
+      await retryWait(delay, opts.signal);
     }
   }
 
   throw lastError;
+}
+
+/** Stop waiting promptly even when a dependency does not implement cancellation. */
+async function waitWithSignal<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  signal?.throwIfAborted();
+  if (!signal) return fn();
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    Promise.resolve().then(() => {
+      signal.throwIfAborted();
+      return fn();
+    }).then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
+}
+
+/** Chunk long server floors: setTimeout over 2^31-1 otherwise fires in 1ms. */
+async function retryWait(delay: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  while (delay > 0) {
+    const chunk = Math.min(delay, 2_147_483_647);
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => { clearTimeout(timer); reject(signal?.reason); };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', abort);
+        resolve();
+      }, chunk);
+      signal?.addEventListener('abort', abort, { once: true });
+    });
+    signal?.throwIfAborted();
+    delay -= chunk;
+  }
+}
+
+/** `rejected` certifies an explicit auth rejection before the side effect. */
+export type AuthErrorClassification = false | 'auth-related' | 'rejected';
+
+/** One auth recovery attempt. Expiry and generic recoverability never authorize replay. */
+export async function withAuthenticatedRetry<T>(
+  fn: () => Promise<T>,
+  opts: {
+    operation: OperationKind;
+    classifyAuthError: (error: unknown) => AuthErrorClassification;
+    refresh: () => Promise<boolean | void>;
+    signal?: AbortSignal;
+  },
+): Promise<T> {
+  try {
+    return await waitWithSignal(fn, opts.signal);
+  } catch (error) {
+    opts.signal?.throwIfAborted();
+    const classification = opts.classifyAuthError(error);
+    if (!classification || (opts.operation === 'delivery' && classification !== 'rejected')) throw error;
+    if (await waitWithSignal(opts.refresh, opts.signal) === false) throw error;
+    return waitWithSignal(fn, opts.signal);
+  }
 }
 
 // Authentication lifecycle interface
@@ -529,19 +592,23 @@ export interface AuthManager {
   isTokenExpired(): boolean;
 }
 
-// Wrapper that auto-refreshes tokens
+/**
+ * @deprecated Use withAuthenticatedRetry with explicit operation and classification.
+ * Compatibility defaults to delivery safety: only an explicit HTTP 401 permits
+ * replay. AUTH_REQUIRED alone permits reads/writes, never an unspecified send.
+ */
 export async function withAutoRefresh<T>(
   authManager: AuthManager,
   fn: () => Promise<T>,
+  opts: { operation?: OperationKind; signal?: AbortSignal } = {},
 ): Promise<T> {
-  try {
-    return await fn();
-  } catch (err) {
-    // If token expired, refresh and retry
-    if (authManager.isTokenExpired()) {
-      await authManager.refresh();
-      return await fn();
-    }
-    throw err;
-  }
+  return withAuthenticatedRetry(fn, {
+    operation: opts.operation ?? 'delivery',
+    signal: opts.signal,
+    refresh: () => authManager.refresh(),
+    classifyAuthError: error => {
+      if (error && typeof error === 'object' && 'status' in error && error.status === 401) return 'rejected';
+      return isProviderError(error) && error.code === 'AUTH_REQUIRED' ? 'auth-related' : false;
+    },
+  });
 }
