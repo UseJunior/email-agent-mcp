@@ -95,3 +95,31 @@ The system SHALL enforce configurable rate limits on outbound operations (max se
 - **WHEN** the agent exceeds the configured send rate
 - **THEN** the system returns an error with retry-after guidance
 
+### Requirement: Validated Allowlist Policy Lifecycle
+
+Allowlist policy SHALL distinguish absent, valid and invalid states. Only a missing path/file SHALL select absent defaults (send denied, receive accepted). Existing malformed or unreadable policy SHALL block governed operations at startup. Reloads SHALL be serialized; malformed reloads SHALL retain the last good policy. Startup SHALL be idempotent, and close SHALL prevent late publication. Explicit empty receive lists SHALL retain their existing accept-all meaning.
+
+#### Scenario: Only missing files and absent paths use absent defaults
+- **WHEN** loading encounters malformed data or a non-ENOENT filesystem error
+- **THEN** policy SHALL be invalid rather than absent
+
+#### Scenario: Invalid startup stays blocked until a valid reload
+- **WHEN** an existing startup policy is invalid
+- **THEN** permission checks SHALL deny until valid policy is loaded
+
+#### Scenario: Stale reload completion
+- **WHEN** several file changes arrive while a prior load is pending
+- **THEN** reads SHALL publish in order without restoring an older policy after the newer one
+
+#### Scenario: Invalid reload retains last good, deletion resets, recreation recovers
+- **WHEN** a valid policy is followed by malformed data, deletion, and recreation
+- **THEN** malformed data SHALL retain the valid policy, deletion SHALL select absent defaults, and recreation SHALL load its valid policy
+
+#### Scenario: Close during reload prevents late publish and queued reads
+- **WHEN** close occurs during a pending load
+- **THEN** that completion and queued reads SHALL NOT publish policy
+
+#### Scenario: Explicitly empty receive policy retains accept-all behavior
+- **WHEN** a receive policy explicitly contains an empty entries array
+- **THEN** incoming senders SHALL remain allowed while an empty send list denies outbound mail
+
