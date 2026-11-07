@@ -112,6 +112,7 @@ vi.mock('node:http', () => ({
         if (event === 'error') onceErrorHandler = callback;
         return server;
       }),
+      removeListener: vi.fn(() => server),
       listen: vi.fn((_port: number, _host: string, callback?: () => void) => {
         if (httpMockState.listenError) {
           queueMicrotask(() => {
@@ -128,12 +129,16 @@ vi.mock('node:http', () => ({
             const query = httpMockState.callbackQueryFactory?.();
             if (!query) return;
 
+            let finish: (() => void) | undefined;
             const response = {
               statusCode: 0,
               setHeader: vi.fn(),
+              writeHead: (status: number) => { response.statusCode = status; return response; },
+              once: (_event: string, callback: () => void) => { finish = callback; return response; },
               end: (body?: string) => {
                 httpMockState.lastResponseStatus = response.statusCode;
                 httpMockState.lastResponseBody = body ?? null;
+                finish?.();
               },
             };
 
