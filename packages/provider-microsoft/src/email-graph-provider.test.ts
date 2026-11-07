@@ -1378,6 +1378,45 @@ describe('provider-microsoft/Graph Scheduled Send Inspection and Cancellation', 
   });
 });
 
+describe('provider-microsoft/Draft snapshots', () => {
+  it('Scenario: Graph snapshot captures revision origin and scheduling observation together', async () => {
+    const origin = 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailDraftOrigin';
+    const future = new Date(Date.now() + 3600000).toISOString();
+    const get = vi.fn().mockResolvedValue({ id: 'canonical', isDraft: true, subject: 'Draft', changeKey: 'rev',
+      toRecipients: [{ emailAddress: { address: 'a@example.test' } }],
+      singleValueExtendedProperties: [{ id: origin, value: 'non_reply' }, { id: 'SystemTime 0x3FEF', value: future }],
+    });
+    const snapshot = await new GraphEmailProvider(createMockClient({ get })).getDraftSnapshot('alias');
+    expect(snapshot).toMatchObject({ draftId: 'canonical', messageId: 'canonical', revision: 'rev', origin: 'non_reply', lifecycle: 'deferred', scheduledSendAt: future });
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(get.mock.calls[0][0]).toContain('changeKey');
+    expect(get.mock.calls[0]).toHaveLength(1);
+  });
+
+  it('Scenario: Graph snapshot keeps sent lifecycle independent of stripped origin', async () => {
+    for (const isDraft of [true, false]) {
+      const provider = new GraphEmailProvider(createMockClient({ get: vi.fn().mockResolvedValue({ id: 'id', isDraft }) }));
+      expect(await provider.getDraftSnapshot('id')).toMatchObject({ lifecycle: isDraft ? 'editable' : 'indeterminate', origin: 'indeterminate' });
+    }
+    const provider = new GraphEmailProvider(createMockClient({ get: vi.fn().mockRejectedValue(new GraphApiError(404, 'gone')) }));
+    await expect(provider.getDraftSnapshot('gone')).rejects.toBeInstanceOf(MessageNotFoundError);
+  });
+
+  it('Scenario: Graph partial reply preparation and attachment replacement retain draft ids', async () => {
+    const client = createMockClient({
+      post: vi.fn().mockResolvedValue({ id: 'surviving', body: { contentType: 'HTML', content: 'Reply' } }),
+      patch: vi.fn().mockRejectedValue(new Error('Patch failed')),
+    });
+    expect(await new GraphEmailProvider(client).createReplyDraft('parent', 'Reply'))
+      .toMatchObject({ success: false, draftId: 'surviving', error: { code: 'DRAFT_PREPARATION_FAILED' } });
+    client.patch = vi.fn().mockResolvedValue(undefined);
+    client.get = vi.fn().mockResolvedValue({ value: [{ id: 'old-attachment' }] });
+    client.delete = vi.fn().mockRejectedValue(new Error('Delete failed'));
+    expect(await new GraphEmailProvider(client).updateDraft('surviving', { attachments: [] }))
+      .toMatchObject({ success: false, draftId: 'surviving', error: { code: 'ATTACHMENT_UPDATE_FAILED' } });
+  });
+});
+
 describe('provider-microsoft/update_draft Reply Metadata', () => {
   const draftOriginProperty = 'String {66f5a359-4659-4830-9070-00047ec6ac6e} Name AgentEmailDraftOrigin';
 

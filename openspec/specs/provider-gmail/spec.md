@@ -7,6 +7,22 @@ feature: Gmail Provider
 
 Implements the provider interface for Gmail API email operations. Uses `@googleapis/gmail` (lightweight, ~1.1MB). Supports OAuth2 authentication, Gmail-specific label/star mapping, dual watch mode (Pub/Sub with 7-day auto-renewal + history.list polling fallback), and anti-spoofing via Authentication-Results headers.
 ## Requirements
+### Requirement: Canonical Gmail draft observations
+
+Gmail snapshots SHALL resolve draft/message IDs and re-read the canonical draft resource after message-ID resolution, capturing its current backing message and history revision. Partial attachment rehydration failures SHALL retain the known canonical draft ID.
+
+#### Scenario: Gmail snapshot re-reads canonical draft and changed backing message
+- **WHEN** message-ID resolution finds a draft whose backing message changed
+- **THEN** the snapshot contains the canonical draft ID and newly observed backing message ID
+
+#### Scenario: Gmail snapshot refuses deletion during canonical resolution
+- **WHEN** a draft disappears between list resolution and canonical read
+- **THEN** observation fails as not found
+
+#### Scenario: Gmail attachment rehydration failure preserves canonical draft id
+- **WHEN** preserving attachments fails before draft replacement
+- **THEN** the failure result retains the canonical draft ID
+
 ### Requirement: OAuth2 Authentication
 
 The system SHALL authenticate to Gmail via OAuth2 using `@googleapis/gmail` (NOT the full `googleapis` package at 200MB).
@@ -29,8 +45,13 @@ The system SHALL authenticate to Gmail via OAuth2 using `@googleapis/gmail` (NOT
 
 #### Scenario: Atomic one-shot ticket claim
 - **WHEN** two `POST /api/tickets/claim` calls present a valid `session_id` + `pickup_secret` pair concurrently
-- **THEN** at most one returns the tokens; the other returns 410 (`consumed` or `not_found`)
-- **AND** on KV-backed deployments this atomicity is implemented with a single Redis `GETDEL` command after constant-time secret verification
+- **THEN** at most one returns the tokens; the other returns 410 `consumed` or 404 `not_found`, without adding consumed tombstones
+- **AND** on KV-backed deployments a single Redis Lua operation validates the current session and compares all 64 bytes of the pickup hash without early exit before consuming that same record; malformed persisted state never releases tokens
+
+#### Scenario: First terminal callback wins without extending expiry
+- **WHEN** success, denial, or exchange-failure callbacks compete for a pending broker session
+- **THEN** exactly one can advance it to a terminal state and later callbacks cannot overwrite the winner
+- **AND** the transition preserves the original session expiry on both memory and KV backends
 
 #### Scenario: Distinguishable terminal states
 - **WHEN** the CLI polls `/api/tickets/claim` while the user has not yet completed consent
@@ -107,15 +128,15 @@ Under reply-all, an explicit `to` displaces the parent's sender from the To line
 
 ### Requirement: Dual Watch Mode
 
-The system SHALL support Pub/Sub push notifications (requires Google Cloud project, auto-renewal every 7 days) and `history.list` polling as a fallback for local/NAT environments.
+The provider SHALL expose Pub/Sub registration and bounded `history.list` polling helpers. The caller owns scheduling watch renewal before expiration; these helpers do not start a renewal service or Gmail watcher. History retrieval SHALL follow every page, reject repeated tokens or excessive pages, and publish a cursor only on complete retrieval.
 
 #### Scenario: Pub/Sub auto-renewal
 - **WHEN** the Pub/Sub watch registration approaches 7-day expiry
-- **THEN** the system automatically re-registers via `users.watch()`
+- **THEN** the caller invokes registration via `users.watch()`; the helper does not schedule automatic work
 
 #### Scenario: history.list fallback
 - **WHEN** Pub/Sub is not configured
-- **THEN** the system polls `history.list` at a configurable interval (default 30s)
+- **THEN** the caller may invoke the history helper, which returns a complete bounded result or fails without publishing a cursor
 
 ### Requirement: Label Mapping
 
@@ -218,4 +239,61 @@ Gmail draft reads and edits SHALL accept the id of a draft's message as well as 
 #### Scenario: Draft reply status resolves a Gmail draft message id
 - **WHEN** `getDraftReplyStatus` or `getDraft` is called with a draft's message id
 - **THEN** it reads the resolved draft
+
+### Requirement: Gmail authentication lifecycle safety
+
+Gmail authentication SHALL have one owner for its connected token object and explicit and library automatic refresh. Concurrent refresh callers SHALL share acquisition. Disconnect SHALL immediately invalidate pending authentication completions. Terminal credential rejection SHALL require configuration; transient failure SHALL retain the coherent prior session. Broker refresh tokens MUST remain absent from OAuth-client credentials.
+
+#### Scenario: Disconnect invalidates an in-flight Gmail refresh
+- **WHEN** disconnect occurs during explicit or library automatic refresh
+- **THEN** the late completion fails without restoring tokens or persisting a stale rotation
+- **AND** both the retired OAuth client and current runtime remain without credentials
+
+#### Scenario: Concurrent explicit and automatic Gmail refresh share one acquisition
+- **WHEN** explicit callers and the OAuth library request refresh concurrently
+- **THEN** they share one provider acquisition and observe the same rotated token object
+
+#### Scenario: Gmail terminal errors require configure while transient errors retain the session
+- **WHEN** refresh fails transiently
+- **THEN** the prior session remains available for retry
+- **WHEN** refresh fails with invalid_grant
+- **THEN** runtime credentials are cleared and configuration is required
+
+### Requirement: Gmail rotation persistence
+
+Gmail SHALL synchronize OAuth token events and refresh results, retaining a rotated refresh token even if the library returns its predecessor. An optional metadata writer SHALL serialize rotations and atomically replace the existing credential file. In-process stale writers MUST NOT overwrite a newer rotation or reconfiguration. File replacement does not promise cross-process compare-and-swap. Persistence failure SHALL warn while preserving valid runtime authentication and SHALL NOT cause delivery replay.
+
+#### Scenario: Gmail token events persist rotations in order
+- **WHEN** successive token events rotate refresh tokens while an earlier write is blocked
+- **THEN** runtime uses the newest token and metadata writes execute in rotation order
+
+#### Scenario: Gmail rotations atomically replace the existing metadata route
+- **WHEN** rotation is persisted for canonical or legacy alias metadata
+- **THEN** the existing path is atomically replaced with private file permissions without creating a second credential file
+
+#### Scenario: Gmail stale writers cannot overwrite newer rotations
+- **WHEN** an older writer attempts to replace metadata already rotated by another in-process writer
+- **THEN** the write is rejected and newer metadata survives
+
+#### Scenario: Gmail failed atomic rotation preserves metadata and removes temporary files
+- **WHEN** atomic replacement fails after writing its temporary file
+- **THEN** the original metadata survives and the temporary file is removed
+- **AND** a later rotation can persist after storage recovers
+
+#### Scenario: Gmail rotation persistence failure preserves runtime authentication
+- **WHEN** a BYOK or broker rotation cannot be persisted
+- **THEN** refresh still succeeds, runtime uses the rotation, and token health reports a storage warning
+- **AND** broker refresh tokens remain absent from OAuth-client credentials
+
+#### Scenario: Gmail rotations preserve broker and BYOK metadata isolation
+- **WHEN** a rotation is persisted
+- **THEN** its original OAuth mode and configuration are preserved
+
+### Requirement: Gmail valid profile token acquisition
+
+Profile lookup SHALL acquire a nonexpired token before calling Gmail. The exported synchronous getAccessToken accessor SHALL remain synchronous, returning undefined when the token is expired or runtime authentication is unavailable. getValidAccessToken SHALL provide asynchronous valid-token acquisition without changing AuthManager or tool wire contracts.
+
+#### Scenario: Gmail expired profile token is refreshed before use
+- **WHEN** profile lookup has a present but expired access token
+- **THEN** it refreshes before sending the profile request
 

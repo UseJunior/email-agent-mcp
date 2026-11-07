@@ -1,10 +1,11 @@
 // In-memory store covers the protocol logic. The KV-specific atomic
 // claim behavior is covered separately in store.kv.test.ts.
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { _resetStoreForTests, getStore, type Session } from './store.js';
 import { _resetConfigForTests } from './config.js';
+import { sessionContract } from './store.contract.js';
 
 function setEnv(env: Record<string, string | undefined>) {
   for (const [k, v] of Object.entries(env)) {
@@ -29,9 +30,85 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
   for (const k of Object.keys(baseEnv)) delete process.env[k];
   _resetConfigForTests();
   _resetStoreForTests();
+});
+
+sessionContract();
+
+describe('memory hash barriers', () => {
+  function pauseHash(secret: string) {
+    let release!: (value: ArrayBuffer) => void;
+    vi.spyOn(crypto.subtle, 'digest').mockImplementationOnce(() => new Promise<ArrayBuffer>(resolve => { release = resolve; }));
+    return () => {
+      const bytes = createHash('sha256').update(secret).digest();
+      release(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);
+    };
+  }
+
+  it('rechecks expiry after hashing and never returns expired tokens', async () => {
+    vi.useFakeTimers();
+    const store = getStore();
+    await store.create('expiry', freshSession('secret'));
+    await store.setReady('expiry', { access_token: 'synthetic', expires_in: 60 });
+    const release = pauseHash('secret');
+    const claim = store.claim('expiry', 'secret');
+    vi.setSystemTime(Date.now() + 60001);
+    release();
+    expect(await claim).toEqual({ ok: false, reason: 'expired' });
+  });
+
+  it('never consumes a replacement installed while hashing the old ticket', async () => {
+    vi.useFakeTimers();
+    const store = getStore();
+    await store.create('replacement', freshSession('old'));
+    await store.setReady('replacement', { access_token: 'old', expires_in: 60 });
+    const release = pauseHash('old');
+    const claim = store.claim('replacement', 'old');
+    vi.setSystemTime(Date.now() + 60001);
+    await store.create('replacement', freshSession('new'));
+    await store.setReady('replacement', { access_token: 'new', expires_in: 60 });
+    release();
+    expect(await claim).toEqual({ ok: false, reason: 'not_found' });
+    expect(await store.claim('replacement', 'new')).toEqual({ ok: true, tokens: { access_token: 'new', expires_in: 60 } });
+  });
+
+  it('rechecks the current state after hashing', async () => {
+    const store = getStore();
+    await store.create('advance', freshSession('secret'));
+    const release = pauseHash('secret');
+    const claim = store.claim('advance', 'secret');
+    await store.setFailed('advance', 'denied', 'winner');
+    release();
+    expect(await claim).toEqual({ ok: false, reason: 'denied', errorMessage: 'winner' });
+  });
+
+  it('failed hashing does not strand a claim reservation', async () => {
+    const store = getStore();
+    await store.create('retry', freshSession('secret'));
+    await store.setReady('retry', { access_token: 'synthetic', expires_in: 60 });
+    vi.spyOn(crypto.subtle, 'digest').mockRejectedValueOnce(new Error('synthetic digest failure'));
+    await expect(store.claim('retry', 'secret')).rejects.toThrow('synthetic digest failure');
+    expect((await store.claim('retry', 'secret')).ok).toBe(true);
+  });
+
+  it('Scenario: First terminal callback wins without extending expiry', async () => {
+    vi.useFakeTimers();
+    const store = getStore();
+    for (const state of ['ready', 'denied', 'exchange_failed'] as const) {
+      await store.create('ttl', freshSession('secret'));
+      vi.setSystemTime(Date.now() + 59999);
+      expect(state === 'ready'
+        ? await store.setReady('ttl', { access_token: 'synthetic', expires_in: 60 })
+        : await store.setFailed('ttl', state, 'synthetic')).toBe(true);
+      expect(await store.setFailed('ttl', 'denied', 'late')).toBe(false);
+      vi.setSystemTime(Date.now() + 1);
+      expect(await store.claim('ttl', 'secret')).toEqual({ ok: false, reason: 'expired' });
+    }
+  });
 });
 
 function freshSession(secret: string): Session {
