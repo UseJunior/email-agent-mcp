@@ -731,6 +731,27 @@ that server.
 | `email-agent-mcp` | Distribution wrapper (`npx email-agent-mcp`) |
 | `@usejunior/email-agent-mcp` | Compatibility wrapper, published in lockstep; use `email-agent-mcp` for new installs |
 
+Core embedders may inject `ActionContext.rateLimiter`; shipped MCP/CLI adapters
+do not configure one. Prefer `ReservationRateLimiter.tryReserve(action)`, returning
+`{ allowed: true, lease }` or `{ allowed: false, retryAfter }` (seconds).
+`SendRateLimiter` implements this API with shared process-local capacity across
+actions. Reservations count immediately and stay live until `lease.release()`
+(pre-dispatch refusal or proven rejection) or `lease.consume()` (accepted or
+unknown dispatch). The first terminal call wins. Consumed capacity expires one
+window after consumption, using a monotonic clock (`performance.now` by default;
+the optional third constructor argument injects elapsed milliseconds for tests).
+Zero capacity denies all reservations with finite retry guidance. Guidance for
+fully reserved capacity is a polling interval, not a promised release time.
+
+The exported `RateLimiter` interface, `SendRateLimiter.checkLimit`/`recordUsage`,
+and `checkRateLimit` helper remain available but are deprecated. Actions prefer
+reservations and automatically adapt old injected check/record implementations;
+`adaptLegacyRateLimiter` is also exported. That compatibility path cannot reserve
+capacity between check and record, so concurrent legacy callers may exceed their
+limit. Legacy usage is recorded once for accepted/unknown dispatch, never for
+proven rejection. Bookkeeping failure after settlement is logged to stderr without
+changing the delivery result. Limits remain in memory with no distributed storage.
+
 ## Quality and Trust Signals
 
 - CI runs on every pull request and push to main (lint, typecheck, tests on Node 20 + 22)

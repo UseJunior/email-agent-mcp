@@ -7,7 +7,6 @@ import { isPlausibleMessageId } from '../security/reply-validation.js';
 import { renderEmailBody } from '../content/body-renderer.js';
 import {
   checkMailboxRequired,
-  checkRateLimit,
   handleProviderError,
   parseRecipients,
   buildDraftPreview,
@@ -230,12 +229,6 @@ export const replyToEmailAction: EmailAction<
       };
     }
 
-    // Check rate limit
-    const rateLimitError = checkRateLimit(ctx.rateLimiter, 'reply_to_email');
-    if (rateLimitError) {
-      return rateLimitError;
-    }
-
     // Reserve this delivery before touching the provider — see claimDelivery.
     // The draft branch above deliberately does not claim: creating a draft
     // delivers nothing, so a repeat is not a duplicate send.
@@ -274,10 +267,6 @@ export const replyToEmailAction: EmailAction<
         ...(result.error?.code !== undefined ? { errorCode: result.error.code } : {}),
       });
 
-      if (ctx.rateLimiter) {
-        ctx.rateLimiter.recordUsage('reply_to_email');
-      }
-
       return {
         success: result.success,
         messageId: result.messageId,
@@ -292,9 +281,6 @@ export const replyToEmailAction: EmailAction<
     } catch (err) {
       settleClaimFromThrow(claim, err);
       const handled = handleProviderError(err, 'SEND_STATUS_UNKNOWN');
-      if (ctx.rateLimiter && handled.error.code === 'SEND_STATUS_UNKNOWN') {
-        ctx.rateLimiter.recordUsage('reply_to_email');
-      }
       return handled;
     }
   },
