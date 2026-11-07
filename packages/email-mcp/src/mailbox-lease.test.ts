@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, utimes, writeFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -18,10 +18,48 @@ async function fixture() {
 afterEach(async () => {
   for (const lease of leases.splice(0)) await lease.release();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
 describe('email-watcher/MailboxLease', () => {
+  it('keeps simultaneous mailboxes independent in either release order', async () => {
+    const dir = await fixture();
+    for (const order of [[0, 1], [1, 0]]) {
+      const owned = await Promise.all(['a', 'b'].map(key => MailboxLease.acquire(dir, key)));
+      expect(owned.every(lease => lease?.held)).toBe(true);
+      leases.push(...owned as MailboxLease[]);
+      for (const index of order) await owned[index]!.release();
+      for (const key of ['a', 'b']) await expect(stat(join(dir, `${key}.watcher.lock.lease`))).rejects.toMatchObject({ code: 'ENOENT' });
+    }
+  });
+
+  it('continues the second mailbox heartbeat after the first is released', async () => {
+    const dir = await fixture();
+    const a = (await MailboxLease.acquire(dir, 'a'))!;
+    const b = (await MailboxLease.acquire(dir, 'b'))!;
+    leases.push(a, b);
+    const path = join(dir, 'b.watcher.lock.lease');
+    const before = (await stat(path)).mtimeMs;
+    await a.release();
+    await vi.waitFor(async () => expect((await stat(path)).mtimeMs).toBeGreaterThan(before), { timeout: 12_000, interval: 100 });
+    b.assertHeld();
+    await b.release();
+  }, 15_000);
+
+  it('allows wrapper reacquisition after releasing the acquired handle', async () => {
+    vi.resetModules();
+    vi.stubEnv('EMAIL_AGENT_MCP_HOME', await fixture());
+    const { acquireMailboxLease, releaseAllLocks } = await import('./watcher.js');
+    try {
+      const first = (await acquireMailboxLease('box'))!;
+      await first.release();
+      const second = (await acquireMailboxLease('box'))!;
+      expect(second?.held).toBe(true);
+      await first.release();
+      expect(await acquireMailboxLease('box')).toBeNull();
+    } finally { await releaseAllLocks(); }
+  });
   it('refuses live, malformed and indeterminate legacy locks', async () => {
     const dir = await fixture();
     const path = join(dir, 'box.watcher.lock');
