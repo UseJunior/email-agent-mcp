@@ -1547,9 +1547,14 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
 
     const allMessages: EmailMessage[] = [];
     let finalDeltaLink = '';
+    const visited = new Set<string>();
 
     // Page through all results (follow @odata.nextLink until @odata.deltaLink)
     while (url) {
+      if (visited.has(url) || visited.size >= 100) {
+        throw new ProviderError('PAGINATION_LIMIT', 'Delta pagination exceeded its safety limit', 'microsoft', false);
+      }
+      visited.add(url);
       const response = await this.client.get(url) as DeltaPageResponse;
       const items = response.value ?? [];
 
@@ -1567,14 +1572,13 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
         // More pages to fetch
         url = response['@odata.nextLink'];
       } else {
-        // No nextLink and no deltaLink — shouldn't happen, but break to avoid infinite loop
-        break;
+        throw new ProviderError('INVALID_DELTA_RESPONSE', 'Delta response omitted the terminal cursor', 'microsoft', false);
       }
     }
 
     return {
       messages: allMessages,
-      nextDeltaLink: finalDeltaLink || url,
+      nextDeltaLink: finalDeltaLink,
     };
   }
 

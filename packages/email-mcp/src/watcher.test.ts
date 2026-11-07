@@ -254,6 +254,10 @@ describe('email-watcher/Delta State Persistence', () => {
 });
 
 describe('email-watcher/Lock File Management', () => {
+  it('rejects invalid subscription renewal timestamps and buffers', () => {
+    expect(() => needsSubscriptionRenewal('invalid')).toThrow('Invalid');
+    expect(() => needsSubscriptionRenewal(new Date().toISOString(), -1)).toThrow('Invalid');
+  });
   it('Scenario: Lock prevents duplicate watcher', async () => {
     // First watcher acquires lock
     const got1 = await acquireLock(TEST_SAFE_KEY);

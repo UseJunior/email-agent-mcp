@@ -107,15 +107,15 @@ Under reply-all, an explicit `to` displaces the parent's sender from the To line
 
 ### Requirement: Dual Watch Mode
 
-The system SHALL support Pub/Sub push notifications (requires Google Cloud project, auto-renewal every 7 days) and `history.list` polling as a fallback for local/NAT environments.
+The provider SHALL expose Pub/Sub registration and bounded `history.list` polling helpers. The caller owns scheduling watch renewal before expiration; these helpers do not start a renewal service or Gmail watcher. History retrieval SHALL follow every page, reject repeated tokens or excessive pages, and publish a cursor only on complete retrieval.
 
 #### Scenario: Pub/Sub auto-renewal
 - **WHEN** the Pub/Sub watch registration approaches 7-day expiry
-- **THEN** the system automatically re-registers via `users.watch()`
+- **THEN** the caller invokes registration via `users.watch()`; the helper does not schedule automatic work
 
 #### Scenario: history.list fallback
 - **WHEN** Pub/Sub is not configured
-- **THEN** the system polls `history.list` at a configurable interval (default 30s)
+- **THEN** the caller may invoke the history helper, which returns a complete bounded result or fails without publishing a cursor
 
 ### Requirement: Label Mapping
 
