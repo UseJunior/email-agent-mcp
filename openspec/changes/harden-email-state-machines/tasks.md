@@ -2,7 +2,7 @@
 
 All boxes remain incomplete until implementation and acceptance tests pass. Parent: #236. PRs stay unmerged unless separately authorized.
 
-- [ ] 0. Obtain approval of this concrete proposal; reconcile any requested changes before code.
+- [x] 0. Obtain approval of this concrete proposal; reconcile any requested changes before code.
 - [ ] 1. Broker atomic session transitions, TTL preservation and memory/KV parity; include real disposable Redis tests.
 - [ ] 2. Watcher MailboxLease, legacy lock detection and child-process exclusion tests.
 - [ ] 3. After 2: watcher pagination/fixed windows, checkpoint migration and atomic writes, namespaced dedup, cancellation/drain/backoff.
