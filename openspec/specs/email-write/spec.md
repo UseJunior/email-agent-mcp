@@ -7,6 +7,26 @@ feature: Write Actions
 
 Defines outbound email operations: replying to and sending emails. All outbound operations are gated by the send allowlist. Write actions REQUIRE the `mailbox` parameter when multiple mailboxes are configured to prevent accidentally sending from the wrong account. Supports composing from a local file (`body_file`) for iterative draft editing.
 ## Requirements
+### Requirement: Central draft mutation eligibility
+
+Draft edit and send actions SHALL use the same lifecycle eligibility rule and canonical snapshot ID. Verified pending deferred or indeterminate lifecycle SHALL block mutation. Origin SHALL independently gate destructive body replacement. Tool input/output fields SHALL remain unchanged. These checks do not guarantee atomicity against remote changes after observation.
+
+#### Scenario: Snapshot lifecycle blocks sent and deleted drafts before mutation
+- **WHEN** the draft observation reports a sent message or deletion
+- **THEN** no edit or send is dispatched
+
+#### Scenario: Unknown origin blocks body replacement independently of lifecycle
+- **WHEN** an editable draft has indeterminate origin
+- **THEN** body replacement is refused while recipient-only updates remain eligible
+
+#### Scenario: Draft observation uses canonical identity and recipients at the read barrier
+- **WHEN** recipients change before the snapshot read completes
+- **THEN** send checks those observed recipients before dispatch using the canonical draft ID
+
+#### Scenario: Internal snapshot fields do not change draft tool wire schemas
+- **WHEN** the snapshot capability is added
+- **THEN** draft tool wire schemas keep their existing fields
+
 ### Requirement: Reply to Email
 
 The system SHALL provide a `reply_to_email` action that replies within an existing thread, preserving In-Reply-To headers and threading metadata. The reply recipient MUST be checked against the send allowlist.

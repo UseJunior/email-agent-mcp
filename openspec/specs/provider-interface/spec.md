@@ -7,6 +7,17 @@ feature: Provider Abstraction
 
 Defines capability-based provider interfaces (EmailReader, EmailSender, EmailSubscriber), provider registration via dynamic import, error normalization, authentication lifecycle, and rate limit handling. Providers implement the interfaces they support.
 ## Requirements
+### Requirement: Optional draft observations
+
+Providers MAY expose `getDraftSnapshot` without adding a required capability or changing existing tool schemas. Snapshots SHALL contain canonical draft and message IDs, optional revision, independent lifecycle and origin, the message used for recipient checks, and any observed scheduled-send marker. Legacy providers SHALL retain a fallback using `getDraft` before `getMessage` and the existing optional origin method. An absent legacy `isDraft` field retains compatibility; an explicit false value is ineligible.
+
+A snapshot is an observation, not a remote lock. No provider write endpoint in this implementation has verified conditional-write support; revisions SHALL NOT be sent as invented conditional headers. Remote changes after observation remain a TOCTOU limitation.
+
+#### Scenario: Legacy providers prefer draft reads and retain optional capability compatibility
+- **WHEN** a provider lacks `getDraftSnapshot`
+- **THEN** draft mutation reads prefer its optional draft reader and otherwise use the legacy message reader
+- **AND** unknown origin remains unsafe for body replacement
+
 ### Requirement: Capability Interfaces
 
 The system SHALL define capability-based interfaces: `EmailReader` (list, get, search, getThread), `EmailSender` (send, reply, createDraft, sendDraft), and `EmailSubscriber` (subscribe, unsubscribe). Providers implement what they support. On the write path, `EmailSender` implementations SHALL inspect `ComposeMessage.bodyHtml` (and for reply methods, `ReplyOptions.bodyHtml`) to decide the transport content type: when set, send as HTML; otherwise send as plain text.
