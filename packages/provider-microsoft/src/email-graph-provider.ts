@@ -723,7 +723,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       mimeType: a.contentType ?? 'application/octet-stream',
       size: a.size ?? 0,
       isInline: a.isInline ?? false,
-      contentId: a.contentId,
+      contentId: a.contentId ?? undefined,
     }));
   }
 
@@ -2185,7 +2185,7 @@ function mapGraphMessage(msg: GraphMessage): EmailMessage {
     mimeType: attachment.contentType ?? 'application/octet-stream',
     size: attachment.size ?? 0,
     isInline: attachment.isInline ?? false,
-    contentId: attachment.contentId,
+    contentId: attachment.contentId ?? undefined,
   }));
 
   const bodyHtml = msg.body?.contentType?.toLowerCase() === 'html'
