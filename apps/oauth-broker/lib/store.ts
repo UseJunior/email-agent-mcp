@@ -16,6 +16,7 @@
 // in-memory state is not actually shared.
 
 import { getConfig } from './config.js';
+import { brokerFailure } from './errors.js';
 
 /** Legacy outcome vocabulary retained for source compatibility. Persisted
  * sessions use the narrower Session discriminant below. */
@@ -263,36 +264,56 @@ class KvStore implements SessionStore {
   }
 
   async create(sessionId: string, session: Session): Promise<CreateResult> {
-    const kv = await this.kv();
-    // SET NX gives us collision detection in a single round trip.
-    const ok = await kv.set(this.key(sessionId), session, { px: getConfig().ticketTtlMs, nx: true });
-    return ok ? { created: true } : { created: false, reason: 'collision' };
+    try {
+      const kv = await this.kv();
+      // SET NX gives us collision detection in a single round trip.
+      const ok = await kv.set(this.key(sessionId), session, { px: getConfig().ticketTtlMs, nx: true });
+      return ok ? { created: true } : { created: false, reason: 'collision' };
+    } catch {
+      throw brokerFailure('Session storage unavailable');
+    }
   }
 
   async get(sessionId: string): Promise<Session | null> {
-    const kv = await this.kv();
-    const session = await kv.get<unknown>(this.key(sessionId));
-    return validSession(session) ? session : null;
+    try {
+      const kv = await this.kv();
+      const session = await kv.get<unknown>(this.key(sessionId));
+      return validSession(session) ? session : null;
+    } catch {
+      throw brokerFailure('Session storage unavailable');
+    }
   }
 
   async setReady(sessionId: string, tokens: BrokerTokens): Promise<boolean> {
-    const kv = await this.kv();
-    if (!validTokens(tokens)) return false;
-    return (await kv.eval(ADVANCE_LUA, [this.key(sessionId)], [JSON.stringify({ state: 'ready', tokens })])) === 1;
+    try {
+      const kv = await this.kv();
+      if (!validTokens(tokens)) return false;
+      return (await kv.eval(ADVANCE_LUA, [this.key(sessionId)], [JSON.stringify({ state: 'ready', tokens })])) === 1;
+    } catch {
+      throw brokerFailure('Session storage unavailable');
+    }
   }
 
   async setFailed(sessionId: string, state: 'denied' | 'exchange_failed', message: string): Promise<boolean> {
-    const kv = await this.kv();
-    if (typeof message !== 'string') return false;
-    return (await kv.eval(ADVANCE_LUA, [this.key(sessionId)], [JSON.stringify({ state, errorMessage: message })])) === 1;
+    try {
+      const kv = await this.kv();
+      if (typeof message !== 'string') return false;
+      return (await kv.eval(ADVANCE_LUA, [this.key(sessionId)], [JSON.stringify({ state, errorMessage: message })])) === 1;
+    } catch {
+      throw brokerFailure('Session storage unavailable');
+    }
   }
 
   async claim(sessionId: string, pickupSecret: string): Promise<ClaimResult> {
-    const kv = await this.kv();
-    const presentedHash = await sha256Hex(pickupSecret);
-    // @vercel/kv passes strings through unchanged and automatically decodes
-    // the JSON result. Verification and DEL operate on the same current record.
-    return kv.eval<unknown[], ClaimResult>(CLAIM_LUA, [this.key(sessionId)], [presentedHash]);
+    try {
+      const kv = await this.kv();
+      const presentedHash = await sha256Hex(pickupSecret);
+      // @vercel/kv passes strings through unchanged and automatically decodes
+      // the JSON result. Verification and DEL operate on the same current record.
+      return await kv.eval<unknown[], ClaimResult>(CLAIM_LUA, [this.key(sessionId)], [presentedHash]);
+    } catch {
+      throw brokerFailure('Session storage unavailable');
+    }
   }
 }
 

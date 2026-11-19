@@ -57,13 +57,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         refresh_token: tokens.refresh_token,
       });
     } catch (err) {
-      const e = err as Error & { status?: number };
+      const e = err as Error & { status?: number; code?: string };
       const status = e.status && e.status >= 400 && e.status < 500 ? 400 : 502;
       logOnce(status, 'refresh_failed');
-      res.status(status).json({ error: 'refresh_failed', error_description: e.message });
+      const reauth = e.code === 'invalid_grant' || e.code === 'invalid_rapt';
+      res.status(status).json({ error: reauth ? 'invalid_grant' : 'refresh_failed', error_description: reauth ? 'Authentication expired or revoked. Re-run configure.' : 'Authentication refresh failed. Re-run configure if the problem persists.' });
     }
-  } catch (err) {
+  } catch {
     logOnce(500, 'internal_error');
-    throw err;
+    res.status(500).json({ error: 'internal_error', message: 'Authentication service unavailable. Retry later.' });
   }
 }
