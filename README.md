@@ -770,7 +770,7 @@ changing the delivery result. Limits remain in memory with no distributed storag
 
 ## Quality and Trust Signals
 
-- CI runs on every pull request and push to main (lint, typecheck, tests on Node 20 + 22)
+- CI runs on every pull request and push to main (lint, typecheck, tests on Node 22 + 24)
 - CodeQL and Semgrep security scanning
 - Coverage published to Codecov
 - OpenSpec traceability enforcement via `npm run check:spec-coverage`
@@ -858,3 +858,7 @@ Agent Email runs entirely on your local machine. Email credentials are stored in
 - [Code of Conduct](CODE_OF_CONDUCT.md)
 - [Security Policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)
+
+## Runtime requirement
+
+Node.js 22 or newer is required. The patched Gmail and Azure authentication libraries require Node 22; use Node 22 or 24 for supported CI-tested runtimes.

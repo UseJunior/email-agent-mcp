@@ -9,7 +9,7 @@
     "apps/*"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "npm run build -w @usejunior/email-core && npm run build -w @usejunior/provider-microsoft && npm run build -w @usejunior/provider-gmail && npm run build -w @usejunior/email-mcp",
