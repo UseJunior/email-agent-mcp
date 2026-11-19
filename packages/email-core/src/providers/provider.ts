@@ -29,6 +29,7 @@ export interface EmailSender {
   replyToMessage(messageId: string, body: string, opts?: ReplyOptions): Promise<SendResult>;
   createDraft(msg: ComposeMessage): Promise<DraftResult>;
   sendDraft(draftId: string): Promise<SendResult>;
+  createForwardDraft?(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult>;
   createReplyDraft?(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult>;
   getDraftReplyStatus?(draftId: string): Promise<DraftReplyStatus>;
   updateDraft?(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult>;

@@ -92,6 +92,8 @@ export interface ComposeMessage {
 }
 
 export interface OutboundAttachment {
+  contentId?: string;
+  isInline?: boolean;
   filename: string;
   content: Buffer;
   mimeType: string;
@@ -165,6 +167,7 @@ export interface ListOptions {
 }
 
 export interface ReplyOptions {
+  subject?: string;
   from?: EmailAddress;
   /**
    * Explicit To recipients for the reply. When set, this **replaces** the

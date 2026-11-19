@@ -16,7 +16,7 @@ import type {
   DraftReplyStatus,
   EmailError,
 } from '@usejunior/email-core';
-import { AttachmentNotFoundError, MessageNotFoundError, ProviderError } from '@usejunior/email-core';
+import { AttachmentNotFoundError, MessageNotFoundError, ProviderError, truncateBody, BODY_SIZE_LIMIT, htmlToMarkdown } from '@usejunior/email-core';
 import { getErrorStatus, gmailProviderError, isMissingOrInvalidIdError } from './errors.js';
 
 // Gmail label mapping
@@ -398,6 +398,32 @@ export class GmailEmailProvider {
     }
   }
 
+  async createForwardDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {
+    try {
+      await this.validateDraftFrom(opts?.from);
+      const original = await this.getMessage(messageId);
+      const attachments: OutboundAttachment[] = [];
+      for (const att of original.attachments ?? []) {
+        const downloaded = await this.downloadAttachment(original.id, att.id);
+        attachments.push({ ...downloaded, filename: att.filename || downloaded.filename, mimeType: att.mimeType || downloaded.mimeType, contentId: att.contentId, isInline: att.isInline });
+      }
+      attachments.push(...(opts?.attachments ?? []));
+      const sizeError = attachmentSizeError(attachments);
+      if (sizeError) return { success: false, error: sizeError };
+      const escape = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+      const originalText = `---------- Forwarded message ----------\nFrom: ${original.from.email}\nDate: ${original.receivedAt}\nSubject: ${original.subject}\nTo: ${original.to.map(a => a.email).join(', ')}\n\n${original.body ?? (original.bodyHtml ? htmlToMarkdown(original.bodyHtml) : '')}`;
+      const originalHtml = original.bodyHtml?.match(/<body[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? original.bodyHtml;
+      const html = `${opts?.bodyHtml ?? `<div>${escape(body).replace(/\n/g, '<br>')}</div>`}<hr><div>${escape(originalText.split('\n\n')[0] ?? '').replace(/\n/g, '<br>')}</div>${originalHtml ?? `<pre>${escape(original.body ?? '')}</pre>`}`;
+      const raw = buildRawMessage({ from: opts?.from, to: opts?.to ?? [], cc: opts?.cc, bcc: opts?.bcc,
+        subject: opts?.subject ?? (/^(fw|fwd):/i.test(original.subject) ? original.subject : `FW: ${original.subject}`),
+        body: truncateBody(`${body}\n\n${originalText}`, BODY_SIZE_LIMIT), bodyHtml: opts?.bodyHtml !== undefined ? truncateBody(html, BODY_SIZE_LIMIT) : undefined, attachments }, { draftOrigin: 'reply' });
+      // A forward starts a fresh conversation, without In-Reply-To/References.
+      const result = await this.client.createDraft(raw);
+      return { success: true, draftId: result.id };
+    } catch (err) {
+      return { success: false, error: { code: err instanceof ProviderError ? err.code : 'DRAFT_FAILED', message: err instanceof Error ? err.message : 'Forward draft failed', recoverable: false } };
+    }
+  }
   async createReplyDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {
     const sizeError = attachmentSizeError(opts?.attachments);
     if (sizeError) return { success: false, error: sizeError };
@@ -407,7 +433,7 @@ export class GmailEmailProvider {
       // Drafts stay allowlist-exempt; send_draft re-reads the stored draft's
       // recipients and gates them there (issue #164).
       const { to: replyTo, cc: replyCc } = resolveReplyRecipients(original, opts);
-      const subject = prefixReSubject(original.subject);
+      const subject = opts?.subject ?? prefixReSubject(original.subject);
       const references = buildReferences(original.references, original.messageId);
 
       const raw = buildRawMessage(
@@ -428,7 +454,7 @@ export class GmailEmailProvider {
         },
       );
 
-      const result = await this.client.createDraft(raw, original.threadId);
+      const result = await this.client.createDraft(raw, opts?.subject !== undefined && opts.subject.replace(/^re:\s*/i, '').toLowerCase() !== original.subject.replace(/^re:\s*/i, '').toLowerCase() ? undefined : original.threadId);
       return { success: true, draftId: result.id };
     } catch (err) {
       return {
@@ -484,27 +510,14 @@ export class GmailEmailProvider {
       if (msg.attachments !== undefined) {
         attachments = msg.attachments;
       } else if (current.attachments && current.attachments.length > 0) {
-        // Inline (CID) parts cannot be safely round-tripped: this builder
-        // re-emits attachments with `Content-Disposition: attachment`, which
-        // would orphan the `cid:` references in the preserved HTML body.
-        // Fail closed and tell the caller to pass `attachments` explicitly.
-        if (current.attachments.some(att => att.isInline)) {
-          return {
-            success: false,
-            draftId: survivingDraftId,
-            error: {
-              code: 'INLINE_ATTACHMENTS_UNSUPPORTED',
-              message: 'This draft has inline (CID) attachments that cannot be preserved automatically. Pass an explicit `attachments` array to update it.',
-              recoverable: false,
-            },
-          };
-        }
+        // MIME serialization supports inline Content-ID parts. Preserve their
+        // disposition, IDs and metadata so recipient-only edits keep CID images.
         attachments = [];
         for (const att of current.attachments) {
           // Gmail attachment bytes are keyed by the backing message id, not
           // the draft id — use current.id (the resolved message).
           const dl = await this.downloadAttachment(current.id, att.id);
-          attachments.push({ filename: dl.filename, content: dl.content, mimeType: dl.mimeType });
+          attachments.push({ filename: att.filename || dl.filename, content: dl.content, mimeType: att.mimeType || dl.mimeType, contentId: att.contentId, isInline: att.isInline });
         }
       }
 
@@ -1053,7 +1066,8 @@ function serializeAttachmentPart(att: OutboundAttachment): MimePart {
   return [
     `Content-Type: ${mimeType}; name="${name}"`,
     'Content-Transfer-Encoding: base64',
-    `Content-Disposition: attachment; filename="${name}"`,
+    `Content-Disposition: ${att.isInline ? 'inline' : 'attachment'}; filename="${name}"`,
+    ...(att.contentId ? [`Content-ID: <${att.contentId.replace(/[<>\r\n]/g, '')}>`] : []),
     '',
     wrapBase64(att.content.toString('base64')),
   ].join(CRLF);

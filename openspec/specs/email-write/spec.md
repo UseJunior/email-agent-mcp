@@ -460,3 +460,18 @@ The system SHALL accept an optional From address for draft creation and updates 
 #### Scenario: Unverified sender
 - **WHEN** verification fails or the requested sender is unknown
 - **THEN** the mutation fails before any draft write
+
+### Requirement: Forward drafts
+The system SHALL support forward_of on create_draft, mutually exclusive with reply_to, requiring explicit recipients. It SHALL preserve the original message content and attachments and default to an FW subject. Forward bodies SHALL have the same replacement protection as reply drafts. Explicit reply subjects SHALL be applied rather than silently ignored.
+
+#### Scenario: Forward requires explicit recipients and rejects reply_to
+- **WHEN** a forward has no explicit recipients or also sets reply_to
+- **THEN** it fails before creating a draft
+
+#### Scenario: Forward retains original content and attachments with only supplied recipients
+- **WHEN** a message is forwarded to supplied recipients
+- **THEN** original content and attachments are retained, with no inherited recipient audience
+
+#### Scenario: Reply subject override is applied
+- **WHEN** a subject is supplied with reply_to
+- **THEN** the draft stores that subject
