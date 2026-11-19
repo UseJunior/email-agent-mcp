@@ -3,6 +3,7 @@
 // request shape obvious.
 
 import { getConfig } from './config.js';
+import { safeOAuthCode } from './errors.js';
 
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
@@ -61,8 +62,10 @@ async function tokenRequest(body: Record<string, string>): Promise<TokenResponse
   const data = (await res.json()) as TokenResponse | { error: string; error_description?: string };
   if (!res.ok || 'error' in data) {
     const err = (data as { error: string; error_description?: string });
-    const e = new Error(`Google token endpoint: ${err.error}${err.error_description ? `: ${err.error_description}` : ''}`);
-    (e as Error & { status?: number }).status = res.status;
+    const code = safeOAuthCode(err.error);
+    const e: Error & { status?: number; code?: string } = new Error(`Google token endpoint: ${code}`);
+    e.status = res.status;
+    e.code = code;
     throw e;
   }
   return data as TokenResponse;

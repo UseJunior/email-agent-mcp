@@ -357,3 +357,57 @@ describe('broker/routes failure modes', () => {
     }
   });
 });
+
+describe('security: upstream failure redaction (#146)', () => {
+  const secret = 'RAW_ACCESS RAW_REFRESH RAW_SESSION RAW_PICKUP RAW_HINT';
+  it('never persists or renders token exchange exception text', async () => {
+    const state = urlSafeRandom();
+    const store = getStore();
+    await store.create(state, { state: 'pending', pickupHash: createHash('sha256').update('synthetic').digest('hex'), createdAt: Date.now() });
+    stubFetchOnce(async () => { throw new Error(secret); });
+    const { res, captured } = makeRes();
+    await callbackHandler(makeReq({ method: 'GET', query: { state, code: 'synthetic' } }) as never, res as never);
+    expect(captured.statusCode).toBe(502);
+    expect(String(captured.body)).toContain('(error ');
+    const persisted = await store.get(state);
+    for (const value of secret.split(' ')) {
+      expect(JSON.stringify(captured)).not.toContain(value);
+      expect(JSON.stringify(persisted)).not.toContain(value);
+    }
+  });
+  it.each(['setReady', 'setFailed'] as const)('never leaks a failing %s even when failure persistence also fails', async method => {
+    stubFetchOnce(async () => new Response(JSON.stringify({ access_token: 'synthetic', expires_in: 60 }), { status: 200 }));
+    vi.spyOn(getStore(), method).mockRejectedValue(new Error(secret));
+    if (method === 'setFailed') vi.spyOn(getStore(), 'setReady').mockRejectedValue(new Error(secret));
+    vi.spyOn(getStore(), 'setFailed').mockRejectedValue(new Error(secret));
+    const { res, captured } = makeRes();
+    await callbackHandler(makeReq({ method: 'GET', query: { state: urlSafeRandom(), code: 'synthetic' } }) as never, res as never);
+    expect(captured.statusCode).toBe(500);
+    for (const value of secret.split(' ')) expect(JSON.stringify(captured)).not.toContain(value);
+  });
+  it('never renders refresh upstream errors', async () => {
+    stubFetchOnce(async () => { throw new Error(secret); });
+    const { res, captured } = makeRes();
+    await refreshHandler(makeReq({ method: 'POST', body: { refresh_token: 'RAW_REFRESH' } }) as never, res as never);
+    expect(captured.statusCode).toBe(502);
+    for (const value of secret.split(' ')) expect(JSON.stringify(captured)).not.toContain(value);
+  });
+  it('does not persist arbitrary OAuth denial strings', async () => {
+    const state = urlSafeRandom();
+    await getStore().create(state, { state: 'pending', pickupHash: 'a'.repeat(64), createdAt: Date.now() });
+    const { res, captured } = makeRes();
+    await callbackHandler(makeReq({ method: 'GET', query: { state, error: secret } }) as never, res as never);
+    expect(captured.statusCode).toBe(400);
+    expect(JSON.stringify(await getStore().get(state))).not.toContain(secret);
+    expect(String(captured.body)).not.toContain(secret);
+  });
+});
+
+it('preserves only the invalid_grant protocol signal so broker clients enter reauth_required', async () => {
+  stubFetchOnce(async () => new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'RAW_REFRESH private token' }), { status: 400 }));
+  const { res, captured } = makeRes();
+  await refreshHandler(makeReq({ method: 'POST', body: { refresh_token: 'synthetic' } }) as never, res as never);
+  expect(captured.statusCode).toBe(400);
+  expect(captured.body).toEqual({ error: 'invalid_grant', error_description: 'Authentication expired or revoked. Re-run configure.' });
+  expect(JSON.stringify(captured)).not.toContain('RAW_REFRESH');
+});

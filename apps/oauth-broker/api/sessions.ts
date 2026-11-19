@@ -78,8 +78,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     }
     logOnce(201, 'created');
     res.status(201).json({ status: 'created' });
-  } catch (err) {
+  } catch {
     logOnce(500, 'internal_error');
-    throw err;
+    res.status(500).json({ error: 'internal_error', message: 'Authentication service unavailable. Retry later.' });
   }
 }

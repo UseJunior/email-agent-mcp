@@ -436,24 +436,24 @@ describe('observability/Broker Request Logging', () => {
     }
   });
 
-  it('logs an internal error once before rethrowing an unexpected failure', async () => {
+  it('logs an internal error once before returning a sanitized failure', async () => {
     const failureMessage = 'private store failure detail';
     vi.spyOn(getStore(), 'get').mockRejectedValueOnce(new Error(failureMessage));
     const logCountBefore = logSpy.mock.calls.length;
     const { res, captured } = makeRes();
 
-    await expect(
-      startHandler(
+    await startHandler(
         makeReq({
           method: 'GET',
           query: { session: 'UnexpectedFailureSession_ABCDEFGHIJKLMNOPQRSTUVWXYZ' },
         }),
         res,
-      ),
-    ).rejects.toThrow(failureMessage);
+    );
 
     expect(logSpy.mock.calls.length).toBe(logCountBefore + 1);
-    expect(captured.logCountAtResponse).toBe(-1);
+    expect(captured.statusCode).toBe(500);
+    expect(JSON.stringify(captured.body)).not.toContain(failureMessage);
+    expect(captured.logCountAtResponse).toBe(logCountBefore + 1);
     const raw = String(logSpy.mock.calls[logCountBefore]![0]);
     expect(JSON.parse(raw)).toEqual({
       t: 'broker_request',

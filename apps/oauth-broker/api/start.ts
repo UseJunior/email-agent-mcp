@@ -63,8 +63,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const authUrl = buildAuthUrl(session, record.loginHint);
     logOnce(302, 'redirected');
     res.redirect(302, authUrl);
-  } catch (err) {
+  } catch {
     logOnce(500, 'internal_error');
-    throw err;
+    res.status(500).json({ error: 'internal_error', message: 'Authentication service unavailable. Retry later.' });
   }
 }

@@ -7,6 +7,7 @@
 // polling /api/tickets/claim.
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { brokerFailure, safeOAuthCode } from '../lib/errors.js';
 import { exchangeCode } from '../lib/google.js';
 import { getStore } from '../lib/store.js';
 import { ID_RE } from '../lib/http.js';
@@ -59,12 +60,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     // — this is what gives the CLI a distinguishable signal beyond "still
     // pending".
     if (error) {
-      if (!await getStore().setFailed(state, 'denied', `User cancelled or denied: ${error}`)) {
+      if (!await getStore().setFailed(state, 'denied', `User cancelled or denied: ${safeOAuthCode(error)}`)) {
         lostTransition();
         return;
       }
       logOnce(400, 'denied');
-      renderTerminalPage(res, 400, `Authentication cancelled or denied: ${error}`);
+      renderTerminalPage(res, 400, 'Authentication cancelled or denied.');
       return;
     }
 
@@ -78,35 +79,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       return;
     }
 
+    let tokens;
     try {
-      const tokens = await exchangeCode(code);
-      const advanced = await getStore().setReady(state, {
-        access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token,
-        expires_in: tokens.expires_in,
-        scope: tokens.scope,
-        token_type: tokens.token_type,
-      });
-      if (!advanced) {
-        // Session was missing, expired, or already advanced — nothing the
-        // user can do at this point.
-        lostTransition();
-        return;
-      }
-      logOnce(200, 'ready');
-      renderTerminalPage(res, 200, 'Authentication complete. You can return to your terminal.');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'token exchange failed';
+      tokens = await exchangeCode(code);
+    } catch {
+      const message = brokerFailure('Authentication could not be completed. Re-run configure.').message;
       if (!await getStore().setFailed(state, 'exchange_failed', message)) {
         lostTransition();
         return;
       }
       logOnce(502, 'exchange_failed');
-      renderTerminalPage(res, 502, `Authentication failed: ${message}`);
+      renderTerminalPage(res, 502, message);
+      return;
     }
-  } catch (err) {
+    const advanced = await getStore().setReady(state, tokens);
+    if (!advanced) {
+      lostTransition();
+      return;
+    }
+    logOnce(200, 'ready');
+    renderTerminalPage(res, 200, 'Authentication complete. You can return to your terminal.');
+  } catch {
     logOnce(500, 'internal_error');
-    throw err;
+    renderTerminalPage(res, 500, brokerFailure('Authentication service unavailable. Re-run configure.').message);
   }
 }
 

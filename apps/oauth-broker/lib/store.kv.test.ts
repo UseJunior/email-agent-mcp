@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { _resetConfigForTests } from './config.js';
 import { _resetStoreForTests, getStore } from './store.js';
 
-const kv = vi.hoisted(() => ({ eval: vi.fn() }));
+const kv = vi.hoisted(() => ({ eval: vi.fn(), get: vi.fn(), set: vi.fn() }));
 vi.mock('@vercel/kv', () => ({ kv }));
 
 afterEach(() => {
@@ -21,4 +21,29 @@ it('uses one EVAL with a raw hex hash and decodes the claim result without a pri
   kv.eval.mockResolvedValue(result);
   expect(await getStore().claim('ticket', 'synthetic')).toEqual(result);
   expect(kv.eval).toHaveBeenCalledExactlyOnceWith(expect.any(String), ['session:ticket'], [expect.stringMatching(/^[a-f0-9]{64}$/)]);
+});
+
+it.each(['create', 'get', 'setReady', 'setFailed', 'claim'] as const)('redacts rejected KV %s errors without retaining a cause', async operation => {
+  vi.stubEnv('GMAIL_OAUTH_CLIENT_ID', 'synthetic');
+  vi.stubEnv('GMAIL_OAUTH_CLIENT_SECRET', 'synthetic');
+  vi.stubEnv('BROKER_PUBLIC_ORIGIN', 'https://broker.test');
+  vi.stubEnv('KV_REST_API_URL', 'https://kv.test');
+  const secret = 'RAW_ACCESS RAW_REFRESH RAW_SESSION RAW_PICKUP RAW_HINT';
+  for (const mock of Object.values(kv)) mock.mockRejectedValue(new Error(secret));
+  const store = getStore();
+  const calls = {
+    create: () => store.create('RAW_SESSION', { state: 'pending', pickupHash: 'a'.repeat(64), loginHint: 'RAW_HINT', createdAt: Date.now() }),
+    get: () => store.get('RAW_SESSION'),
+    setReady: () => store.setReady('RAW_SESSION', { access_token: 'RAW_ACCESS', refresh_token: 'RAW_REFRESH', expires_in: 60 }),
+    setFailed: () => store.setFailed('RAW_SESSION', 'exchange_failed', 'safe'),
+    claim: () => store.claim('RAW_SESSION', 'RAW_PICKUP'),
+  };
+  const error = await calls[operation]().catch(e => e);
+  expect(error).toBeInstanceOf(Error);
+  expect(error.message).toMatch(/^Session storage unavailable \(error [a-f0-9-]+\)$/);
+  expect(error.cause).toBeUndefined();
+  for (const value of secret.split(' ')) {
+    expect(String(error.stack)).not.toContain(value);
+    expect(JSON.stringify(error)).not.toContain(value);
+  }
 });
