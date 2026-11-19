@@ -2260,3 +2260,19 @@ describe('email-write/Outlook Nested List Warning', () => {
       .toContain('</ol>\n<p style="margin-left:80px">AFTER-BULLETS paragraph.');
   });
 });
+
+describe('email-write/Send-as draft address', () => {
+  it('Scenario: From is forwarded by new, reply and update draft actions', async () => {
+    const create = vi.spyOn(provider, 'createDraft');
+    const reply = vi.spyOn(provider, 'createReplyDraft').mockResolvedValue({ success: true });
+    const update = vi.spyOn(provider, 'updateDraft');
+    const created = await createDraftAction.run(ctx, { to: 'jane@example.com', from: 'alias@example.com', subject: 'Test', body: 'Hi' });
+    expect(created.preview?.from).toEqual({ email: 'alias@example.com' });
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ from: { email: 'alias@example.com' }, to: [{ email: 'jane@example.com' }] }));
+    await createDraftAction.run(ctx, { reply_to: 'parent', from: 'alias@example.com', body: 'Hi' });
+    expect(reply).toHaveBeenCalledWith('parent', expect.any(String), expect.objectContaining({ from: { email: 'alias@example.com' } }));
+    await updateDraftAction.run(ctx, { draft_id: created.draftId!, from: 'primary@example.com', to: 'john@example.com' });
+    expect(update).toHaveBeenCalledWith(created.draftId, expect.objectContaining({ from: { email: 'primary@example.com' }, to: [{ email: 'john@example.com' }] }));
+    expect(createDraftAction.input.safeParse({ from: 'bad\r\nBcc: victim@example.com' }).success).toBe(false);
+  });
+});

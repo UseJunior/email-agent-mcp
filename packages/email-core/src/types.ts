@@ -62,6 +62,7 @@ export interface EmailThread {
 }
 
 export interface ComposeMessage {
+  from?: EmailAddress;
   to: EmailAddress[];
   cc?: EmailAddress[];
   bcc?: EmailAddress[];
@@ -164,6 +165,7 @@ export interface ListOptions {
 }
 
 export interface ReplyOptions {
+  from?: EmailAddress;
   /**
    * Explicit To recipients for the reply. When set, this **replaces** the
    * provider-derived To (Graph's auto-populated recipients on Microsoft, the

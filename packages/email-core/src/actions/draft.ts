@@ -58,6 +58,7 @@ const DraftOutput = z.object({
 // --- create_draft ---
 
 const CreateDraftInput = z.object({
+  from: z.email().optional().describe("Mailbox primary address or verified send-as alias. Fails closed if the provider cannot verify it."),
   to: z.string().or(z.array(z.string())).optional()
     .describe('Recipient address(es). Required for a new draft; optional with reply_to set, where recipients are derived from the parent message. When supplied alongside reply_to it replaces the provider-derived To rather than adding to it, so the draft is addressed to exactly these recipients. Under reply_all, thread participants displaced from the To line move to Cc rather than being dropped; pass reply_all=false to address the reply to these recipients alone.'),
   cc: z.array(z.string()).optional(),
@@ -87,7 +88,7 @@ export const createDraftAction: EmailAction<
   z.infer<typeof DraftOutput>
 > = {
   name: 'create_draft',
-  description: 'Create an email draft with to/cc/bcc recipients. Supports body_file with YAML frontmatter (to, cc, bcc, subject, reply_to, format, force_black, list_style). Use reply_to for threaded reply drafts, where to and subject are derived from the parent message and may be omitted; pass reply_all=false with reply_to to draft a sender-only reply. For numbered items with lettered sub-paragraphs that someone will edit in Outlook, pass list_style: \'outlook\' so indenting a sub-paragraph does not renumber the list.',
+  description: 'Create an email draft with to/cc/bcc recipients and an optional verified from address. Supports body_file with YAML frontmatter (to, cc, bcc, subject, reply_to, format, force_black, list_style). Use reply_to for threaded reply drafts, where to and subject are derived from the parent message and may be omitted; pass reply_all=false with reply_to to draft a sender-only reply. For numbered items with lettered sub-paragraphs that someone will edit in Outlook, pass list_style: \'outlook\' so indenting a sub-paragraph does not renumber the list.',
   input: CreateDraftInput,
   output: DraftOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -174,6 +175,7 @@ export const createDraftAction: EmailAction<
           // replacement for the derived To, not a merge (issue #164). Omit it
           // when the caller supplied none so the provider derives recipients
           // from the parent message under `reply_all` (issue #192).
+          from: input.from ? { email: input.from } : undefined,
           to: parsed.to.length > 0 ? parsed.to : undefined,
           cc: parsed.cc,
           // Providers also strip these addresses from the derived To/Cc, so
@@ -204,6 +206,7 @@ export const createDraftAction: EmailAction<
     // Standard draft path
     try {
       const result = await ctx.provider.createDraft({
+        from: input.from ? { email: input.from } : undefined,
         to: parsed.to,
         cc: parsed.cc,
         bcc: parsedBcc,
@@ -425,6 +428,7 @@ export const sendDraftAction: EmailAction<
 const UpdateDraftInput = z.object({
   draft_id: z.string()
     .describe('Draft to update. On Gmail either the draft id (r…) or the id of the draft\'s message, as list_emails(folder: "drafts") reports it.'),
+  from: z.email().optional().describe("Mailbox primary address or verified send-as alias. Fails closed if the provider cannot verify it."),
   to: z.string().or(z.array(z.string())).optional(),
   cc: z.array(z.string()).optional(),
   bcc: z.array(z.string()).optional()
@@ -520,6 +524,7 @@ export const updateDraftAction: EmailAction<
 
     // Build partial update — parse name-address strings only for fields the caller actually provided.
     const partial: Partial<import('../types.js').ComposeMessage> = {};
+    if (input.from !== undefined) partial.from = { email: input.from };
     if (to !== undefined || cc !== undefined || bcc !== undefined) {
       const parsed = parseRecipients({
         to: to !== undefined ? (Array.isArray(to) ? to : [to]) : undefined,

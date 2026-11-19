@@ -3322,3 +3322,24 @@ describe('provider-microsoft/Reply Draft Bcc (issue #214)', () => {
     expect(patch.bccRecipients?.map(r => r.emailAddress.address)).toEqual(['introducer@corp.com']);
   });
 });
+
+// Regression for #280: fail closed before creating or mutating a draft.
+describe('email-write/Send-as draft address', () => {
+  it('Scenario: Verified sender on a draft', async () => {
+    const client = createMockClient({ get: vi.fn().mockResolvedValue({ mail: 'primary@example.com', proxyAddresses: ['smtp:alias@example.com'] }) });
+    const provider = new GraphEmailProvider(client);
+    await provider.createDraft({ from: { email: 'alias@example.com' }, to: [{ email: 'jane@example.com' }], subject: 'Test', body: 'Hi' });
+    expect(client.post).toHaveBeenCalledWith('/me/messages', expect.objectContaining({ from: { emailAddress: { address: 'alias@example.com' } }, toRecipients: [{ emailAddress: { address: 'jane@example.com' } }] }));
+    await provider.updateDraft('draft', { from: { email: 'primary@example.com' }, to: [] });
+    expect(client.patch).toHaveBeenCalledWith('/me/messages/draft', { from: { emailAddress: { address: 'primary@example.com' } }, toRecipients: [] });
+  });
+  it('Scenario: Unverified sender', async () => {
+    const client = createMockClient();
+    const provider = new GraphEmailProvider(client);
+    await expect(provider.createDraft({ from: { email: 'unknown@example.com' }, to: [], subject: 'Test', body: 'Hi' })).rejects.toMatchObject({ code: 'FROM_NOT_ALLOWED' });
+    expect(client.post).not.toHaveBeenCalled();
+    vi.mocked(client.get).mockRejectedValue(new Error('denied'));
+    await expect(provider.updateDraft('draft', { from: { email: 'unknown@example.com' } })).rejects.toMatchObject({ code: 'FROM_NOT_ALLOWED' });
+    expect(client.patch).not.toHaveBeenCalled();
+  });
+});

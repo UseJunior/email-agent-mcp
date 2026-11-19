@@ -49,6 +49,7 @@ function attachmentSizeError(attachments: OutboundAttachment[] | undefined): Ema
 }
 
 export interface GmailApiClient {
+  listSendAs?(): Promise<Array<{ sendAsEmail: string; verificationStatus?: string; isPrimary?: boolean }>>;
   listMessages(opts: { labelIds?: string[]; maxResults?: number; q?: string }): Promise<{ messages?: Array<{ id: string; threadId: string }>; resultSizeEstimate?: number }>;
   getMessage(id: string): Promise<GmailMessage>;
   getDraft(draftId: string): Promise<{ id: string; message: GmailMessage }>;
@@ -365,7 +366,22 @@ export class GmailEmailProvider {
     }
   }
 
+  private async validateDraftFrom(from?: EmailAddress): Promise<void> {
+    if (!from) return;
+    if (!this.client.listSendAs) throw new ProviderError('FROM_NOT_ALLOWED', 'Client cannot verify send-as aliases', 'gmail', false);
+    let aliases;
+    try {
+      aliases = await this.client.listSendAs();
+    } catch {
+      throw new ProviderError('FROM_NOT_ALLOWED', 'Cannot verify Gmail send-as aliases', 'gmail', false);
+    }
+    if (!aliases.some(a => (a.isPrimary === true || a.verificationStatus === 'accepted') && a.sendAsEmail.toLowerCase() === from.email.toLowerCase())) {
+      throw new ProviderError('FROM_NOT_ALLOWED', 'From must be a verified Gmail send-as address', 'gmail', false);
+    }
+  }
+
   async createDraft(msg: ComposeMessage): Promise<DraftResult> {
+    await this.validateDraftFrom(msg.from);
     const sizeError = attachmentSizeError(msg.attachments);
     if (sizeError) return { success: false, error: sizeError };
     const raw = buildRawMessage(msg, { draftOrigin: 'non_reply' });
@@ -386,6 +402,7 @@ export class GmailEmailProvider {
     const sizeError = attachmentSizeError(opts?.attachments);
     if (sizeError) return { success: false, error: sizeError };
     try {
+      await this.validateDraftFrom(opts?.from);
       const original = await this.getMessage(messageId);
       // Drafts stay allowlist-exempt; send_draft re-reads the stored draft's
       // recipients and gates them there (issue #164).
@@ -395,6 +412,7 @@ export class GmailEmailProvider {
 
       const raw = buildRawMessage(
         {
+          from: opts?.from,
           to: replyTo,
           cc: replyCc.length > 0 ? replyCc : undefined,
           bcc: opts?.bcc,
@@ -416,7 +434,7 @@ export class GmailEmailProvider {
       return {
         success: false,
         error: {
-          code: 'DRAFT_FAILED',
+          code: err instanceof ProviderError ? err.code : 'DRAFT_FAILED',
           message: err instanceof Error ? err.message : String(err),
           recoverable: false,
         },
@@ -437,6 +455,7 @@ export class GmailEmailProvider {
 
     let survivingDraftId: string | undefined;
     try {
+      await this.validateDraftFrom(msg.from);
       // Gmail's drafts.update is a full replacement, not a PATCH. Fetch the
       // current draft, merge the partial over it, and re-upload. Preserve
       // threading headers from the original draft so edits don't silently
@@ -490,6 +509,7 @@ export class GmailEmailProvider {
       }
 
       const merged: ComposeMessage = {
+        from: msg.from ?? (current.from.email ? current.from : undefined),
         to: msg.to ?? current.to,
         cc: msg.cc ?? current.cc,
         // Preserve the draft's existing bcc on a partial update: providers now
@@ -518,7 +538,7 @@ export class GmailEmailProvider {
         success: false,
         draftId: survivingDraftId,
         error: {
-          code: 'UPDATE_DRAFT_FAILED',
+          code: err instanceof ProviderError ? err.code : 'UPDATE_DRAFT_FAILED',
           message: err instanceof Error ? err.message : String(err),
           recoverable: false,
         },
@@ -1078,6 +1098,7 @@ function multipartAsPart(subtype: 'alternative' | 'mixed', parts: MimePart[]): M
  */
 function buildRawMessage(msg: ComposeMessage, opts: BuildRawOptions = {}): string {
   const headers: string[] = [];
+  if (msg.from) headers.push(`From: ${formatAddressList([msg.from])}`);
   headers.push('MIME-Version: 1.0');
   // A reply whose only original recipient moved to Bcc has no To line; an
   // empty `To:` header is malformed, so omit it.
