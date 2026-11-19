@@ -3343,3 +3343,17 @@ describe('email-write/Send-as draft address', () => {
     expect(client.patch).not.toHaveBeenCalled();
   });
 });
+
+describe('provider-microsoft/Nullable attachment metadata', () => {
+  it('normalizes absent Graph contentId for read_email output while retaining inline CIDs', async () => {
+    const attachments = [{ id: 'ordinary', name: 'file.txt', contentType: 'text/plain', size: 4, isInline: false, contentId: null }, { id: 'inline', name: 'image.png', contentType: 'image/png', size: 4, isInline: true, contentId: 'image-cid' }];
+    const client = createMockClient({ get: vi.fn().mockImplementation(async (url: string) => url.includes('/attachments?') ? { value: attachments } : { id: 'draft', subject: 'Synthetic', from: { emailAddress: { address: 'jane@example.com' } }, body: { contentType: 'text', content: 'Synthetic' }, attachments }) });
+    const provider = new GraphEmailProvider(client);
+    const message = await provider.getMessage('draft');
+    expect(message.attachments?.map(a => a.contentId)).toEqual([undefined, 'image-cid']);
+    expect((await provider.listAttachments('draft')).map(a => a.contentId)).toEqual([undefined, 'image-cid']);
+    const { readEmailAction } = await import('@usejunior/email-core');
+    const result = await readEmailAction.run({ provider } as never, { id: 'draft', format: 'html' });
+    expect(readEmailAction.output.safeParse(result).success).toBe(true);
+  });
+});
