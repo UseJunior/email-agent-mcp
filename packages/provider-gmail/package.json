@@ -19,9 +19,9 @@
     "clean": "rm -rf dist/"
   },
   "dependencies": {
-    "@googleapis/gmail": "^4.0.0",
+    "@googleapis/gmail": "^22.1.0",
     "@usejunior/email-core": "^0.5.1",
-    "google-auth-library": "^8.9.0"
+    "google-auth-library": "^11.3.4"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
@@ -30,7 +30,7 @@
     "vitest": "^4.0.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "files": [
     "dist/",

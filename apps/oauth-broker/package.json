@@ -5,7 +5,7 @@
   "description": "Vercel OAuth broker for email-agent-mcp Gmail provider — relays code/refresh exchanges so the client_secret never leaves the server.",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
