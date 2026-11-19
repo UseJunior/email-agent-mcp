@@ -2276,3 +2276,27 @@ describe('email-write/Send-as draft address', () => {
     expect(createDraftAction.input.safeParse({ from: 'bad\r\nBcc: victim@example.com' }).success).toBe(false);
   });
 });
+
+describe('email-write/Forward drafts', () => {
+  it('Scenario: Forward requires explicit recipients and rejects reply_to', async () => {
+    const createForwardDraft = vi.fn().mockResolvedValue({ success: true, draftId: 'forward-draft' });
+    Object.assign(provider, { createForwardDraft });
+    expect((await createDraftAction.run(ctx, { forward_of: 'parent', body: 'Cover' })).error?.code).toBe('NO_RECIPIENTS');
+    expect((await createDraftAction.run(ctx, { forward_of: 'parent', reply_to: 'parent', to: 'jane@example.com', body: 'Cover' })).error?.code).toBe('INVALID_INPUT');
+    expect(createForwardDraft).not.toHaveBeenCalled();
+    await createDraftAction.run(ctx, { forward_of: 'parent', to: 'jane@example.com', cc: ['john@example.com'], bcc: ['audit@example.com'], body: 'Cover', format: 'text' });
+    expect(createForwardDraft).toHaveBeenCalledWith('parent', 'Cover', expect.objectContaining({ to: [{ email: 'jane@example.com' }], cc: [{ email: 'john@example.com' }], bcc: [{ email: 'audit@example.com' }] }));
+  });
+  it('Scenario: Reply subject override is applied', async () => {
+    const reply = vi.spyOn(provider, 'createReplyDraft').mockResolvedValue({ success: true });
+    await createDraftAction.run(ctx, { reply_to: 'parent', subject: 'Updated subject', body: 'Hi' });
+    expect(reply).toHaveBeenCalledWith('parent', expect.any(String), expect.objectContaining({ subject: 'Updated subject' }));
+  });
+});
+
+it('forward_of resolves from body_file frontmatter', async () => {
+  const createForwardDraft = vi.fn().mockResolvedValue({ success: true }); Object.assign(provider,{createForwardDraft});
+  await writeFile(join(testDir,'forward.md'),'---\nto: jane@example.com\nforward_of: parent\n---\nCover');
+  const result = await createDraftAction.run(ctx,{body_file:'forward.md'});
+  expect(result.success).toBe(true);expect(createForwardDraft).toHaveBeenCalledWith('parent',expect.any(String),expect.any(Object));
+});

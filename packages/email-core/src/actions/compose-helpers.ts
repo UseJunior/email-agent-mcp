@@ -74,6 +74,7 @@ export interface ComposeFields {
   bcc?: string[];
   subject?: string;
   replyTo?: string;
+  forwardOf?: string;
   draft?: boolean;
   format?: BodyFormat;
   forceBlack?: boolean;
@@ -97,6 +98,7 @@ export async function resolveComposeFields(
     bcc?: string[];
     subject?: string;
     reply_to?: string;
+    forward_of?: string;
     draft?: boolean;
     format?: BodyFormat;
     force_black?: boolean;
@@ -111,6 +113,7 @@ export async function resolveComposeFields(
   let bcc = input.bcc;
   let subject = input.subject;
   let replyTo = input.reply_to;
+  let forwardOf = input.forward_of;
   let draft = input.draft;
   let format = input.format;
   let forceBlack = input.force_black;
@@ -131,6 +134,7 @@ export async function resolveComposeFields(
       if (fm.bcc !== undefined) bcc = Array.isArray(fm.bcc) ? fm.bcc : [fm.bcc];
       if (fm.subject !== undefined) subject = fm.subject;
       if (fm.reply_to !== undefined) replyTo = fm.reply_to;
+      if (fm.forward_of !== undefined) forwardOf = fm.forward_of;
       if (fm.draft !== undefined) draft = fm.draft;
       if (fm.format !== undefined) format = fm.format;
       if (fm.force_black !== undefined) forceBlack = fm.force_black;
@@ -145,7 +149,7 @@ export async function resolveComposeFields(
     };
   }
 
-  return { body: body ?? '', to, cc, bcc, subject, replyTo, draft, format, forceBlack, listStyle };
+  return { body: body ?? '', to, cc, bcc, subject, replyTo, forwardOf, draft, format, forceBlack, listStyle };
 }
 
 // --- Body rendering options ---

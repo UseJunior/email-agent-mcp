@@ -68,6 +68,7 @@ const CreateDraftInput = z.object({
   body: z.string().optional(),
   body_file: z.string().optional()
     .describe('Path to a .md/.html/.txt file to use as the body. Sandboxed like attachment paths: relative paths resolve against the working directory only; files in an AGENT_EMAIL_ALLOWED_DIRS root must be given as an ABSOLUTE path (a leading ~ is not expanded here).'),
+  forward_of: z.string().optional().describe("Message to forward, retaining original content and attachments. Requires explicit to recipients. Mutually exclusive with reply_to."),
   reply_to: z.string().optional(),
   reply_all: z.boolean().optional().default(true)
     .describe('Only relevant when reply_to is set. When false, the draft replies only to the original sender. Default true preserves reply-all behavior (cc the original thread).'),
@@ -88,7 +89,7 @@ export const createDraftAction: EmailAction<
   z.infer<typeof DraftOutput>
 > = {
   name: 'create_draft',
-  description: 'Create an email draft with to/cc/bcc recipients and an optional verified from address. Supports body_file with YAML frontmatter (to, cc, bcc, subject, reply_to, format, force_black, list_style). Use reply_to for threaded reply drafts, where to and subject are derived from the parent message and may be omitted; pass reply_all=false with reply_to to draft a sender-only reply. For numbered items with lettered sub-paragraphs that someone will edit in Outlook, pass list_style: \'outlook\' so indenting a sub-paragraph does not renumber the list.',
+  description: 'Create an email draft with to/cc/bcc recipients and an optional verified from address. Supports body_file with YAML frontmatter (to, cc, bcc, subject, reply_to, forward_of, format, force_black, list_style). Use forward_of for a forward retaining the original content and attachments, or reply_to for threaded reply drafts, where to and subject are derived from the parent message and may be omitted; pass reply_all=false with reply_to to draft a sender-only reply. For numbered items with lettered sub-paragraphs that someone will edit in Outlook, pass list_style: \'outlook\' so indenting a sub-paragraph does not renumber the list.',
   input: CreateDraftInput,
   output: DraftOutput,
   annotations: { readOnlyHint: false, destructiveHint: false },
@@ -105,7 +106,8 @@ export const createDraftAction: EmailAction<
       return { success: false, error: fields.error };
     }
 
-    const { to, cc, bcc, subject, replyTo, format, forceBlack, listStyle } = fields;
+    const { to, cc, bcc, subject, replyTo, forwardOf, format, forceBlack, listStyle } = fields;
+    if (replyTo && forwardOf) return { success: false, error: { code: 'INVALID_INPUT', message: 'forward_of and reply_to are mutually exclusive', recoverable: false } };
     let { body } = fields;
 
     // Resolve attachments (sandboxed path reads + validation)
@@ -118,13 +120,14 @@ export const createDraftAction: EmailAction<
     // Validate required fields. A reply draft derives both its recipients and
     // its subject from the parent message, so neither is required there
     // (issue #192) — an explicitly supplied `to` stays available as an override.
-    if (!replyTo) {
+    if (!replyTo && !forwardOf) {
       const requiredError = validateRequiredFields(to, subject);
       if (requiredError) {
         return { success: false, error: requiredError };
       }
     }
 
+    if (forwardOf && (!to || to.length === 0)) return { success: false, error: { code: 'NO_RECIPIENTS', message: 'Forward drafts require explicit to recipients', recoverable: false } };
     const recipients = to === undefined ? undefined : (Array.isArray(to) ? to : [to]);
 
     // Parse name-address strings into {name, email} once before any provider call.
@@ -141,7 +144,7 @@ export const createDraftAction: EmailAction<
     // Drafts bypass allowlist — enforcement happens at send_draft time
 
     // Re: threading guardrail
-    const threadingError = checkReplyThreading(subject ?? '', replyTo);
+    const threadingError = forwardOf ? undefined : checkReplyThreading(subject ?? '', replyTo);
     if (threadingError) {
       return { success: false, error: threadingError };
     }
@@ -161,16 +164,18 @@ export const createDraftAction: EmailAction<
     // Outlook reorders content after a nested list inside an <li> (issue #227).
     const listWarning = outlookNestedListWarning(outBodyHtml, format, listStyle);
 
-    // Reply draft path
-    if (replyTo) {
-      if (!ctx.provider.createReplyDraft) {
+    // Provider-created reply/forward drafts retain original content.
+    if (replyTo || forwardOf) {
+      const createThreadDraft = forwardOf ? ctx.provider.createForwardDraft : ctx.provider.createReplyDraft;
+      if (!createThreadDraft) {
         return {
           success: false,
-          error: { code: 'NOT_SUPPORTED', message: 'Reply drafts are not supported by this email provider', recoverable: false },
+          error: { code: 'NOT_SUPPORTED', message: 'This draft operation is not supported by this email provider', recoverable: false },
         };
       }
       try {
-        const result = await ctx.provider.createReplyDraft(replyTo, body, {
+        const result = await createThreadDraft.call(ctx.provider, (forwardOf ?? replyTo)!, body, {
+          subject,
           // Forward an explicitly supplied `to` — providers treat it as a
           // replacement for the derived To, not a merge (issue #164). Omit it
           // when the caller supplied none so the provider derives recipients

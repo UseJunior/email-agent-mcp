@@ -1352,6 +1352,16 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
     }
   }
 
+  async createForwardDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {
+    try {
+      const draftId = await this.prepareReplyDraft(messageId, body, opts, true);
+      return { success: true, draftId };
+    } catch (err) {
+      if (err instanceof GraphAttachmentError) return { success: false, draftId: err.draftId, error: err.emailError };
+      return { success: false, error: { code: err instanceof ProviderError ? err.code : 'DRAFT_FAILED', message: err instanceof Error ? err.message : 'Forward draft failed', recoverable: false } };
+    }
+  }
+
   async createReplyDraft(messageId: string, body: string, opts?: ReplyOptions): Promise<DraftResult> {
     // Routes to createReply or createReplyAll based on opts.replyAll. Both Graph
     // endpoints preserve embedded images, CID references, and the auto-quoted thread.
@@ -1419,6 +1429,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
     messageId: string,
     body: string,
     opts?: ReplyOptions,
+    forward = false,
   ): Promise<string> {
     // Size preflight before creating the draft, so an oversize attachment
     // never leaves an orphan draft behind.
@@ -1428,7 +1439,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
     }
 
     await this.validateDraftFrom(opts?.from);
-    const endpoint = opts?.replyAll === false ? 'createReply' : 'createReplyAll';
+    const endpoint = forward ? 'createForward' : opts?.replyAll === false ? 'createReply' : 'createReplyAll';
     const draft = await this.client.post(
       `${this.basePath}/messages/${encodeGraphPathId(messageId)}/${endpoint}`,
       {},
@@ -1464,6 +1475,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
         ],
       };
 
+      if (opts?.subject !== undefined) patch.subject = opts.subject.slice(0, SUBJECT_MAX_LENGTH);
       if (opts?.from) patch.from = { emailAddress: { address: opts.from.email, name: opts.from.name } };
 
       // `to` REPLACES Graph's auto-populated recipients; `cc`/`bcc` below MERGE
@@ -1513,6 +1525,11 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       const bccMerged = mergeRecipients(draftBcc, opts?.bcc ?? []);
       if (bccMerged.length > 0) patch.bccRecipients = bccMerged;
 
+      if (forward) {
+        patch.toRecipients = toGraphRecipients(opts?.to ?? []);
+        patch.ccRecipients = toGraphRecipients(opts?.cc ?? []);
+        patch.bccRecipients = toGraphRecipients(opts?.bcc ?? []);
+      }
       await this.client.patch(`${this.basePath}/messages/${encodeGraphPathId(draft.id)}`, patch);
 
       // Two-step attachment upload: the draft now exists, so POST each file to

@@ -1442,7 +1442,7 @@ describe('provider-gmail/Update Draft', () => {
     expect(raw).toContain(attachmentBytes.toString('base64'));
   });
 
-  it('Scenario: updateDraft fails closed when preserving a draft with inline attachments', async () => {
+  it('Scenario: updateDraft preserves inline attachment Content-ID and disposition', async () => {
     const draftWithInline = {
       id: 'msg-backing-456',
       threadId: 'thread-draft',
@@ -1476,8 +1476,12 @@ describe('provider-gmail/Update Draft', () => {
 
     const result = await provider.updateDraft('draft-existing', { subject: 'New subject' });
 
-    expect(result.success).toBe(false);
-    expect(result.error?.code).toBe('INLINE_ATTACHMENTS_UNSUPPORTED');
+    expect(result.success).toBe(true);
+    const raw = Buffer.from(vi.mocked(client.updateDraft!).mock.calls[0][1], 'base64url').toString();
+    expect(raw).toContain('Content-ID: <x>');
+    expect(raw).toContain('Content-Disposition: inline');
+    expect(raw).toContain('filename="logo.png"');
+    expect(raw).toContain('cid:x');
   });
 
   it('Scenario: reply status for a deleted draft throws MessageNotFoundError', async () => {
@@ -2077,4 +2081,46 @@ it('accepts the primary Gmail address without a custom-alias verificationStatus'
   const client = createMockGmailClient({ listSendAs: vi.fn().mockResolvedValue([{ sendAsEmail: 'primary@example.com', isPrimary: true }]) });
   const result = await new GmailEmailProvider(client).createDraft({ from: { email: 'primary@example.com' }, to: [], subject: 'Test', body: 'Hi' });
   expect(result.success).toBe(true);
+});
+
+describe('email-write/Forward drafts', () => {
+  it('retains body and original MIME attachment bytes in a fresh thread', async () => {
+    const client = createMockGmailClient();
+    vi.mocked(client.getMessage).mockResolvedValue({ id: 'parent', threadId: 'old-thread', payload: { headers: [{ name: 'From', value: 'sender@example.com' }, { name: 'Subject', value: 'Original' }, { name: 'To', value: 'old@example.com' }], mimeType: 'multipart/mixed', parts: [ { mimeType: 'text/plain', body: { data: Buffer.from('Original text').toString('base64url') } }, { mimeType: 'application/pdf', filename: 'original.pdf', body: { attachmentId: 'pdf', size: 16 } }, { mimeType: 'image/png', filename: 'image.png', headers: [{ name: 'Content-ID', value: '<inline-image>' }, { name: 'Content-Disposition', value: 'inline' }], body: { attachmentId: 'img', size: 16 } } ] } });
+    const result = await new GmailEmailProvider(client).createForwardDraft('parent', 'Cover', { to: [{ email: 'jane@example.com' }] });
+    expect(result.success).toBe(true);
+    expect(client.createDraft).toHaveBeenCalledWith(expect.any(String));
+    const raw = Buffer.from(vi.mocked(client.createDraft).mock.calls[0][0], 'base64url').toString();
+    expect(raw).toContain('Subject: FW: Original'); expect(raw).toContain('To: jane@example.com');
+    expect(raw).toContain('Original text'); expect(raw).toContain('Cover');
+    expect(raw).toContain('filename="original.pdf"'); expect(raw).toContain('Content-ID: <inline-image>');
+    expect(raw).toContain('Content-Disposition: inline');
+    expect(raw).not.toContain('In-Reply-To:'); expect(raw).not.toContain('References:');
+    expect(client.getAttachment).toHaveBeenCalledWith('parent', 'pdf');
+  });
+  it('applies an explicit reply subject without reusing an incompatible Gmail thread', async () => {
+    const client = createMockGmailClient();
+    await new GmailEmailProvider(client).createReplyDraft('msg-1', 'Cover', { subject: 'Changed subject' });
+    expect(client.createDraft).toHaveBeenCalledWith(expect.any(String), undefined);
+    const raw = Buffer.from(vi.mocked(client.createDraft).mock.calls[0][0], 'base64url').toString();
+    expect(raw).toContain('Subject: Changed subject');
+  });
+});
+
+it('forward preserves source names and MIME types even if download metadata is ambiguous', async () => {
+  const client = createMockGmailClient();
+  const provider = new GmailEmailProvider(client);
+  vi.spyOn(provider, 'getMessage').mockResolvedValue({ id: 'parent', subject: 'Original', from: { email: 'sender@example.com' }, to: [], receivedAt: '', isRead: true, hasAttachments: true, body: 'Original', attachments: [{ id: 'one', filename: 'a.pdf', mimeType: 'application/pdf', size: 4, isInline: false }, { id: 'two', filename: 'b.pdf', mimeType: 'application/pdf', size: 4, isInline: false }] });
+  vi.spyOn(provider, 'downloadAttachment').mockImplementation(async (_id, att) => ({ filename: att, mimeType: 'application/octet-stream', size: 4, content: Buffer.from('data') }));
+  await provider.createForwardDraft('parent', 'Cover', { to: [{ email: 'jane@example.com' }] });
+  const raw=Buffer.from(vi.mocked(client.createDraft).mock.calls[0][0], 'base64url').toString();
+  expect(raw).toContain('filename="a.pdf"');expect(raw).toContain('filename="b.pdf"');expect(raw).toContain('Content-Type: application/pdf');
+  expect(raw).not.toContain('Content-Type: text/html');
+});
+it('forward errors return a DraftResult and case-variant reply subjects retain the parent thread', async () => {
+  const client = createMockGmailClient(); const provider = new GmailEmailProvider(client);
+  await provider.createReplyDraft('parent','Cover',{subject:'RE: Test Email'});
+  expect(client.createDraft).toHaveBeenCalledWith(expect.any(String),'thread-1');
+  vi.mocked(client.getMessage).mockRejectedValue(new Error('unavailable'));
+  expect((await provider.createForwardDraft('parent','Cover',{})).error?.code).toBe('DRAFT_FAILED');
 });

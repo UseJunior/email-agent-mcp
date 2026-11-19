@@ -9,13 +9,14 @@ export interface FrontmatterFields {
   bcc?: string | string[];
   subject?: string;
   reply_to?: string;
+  forward_of?: string;
   draft?: boolean;
   format?: BodyFormat;
   force_black?: boolean;
   list_style?: ListStyle;
 }
 
-const KNOWN_KEYS = new Set(['to', 'cc', 'bcc', 'subject', 'reply_to', 'draft', 'format', 'force_black', 'list_style']);
+const KNOWN_KEYS = new Set(['to', 'cc', 'bcc', 'subject', 'reply_to', 'forward_of', 'draft', 'format', 'force_black', 'list_style']);
 
 export function parseFrontmatter(
   content: string,
@@ -65,8 +66,8 @@ export function parseFrontmatter(
       fields.draft = value.toLowerCase() === 'true';
     } else if (key === 'subject') {
       fields.subject = value;
-    } else if (key === 'reply_to') {
-      fields.reply_to = value;
+    } else if (key === 'reply_to' || key === 'forward_of') {
+      fields[key] = value;
     } else if (key === 'format') {
       const lowered = value.toLowerCase();
       if ((BODY_FORMATS as readonly string[]).includes(lowered)) {

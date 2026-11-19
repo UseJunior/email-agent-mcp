@@ -3357,3 +3357,22 @@ describe('provider-microsoft/Nullable attachment metadata', () => {
     expect(readEmailAction.output.safeParse(result).success).toBe(true);
   });
 });
+
+describe('email-write/Forward drafts', () => {
+  it('Scenario: Forward retains original content and attachments with only supplied recipients', async () => {
+    const client = createMockClient({ post: vi.fn().mockResolvedValue({ id: 'forward', body: { contentType: 'HTML', content: '<html><body><div id="divRplyFwdMsg">Original message</div></body></html>' }, toRecipients: [{ emailAddress: { address: 'old@example.com' } }], ccRecipients: [{ emailAddress: { address: 'old-cc@example.com' } }] }) });
+    const provider = new GraphEmailProvider(client);
+    const result = await provider.createForwardDraft('parent', 'Cover', { to: [{ email: 'jane@example.com' }] });
+    expect(result.success).toBe(true);
+    expect(client.post).toHaveBeenCalledWith('/me/messages/parent/createForward', {});
+    expect(client.patch).toHaveBeenCalledWith('/me/messages/forward', expect.objectContaining({ toRecipients: [{ emailAddress: { address: 'jane@example.com' } }], ccRecipients: [], bccRecipients: [], singleValueExtendedProperties: expect.arrayContaining([expect.objectContaining({ value: 'reply' })]) }));
+    const patch = vi.mocked(client.patch).mock.calls[0][1] as { body: { content: string } };
+    expect(patch.body.content).toContain('Original message'); expect(patch.body.content).toContain('Cover');
+    expect(client.delete).not.toHaveBeenCalled(); // Graph carries original attachment children.
+  });
+  it('applies explicit subject on reply drafts', async () => {
+    const client = createMockClient({ post: vi.fn().mockResolvedValue({ id: 'reply', body: { contentType: 'HTML', content: '<body>Original</body>' } }) });
+    await new GraphEmailProvider(client).createReplyDraft('parent', 'Cover', { subject: 'Changed subject' });
+    expect(client.patch).toHaveBeenCalledWith('/me/messages/reply', expect.objectContaining({ subject: 'Changed subject' }));
+  });
+});
