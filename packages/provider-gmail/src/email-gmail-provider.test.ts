@@ -2048,3 +2048,33 @@ describe('provider-gmail/buildRawMessage RFC 2047 headers (#198)', () => {
     expect(decodeHeader(raw, 'To')).toBe(`Bob <a@corp.com>, Alice from the international customer success and enterprise account management team <alice@example.com>, ${'非常长的显示名称'.repeat(4)} <a.very.long.address.for.testing@subdomain.example.com>`);
   });
 });
+
+describe('email-write/Send-as draft address', () => {
+  it('Scenario: verified alias is emitted and preserved during recipient-only updates', async () => {
+    const client = createMockGmailClient({ listSendAs: vi.fn().mockResolvedValue([{ sendAsEmail: 'alias@example.com', verificationStatus: 'accepted' }]) });
+    const provider = new GmailEmailProvider(client);
+    await provider.createDraft({ from: { email: 'alias@example.com' }, to: [{ email: 'jane@example.com' }], subject: 'Test', body: 'Hi' });
+    const mime = Buffer.from(vi.mocked(client.createDraft).mock.calls[0][0], 'base64url').toString();
+    expect(mime).toContain('From: alias@example.com');
+    expect(mime).toContain('To: jane@example.com');
+    await provider.updateDraft('draft-abc', { to: [{ email: 'john@example.com' }] });
+    const updated = Buffer.from(vi.mocked(client.updateDraft!).mock.calls[0][1], 'base64url').toString();
+    expect(updated).toContain('From: me@corp.com');
+    expect(updated).toContain('To: john@example.com');
+  });
+  it('Scenario: pending or unverifiable send-as cannot create a draft', async () => {
+    const client = createMockGmailClient({ listSendAs: vi.fn().mockResolvedValue([{ sendAsEmail: 'alias@example.com', verificationStatus: 'pending' }]) });
+    const provider = new GmailEmailProvider(client);
+    await expect(provider.createDraft({ from: { email: 'alias@example.com' }, to: [], subject: 'Test', body: 'Hi' })).rejects.toMatchObject({ code: 'FROM_NOT_ALLOWED' });
+    expect(client.createDraft).not.toHaveBeenCalled();
+    const reply = await provider.createReplyDraft('msg-1', 'Hi', { from: { email: 'alias@example.com' } });
+    expect(reply.success).toBe(false);
+    expect(client.createDraft).not.toHaveBeenCalled();
+  });
+});
+
+it('accepts the primary Gmail address without a custom-alias verificationStatus', async () => {
+  const client = createMockGmailClient({ listSendAs: vi.fn().mockResolvedValue([{ sendAsEmail: 'primary@example.com', isPrimary: true }]) });
+  const result = await new GmailEmailProvider(client).createDraft({ from: { email: 'primary@example.com' }, to: [], subject: 'Test', body: 'Hi' });
+  expect(result.success).toBe(true);
+});

@@ -1118,13 +1118,33 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
     return { success: true, messageId: draftId };
   }
 
+  private async validateDraftFrom(from?: EmailAddress): Promise<void> {
+    if (!from) return;
+    // Only this mailbox's primary SMTP address and proxy aliases are admitted.
+    // Delegated send-as of unrelated mailboxes needs a separate permission model.
+    let profile;
+    try {
+      profile = await this.client.get(`${this.basePath}?$select=mail,proxyAddresses`);
+    } catch {
+      throw new ProviderError('FROM_NOT_ALLOWED', 'Cannot verify this mailbox\'s send-as addresses', 'microsoft', false);
+    }
+    const aliases = [profile.mail, ...((Array.isArray(profile.proxyAddresses) ? profile.proxyAddresses : []) as unknown[])
+      .filter((a): a is string => typeof a === 'string' && /^smtp:/i.test(a))
+      .map(a => a.slice(5))];
+    if (!aliases.some(a => typeof a === 'string' && a.toLowerCase() === from.email.toLowerCase())) {
+      throw new ProviderError('FROM_NOT_ALLOWED', 'From must be this mailbox\'s primary SMTP address or proxy alias', 'microsoft', false);
+    }
+  }
+
   async createDraft(msg: ComposeMessage): Promise<DraftResult> {
+    await this.validateDraftFrom(msg.from);
     const sizeError = checkGraphAttachmentLimits(msg.attachments);
     if (sizeError) {
       return { success: false, error: sizeError };
     }
 
     const graphMsg: Record<string, unknown> = {
+      ...(msg.from ? { from: { emailAddress: { address: msg.from.email, name: msg.from.name } } } : {}),
       subject: msg.subject,
       body: buildGraphBody(msg.bodyHtml, msg.body),
       toRecipients: toGraphRecipients(msg.to),
@@ -1343,7 +1363,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
         return { success: false, draftId: err.draftId, error: err.emailError };
       }
       const message = err instanceof Error ? err.message : 'Failed to create reply draft';
-      return { success: false, error: { code: 'DRAFT_FAILED', message, recoverable: false } };
+      return { success: false, error: { code: err instanceof ProviderError ? err.code : 'DRAFT_FAILED', message, recoverable: false } };
     }
   }
 
@@ -1407,6 +1427,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       throw new GraphAttachmentError(sizeError);
     }
 
+    await this.validateDraftFrom(opts?.from);
     const endpoint = opts?.replyAll === false ? 'createReply' : 'createReplyAll';
     const draft = await this.client.post(
       `${this.basePath}/messages/${encodeGraphPathId(messageId)}/${endpoint}`,
@@ -1442,6 +1463,8 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
           { id: DRAFT_ORIGIN_PROPERTY, value: 'reply' },
         ],
       };
+
+      if (opts?.from) patch.from = { emailAddress: { address: opts.from.email, name: opts.from.name } };
 
       // `to` REPLACES Graph's auto-populated recipients; `cc`/`bcc` below MERGE
       // with the thread's. The asymmetry is deliberate (issue #164): merging a
@@ -1594,6 +1617,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
   }
 
   async updateDraft(draftId: string, msg: Partial<ComposeMessage>): Promise<DraftResult> {
+    await this.validateDraftFrom(msg.from);
     const patch: Record<string, unknown> = {};
     if (msg.body !== undefined || msg.bodyHtml !== undefined) {
       // update_draft admits body writes only for provider-confirmed non-reply
@@ -1601,6 +1625,7 @@ export class GraphEmailProvider implements EmailReader, EmailSender, EmailSchedu
       // wholesale; no quoted-history boundary inspection belongs here.
       patch.body = buildGraphBody(msg.bodyHtml, msg.body ?? '');
     }
+    if (msg.from) patch.from = { emailAddress: { address: msg.from.email, name: msg.from.name } };
     if (msg.subject !== undefined) patch.subject = msg.subject.slice(0, SUBJECT_MAX_LENGTH);
     // An omitted list leaves the draft's existing recipients untouched (Graph
     // PATCH is a merge); a provided list replaces them.

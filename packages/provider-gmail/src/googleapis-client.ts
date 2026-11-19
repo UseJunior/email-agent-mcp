@@ -92,6 +92,7 @@ interface GmailThreadsApi {
 
 interface GmailApiInstance {
   users: {
+    settings?: { sendAs: { list(args: { userId: string }): Promise<{ data?: { sendAs?: Array<{ sendAsEmail?: string | null; verificationStatus?: string | null; isPrimary?: boolean | null }> } }> } };
     messages: GmailMessagesApi;
     drafts: GmailDraftsApi;
     threads: GmailThreadsApi;
@@ -141,6 +142,13 @@ function requireDraft(draft: GmailDraft | undefined, op: string): { id: string; 
 
 export class GoogleapisGmailClient implements GmailApiClient {
   private readonly api: GmailApiInstance;
+
+  async listSendAs(): Promise<Array<{ sendAsEmail: string; verificationStatus?: string; isPrimary?: boolean }>> {
+    if (!this.api.users.settings) throw new Error('Cannot verify Gmail send-as aliases');
+    const { data } = await this.api.users.settings.sendAs.list({ userId: 'me' });
+    return (data?.sendAs ?? []).flatMap(a => a.sendAsEmail
+      ? [{ sendAsEmail: a.sendAsEmail, verificationStatus: a.verificationStatus ?? undefined, isPrimary: a.isPrimary ?? undefined }] : []);
+  }
 
   constructor(
     auth: GmailAuthManager,

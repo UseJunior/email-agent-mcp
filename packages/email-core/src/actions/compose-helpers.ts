@@ -473,6 +473,7 @@ const EmailAddressSchema = z.object({
 });
 
 export const DraftPreviewSchema = z.object({
+  from: EmailAddressSchema.optional(),
   to: z.array(EmailAddressSchema).optional(),
   cc: z.array(EmailAddressSchema).optional(),
   // bcc is surfaced from the provider read-back: both Gmail's mapGmailMessage and
@@ -583,6 +584,7 @@ export async function buildDraftPreview(
   }
 
   const preview: DraftPreview = {
+    from: persisted.from,
     to: persisted.to,
     cc: persisted.cc,
     bcc: persisted.bcc,

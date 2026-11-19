@@ -449,3 +449,14 @@ When `list_style` is omitted or `"default"`, rendering SHALL be byte-identical t
 - **WHEN** a `body_file` declares `list_style: outlook` in its frontmatter and the action call omits `list_style`
 - **THEN** the body is rendered in the split-list shape
 
+
+### Requirement: Send-as draft address
+The system SHALL accept an optional From address for draft creation and updates only when the provider verifies that it belongs to the mailbox's SMTP aliases (Microsoft) or accepted send-as addresses (Gmail). Lookup failures SHALL reject the mutation. Draft previews SHALL include the persisted From address. Recipient-only updates SHALL preserve it.
+
+#### Scenario: Verified sender on a draft
+- **WHEN** a verified From address is supplied for a new or reply draft or an update
+- **THEN** the provider stores that sender and the preview reports it
+
+#### Scenario: Unverified sender
+- **WHEN** verification fails or the requested sender is unknown
+- **THEN** the mutation fails before any draft write

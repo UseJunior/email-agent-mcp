@@ -130,7 +130,7 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSchedul
         id,
         isDraft: true,
         subject: draft.subject,
-        from: { email: 'me@company.com' },
+        from: draft.from ?? { email: 'me@company.com' },
         to: draft.to,
         cc: draft.cc,
         bcc: draft.bcc,
@@ -337,6 +337,7 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSchedul
     const visible = (list: EmailAddress[] | undefined) =>
       list?.filter(a => !hidden.has(a.email.toLowerCase()));
     this.drafts.set(draftId, {
+      from: opts?.from,
       // Mirror both real providers: an explicit opts.to replaces the derived
       // recipient; absent it, the reply is addressed to the original sender.
       to: visible(opts?.to && opts.to.length > 0 ? opts.to : [original.from])!,
@@ -369,7 +370,7 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSchedul
     const draft = this.drafts.get(draftId);
     const message: EmailMessage | undefined = draft ? {
       id: draftId, isDraft: true, subject: draft.subject,
-      from: { email: 'me@company.com' }, to: draft.to, cc: draft.cc, bcc: draft.bcc,
+      from: draft.from ?? { email: 'me@company.com' }, to: draft.to, cc: draft.cc, bcc: draft.bcc,
       body: draft.body, bodyHtml: draft.bodyHtml,
       receivedAt: new Date().toISOString(), isRead: true, hasAttachments: Boolean(draft.attachments?.length),
     } : this.messages.find(item => item.id === draftId);
@@ -392,6 +393,7 @@ export class MockEmailProvider implements EmailReader, EmailSender, EmailSchedul
     }
     this.drafts.set(draftId, {
       ...existing,
+      ...(msg.from !== undefined && { from: msg.from }),
       ...(msg.to !== undefined && { to: msg.to }),
       ...(msg.cc !== undefined && { cc: msg.cc }),
       ...(msg.bcc !== undefined && { bcc: msg.bcc }),
