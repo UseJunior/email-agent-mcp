@@ -23,6 +23,9 @@ export {
   createGmailMetadataWriter,
   toFilesystemSafeKey,
   getConfigDir,
+  gmailProviderScopedFilename,
+  resolveGmailMetadataPath,
+  renameGmailMailbox,
 } from './config.js';
 export type { GmailMailboxMetadata, GmailAuthSource } from './config.js';
 export { GoogleapisGmailClient } from './googleapis-client.js';

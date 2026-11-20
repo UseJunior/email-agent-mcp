@@ -9,6 +9,7 @@ import {
   loadGmailMailboxMetadata,
   saveGmailMailboxMetadata,
   createGmailMetadataWriter,
+  renameGmailMailbox,
   toFilesystemSafeKey,
   type GmailMailboxMetadata,
 } from './config.js';
@@ -175,6 +176,58 @@ describe('provider-gmail/Config Discovery', () => {
 
     expect(saved.provider).toBe('gmail');
     expect(saved.emailAddress).toBe('Steven.Obiajulu+mail@gmail.com');
+  });
+});
+
+describe('provider-gmail/Token Files Shared With Microsoft', () => {
+  const microsoft = {
+    provider: 'microsoft',
+    mailboxName: 'default',
+    emailAddress: 'jane@example.com',
+    clientId: 'ms-client',
+    authenticationRecord: { homeAccountId: 'home' },
+    lastInteractiveAuthAt: '2026-04-08T12:00:00.000Z',
+  };
+
+  it('Scenario: Gmail save never overwrites a Microsoft record for the same address', async () => {
+    const tokens = join(tempHome, 'tokens');
+    await writeFile(join(tokens, 'jane-at-example-com.json'), JSON.stringify(microsoft));
+
+    const path = await saveGmailMailboxMetadata(gmailMailbox({ mailboxName: 'jane-example', emailAddress: 'jane@example.com' }));
+
+    expect(path).toBe(join(tokens, 'jane-at-example-com.gmail.json'));
+    expect(JSON.parse(await readFile(join(tokens, 'jane-at-example-com.json'), 'utf-8'))).toEqual(microsoft);
+    await expect(loadGmailMailboxMetadata('jane@example.com')).resolves.toMatchObject({ mailboxName: 'jane-example' });
+    await expect(listConfiguredGmailMailboxes()).resolves.toHaveLength(1);
+
+    // A re-save updates the same provider-scoped file in place.
+    await saveGmailMailboxMetadata(gmailMailbox({ mailboxName: 'jane-example', emailAddress: 'jane@example.com', refreshToken: 'second' }));
+    expect((await readdir(tokens)).sort()).toEqual(['jane-at-example-com.gmail.json', 'jane-at-example-com.json']);
+    await expect(loadGmailMailboxMetadata('jane-example')).resolves.toMatchObject({ refreshToken: 'second' });
+  });
+
+  it('Scenario: Gmail token rotation finds a provider-scoped record', async () => {
+    const tokens = join(tempHome, 'tokens');
+    await writeFile(join(tokens, 'jane-at-example-com.json'), JSON.stringify(microsoft));
+    const metadata = gmailMailbox({ mailboxName: 'jane-example', emailAddress: 'jane@example.com' });
+    await saveGmailMailboxMetadata(metadata);
+
+    await createGmailMetadataWriter(metadata)('rotated', metadata.refreshToken);
+
+    expect(JSON.parse(await readFile(join(tokens, 'jane-at-example-com.gmail.json'), 'utf-8'))).toMatchObject({ refreshToken: 'rotated' });
+    expect(JSON.parse(await readFile(join(tokens, 'jane-at-example-com.json'), 'utf-8'))).toEqual(microsoft);
+  });
+
+  it('Scenario: renameGmailMailbox rewrites only the matching account record', async () => {
+    const tokens = join(tempHome, 'tokens');
+    await writeFile(join(tokens, 'jane-at-example-com.json'), JSON.stringify(microsoft));
+    await saveGmailMailboxMetadata(gmailMailbox({ mailboxName: 'default', emailAddress: 'jane@gmail.com' }));
+
+    const rewritten = await renameGmailMailbox({ oldName: 'DEFAULT', newName: 'personal', emailAddress: 'jane@gmail.com' });
+
+    expect(rewritten).toEqual([join(tokens, 'jane-at-gmail-com.json')]);
+    await expect(loadGmailMailboxMetadata('personal')).resolves.toMatchObject({ emailAddress: 'jane@gmail.com' });
+    expect(JSON.parse(await readFile(join(tokens, 'jane-at-example-com.json'), 'utf-8'))).toEqual(microsoft);
   });
 });
 

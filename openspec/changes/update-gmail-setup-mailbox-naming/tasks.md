@@ -1,0 +1,11 @@
+- [x] Move Gmail mailbox naming after OAuth (`chooseGmailMailboxName`) for both the broker and BYOK flows
+- [x] Derive a collision-free default name across all providers; prompt with it in a TTY
+- [x] Treat explicit `--mailbox` as sufficient intent without a TTY; print the linked account
+- [x] Add `--confirm-account` (hard fail on mismatch) and `--yes` / `-y`
+- [x] Keep refusing to overwrite an alias linked to a different account; save under a safe name (non-TTY) or re-prompt (TTY) instead of discarding the authorization
+- [x] Refuse a `--mailbox` name held by a non-Gmail mailbox before OAuth
+- [x] Add `mailbox rename <old> <new> [--provider]` with collision and validation checks
+- [x] Stop Gmail and Microsoft token files for the same address from overwriting or deleting each other
+- [x] Tests in `cli.test.ts`, `cli-configure-cleanup.test.ts`, provider-gmail `config.test.ts`, provider-microsoft `auth.test.ts`
+- [x] Update README, provider-gmail README and CLI help
+- [x] Run `openspec validate update-gmail-setup-mailbox-naming --strict`

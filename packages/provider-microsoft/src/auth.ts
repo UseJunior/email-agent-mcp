@@ -4,7 +4,7 @@ import { DeviceCodeCredential, ClientSecretCredential, useIdentityPlugin, type D
 import { cachePersistencePlugin } from '@azure/identity-cache-persistence';
 import { randomUUID } from 'node:crypto';
 import { renameSync } from 'node:fs';
-import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, unlink, link, readdir as readdirAsync } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { GraphApiError } from './email-graph-provider.js';
@@ -504,6 +504,8 @@ export class DelegatedAuthManager implements AuthManager {
     try {
       await mkdir(dirname(path), { recursive: true });
       this.assertCurrent(generation);
+      await relocateGmailRecordAt(path);
+      this.assertCurrent(generation);
       await writeFile(temporary, JSON.stringify(metadata, null, 2), { encoding: 'utf-8', mode: 0o600 });
       this.assertCurrent(generation);
       // No await between the generation check and publication. A disconnect
@@ -807,6 +809,93 @@ export async function listConfiguredMailboxesWithMetadata(): Promise<MailboxMeta
   }
 
   return results;
+}
+
+/**
+ * Gmail and Microsoft records for the same email address share the
+ * email-keyed filename `<safe-key>.json`. Before a Microsoft record is
+ * written there, move a Gmail record that occupies it to the Gmail
+ * provider-scoped name `<safe-key>.gmail.json` so the Gmail tokens are never
+ * overwritten. `link` refuses to replace an existing file, so if the
+ * provider-scoped name is already taken the write is refused instead.
+ */
+export async function relocateGmailRecordAt(path: string): Promise<void> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(path, 'utf-8')) as unknown;
+  } catch {
+    return; // Missing or unreadable: nothing to preserve that a Gmail reader would load.
+  }
+  if (!parsed || typeof parsed !== 'object' || (parsed as { provider?: unknown }).provider !== 'gmail') return;
+
+  const aside = path.replace(/\.json$/, '.gmail.json');
+  try {
+    await link(path, aside);
+  } catch (err) {
+    throw new Error(
+      `Refusing to overwrite the Gmail mailbox record at ${path}: ${aside} already exists`,
+      { cause: err },
+    );
+  }
+  await unlink(path);
+  console.error(`[email-agent-mcp] Moved the Gmail mailbox record for this address to ${aside} so the Microsoft record does not overwrite it`);
+}
+
+/**
+ * Rename the Microsoft mailbox alias `oldName` (case-insensitive) for the
+ * account `emailAddress`. Records are keyed by email address, so the file
+ * stays where it is and only `mailboxName` changes. A record without a stored
+ * `cacheName` derives its MSAL cache name from the alias, so the current
+ * derived name is pinned before the alias changes; otherwise the renamed
+ * mailbox would lose its cached tokens. Returns the rewritten paths.
+ */
+export async function renameMailbox(args: {
+  oldName: string;
+  newName: string;
+  emailAddress: string;
+}): Promise<string[]> {
+  const directory = getConfigDir();
+  const oldKey = args.oldName.trim().toLowerCase();
+  const emailKey = args.emailAddress.trim().toLowerCase();
+  let files: string[];
+  try {
+    files = (await readdirAsync(directory)).filter(file => file.endsWith('.json'));
+  } catch {
+    return [];
+  }
+
+  const rewritten: string[] = [];
+  for (const file of files) {
+    const path = join(directory, file);
+    let record: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(await readFile(path, 'utf-8')) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+      record = parsed as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (record['provider'] === 'gmail' || !('authenticationRecord' in record)) continue;
+    if (typeof record['mailboxName'] !== 'string' || record['mailboxName'].trim().toLowerCase() !== oldKey) continue;
+    if (typeof record['emailAddress'] !== 'string' || record['emailAddress'].trim().toLowerCase() !== emailKey) continue;
+
+    const next = {
+      ...record,
+      mailboxName: args.newName,
+      cacheName: typeof record['cacheName'] === 'string'
+        ? record['cacheName']
+        : `email-agent-mcp-${record['mailboxName']}`,
+    };
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, JSON.stringify(next, null, 2), { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
+      renameSync(temporary, path);
+    } finally {
+      await unlink(temporary).catch(() => {});
+    }
+    rewritten.push(path);
+  }
+  return rewritten;
 }
 
 /**

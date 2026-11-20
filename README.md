@@ -633,6 +633,56 @@ credentials, so you only pass the flags once. Passing `--client-id` and
 `--client-secret` for a mailbox previously configured against the default
 client migrates it to BYOK.
 
+### Gmail: how the mailbox name is chosen
+
+`configure --provider gmail` picks the mailbox name **after** you sign in to
+Google, once it knows which account you authorized. It does not need a TTY, so
+it also works from an agent host's shell.
+
+- **No `--mailbox`:** an account that is already configured keeps its name.
+  A new account gets a name derived from its address (`jane@example.com` becomes
+  `jane-example`). The name never clashes with another mailbox on any provider;
+  `-2`, `-3`, ... are appended if needed. In a terminal you are asked to
+  confirm or change it.
+- **`--mailbox <name>`:** links the signed-in account under that name and
+  prints which account was linked. In a terminal you are asked to confirm the
+  account unless you pass `--yes` or `--confirm-account`.
+- **`--confirm-account <email>`:** names the Google account you intend to link.
+  It is also passed to Google as the sign-in hint. If a different account signs
+  in, setup fails and saves nothing.
+- **`--yes` / `-y`:** accept the suggested name and skip confirmation prompts.
+
+Setup never overwrites a mailbox that belongs to a different account. If
+`--mailbox` names one, setup asks for another name in a terminal. Without a
+terminal it saves the account under the derived name, so you do not have to
+sign in again, and exits with code 1. A name that a Microsoft mailbox already
+uses (its name or email address) is refused before sign-in starts.
+
+```bash
+# From an agent shell, linking a specific account under a specific name:
+npx email-agent-mcp setup --provider gmail --mailbox openagreements \
+  --confirm-account jane@example.com
+```
+
+### Rename a mailbox
+
+Rename a mailbox at any time without signing in again:
+
+```bash
+npx email-agent-mcp mailbox rename jane-example personal
+# If a Gmail and a Microsoft mailbox share the old name:
+npx email-agent-mcp mailbox rename default personal --provider gmail
+```
+
+The new name must not be used, as a name or an email address, by any other
+mailbox on any provider. Token files are keyed by email address, so the file
+stays where it is and only the name stored in it changes. Restart running
+`email-agent-mcp` servers afterwards so they pick up the new name.
+
+A Gmail and a Microsoft mailbox can share an email address. Their token files
+never overwrite each other: when `tokens/<safe-key>.json` already holds the
+Microsoft record, the Gmail record is stored as `tokens/<safe-key>.gmail.json`.
+
 ### BYOK: keep the grant from expiring after 7 days
 
 Google expires refresh tokens after 7 days while *your* OAuth app is in

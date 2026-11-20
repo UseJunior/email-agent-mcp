@@ -153,6 +153,28 @@ describe('cli/Configure Cleanup of Superseded Files', () => {
     expect(remainingFiles).toHaveLength(2);
   });
 
+  it('Scenario: Microsoft configure keeps a Gmail mailbox for the same address', async () => {
+    const gmail = {
+      provider: 'gmail',
+      source: 'broker',
+      mailboxName: 'test-user-example',
+      emailAddress: 'test-user@example.com',
+      brokerUrl: 'https://broker.example.com',
+      refreshToken: 'gmail-refresh-token',
+      lastInteractiveAuthAt: '2024-06-01T00:00:00.000Z',
+    };
+    await writeFile(join(tokensDir, 'test-user-at-example-com.gmail.json'), JSON.stringify(gmail));
+
+    const exitCode = await runCli(['configure', '--mailbox', 'work', '--provider', 'microsoft']);
+    expect(exitCode).toBe(0);
+
+    expect((await readdir(tokensDir)).sort()).toEqual([
+      'test-user-at-example-com.gmail.json',
+      'test-user-at-example-com.json',
+    ]);
+    expect(JSON.parse(await readFile(join(tokensDir, 'test-user-at-example-com.gmail.json'), 'utf-8'))).toEqual(gmail);
+  });
+
   it('Scenario: Configure with no pre-existing files works cleanly', async () => {
     const exitCode = await runCli(['configure', '--mailbox', 'work', '--provider', 'microsoft']);
     expect(exitCode).toBe(0);
