@@ -5,7 +5,8 @@ import {
   parseCliArgs,
   getNemoClawEgressDomains,
   getAgentEmailHome,
-  ensureGmailProfileMatchesIntent,
+  chooseGmailMailboxName,
+  preflightGmailMailboxRequest,
   getEffectiveSendAllowlistPath,
   inferProviderFromMailbox,
   loadConfig,
@@ -13,7 +14,7 @@ import {
   isDirectCliRun,
   shouldShowConfigureMailboxPicker,
 } from './cli.js';
-import { mkdtemp, rm, readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -313,6 +314,7 @@ beforeEach(() => {
   gmailMockState.authUrlOptions = null;
   gmailMockState.exchangeCodeArgs = null;
   gmailMockState.savedMetadata = null;
+  gmailMockState.brokerSessionArgs = null;
   gmailMockState.profileEmail = 'steven.obiajulu@gmail.com';
   gmailMockState.refreshToken = 'mock-refresh-token';
   gmailMockState.refreshError = null;
@@ -579,17 +581,61 @@ describe('cli/Provider Inference', () => {
   });
 });
 
-describe('cli/Gmail Account Intent Checks', () => {
+async function seedTokenFile(home: string, filename: string, record: Record<string, unknown>): Promise<void> {
+  const tokensDir = join(home, 'tokens');
+  await mkdir(tokensDir, { recursive: true });
+  await writeFile(join(tokensDir, filename), JSON.stringify(record, null, 2) + '\n');
+}
+
+function gmailRecord(mailboxName: string, emailAddress: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    provider: 'gmail',
+    source: 'byok',
+    mailboxName,
+    emailAddress,
+    clientId: 'gmail-client-id',
+    clientSecret: 'gmail-client-secret',
+    refreshToken: `refresh-${emailAddress}`,
+    lastInteractiveAuthAt: '2026-04-08T12:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function microsoftRecord(mailboxName: string, emailAddress: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    provider: 'microsoft',
+    mailboxName,
+    emailAddress,
+    clientId: 'ms-client-id',
+    authenticationRecord: { homeAccountId: 'home', username: emailAddress },
+    cacheName: `email-agent-mcp-${mailboxName}-fixed`,
+    lastInteractiveAuthAt: '2026-04-08T12:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function setInteractive(value: boolean): void {
+  Object.defineProperty(process.stdout, 'isTTY', { value, configurable: true });
+  Object.defineProperty(process.stdin, 'isTTY', { value, configurable: true });
+}
+
+describe('cli/Gmail Mailbox Naming After OAuth', () => {
   let tmpHome: string;
   let originalHome: string | undefined;
+  const originalStdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
 
   beforeEach(async () => {
     tmpHome = await mkdtemp(join(tmpdir(), 'email-agent-mcp-gmail-intent-'));
     originalHome = process.env['EMAIL_AGENT_MCP_HOME'];
     process.env['EMAIL_AGENT_MCP_HOME'] = tmpHome;
+    const clackPrompts = await import('@clack/prompts');
+    vi.mocked(clackPrompts.text).mockClear();
+    vi.mocked(clackPrompts.confirm).mockClear();
   });
 
   afterEach(async () => {
+    if (originalStdinIsTTY) Object.defineProperty(process.stdin, 'isTTY', originalStdinIsTTY);
+    else delete (process.stdin as { isTTY?: boolean }).isTTY;
     if (originalHome === undefined) {
       delete process.env['EMAIL_AGENT_MCP_HOME'];
     } else {
@@ -600,46 +646,123 @@ describe('cli/Gmail Account Intent Checks', () => {
 
   it('Scenario: Explicit Gmail mailbox email must match the authenticated Google profile', async () => {
     await expect(
-      ensureGmailProfileMatchesIntent('expected@gmail.com', 'other@gmail.com'),
-    ).rejects.toThrow(/configure was asked to link expected@gmail.com/i);
+      chooseGmailMailboxName('other@gmail.com', { requestedMailbox: 'expected@gmail.com', interactive: false }),
+    ).rejects.toThrow(/configure was asked to link expected@gmail.com.*Nothing was saved/i);
   });
 
-  it('Scenario: Alias-based Gmail configure fails closed in non-TTY sessions', async () => {
+  it('Scenario: Confirm-account mismatch fails without saving', async () => {
     await expect(
-      ensureGmailProfileMatchesIntent('personal', 'steven.obiajulu@gmail.com'),
-    ).rejects.toThrow(/Re-run in a TTY|pass --mailbox steven\.obiajulu@gmail\.com/i);
+      chooseGmailMailboxName('other@gmail.com', {
+        requestedMailbox: 'work',
+        confirmAccount: 'expected@gmail.com',
+        interactive: false,
+      }),
+    ).rejects.toThrow(/--confirm-account expected expected@gmail.com.*Nothing was saved/i);
   });
 
-  it('Scenario: Alias-based Gmail configure can proceed after explicit TTY confirmation', async () => {
-    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
-    promptMockState.confirmResult = true;
-
-    try {
-      await expect(
-        ensureGmailProfileMatchesIntent('personal', 'steven.obiajulu@gmail.com'),
-      ).resolves.toBeUndefined();
-    } finally {
-      Object.defineProperty(process.stdout, 'isTTY', { value: false, configurable: true });
-    }
+  it('Scenario: Explicit alias links the account without a TTY', async () => {
+    const decision = await chooseGmailMailboxName('steven.obiajulu@gmail.com', {
+      requestedMailbox: 'openagreements',
+      interactive: false,
+    });
+    expect(decision).toEqual({ mailboxName: 'openagreements', previousMailboxName: undefined });
   });
 
-  it('Scenario: Alias-based Gmail configure rejects when an existing alias maps to another account', async () => {
-    const { mkdir, writeFile } = await import('node:fs/promises');
-    const tokensDir = join(tmpHome, 'tokens');
-    await mkdir(tokensDir, { recursive: true });
-    await writeFile(join(tokensDir, 'personal.json'), JSON.stringify({
-      provider: 'gmail',
-      mailboxName: 'personal',
-      emailAddress: 'existing@gmail.com',
-      clientId: 'gmail-client-id',
-      clientSecret: 'gmail-client-secret',
-      refreshToken: 'gmail-refresh-token',
-      lastInteractiveAuthAt: '2026-04-08T12:00:00.000Z',
-    }, null, 2) + '\n');
+  it('Scenario: Explicit alias in a TTY asks for confirmation unless --yes or --confirm-account is given', async () => {
+    const clackPrompts = await import('@clack/prompts');
 
+    promptMockState.confirmResult = false;
     await expect(
-      ensureGmailProfileMatchesIntent('personal', 'other@gmail.com'),
-    ).rejects.toThrow(/already linked to existing@gmail.com/i);
+      chooseGmailMailboxName('steven.obiajulu@gmail.com', { requestedMailbox: 'personal', interactive: true }),
+    ).rejects.toThrow(/not confirmed\. Nothing was saved/i);
+    expect(vi.mocked(clackPrompts.confirm)).toHaveBeenCalledTimes(1);
+
+    vi.mocked(clackPrompts.confirm).mockClear();
+    await expect(
+      chooseGmailMailboxName('steven.obiajulu@gmail.com', { requestedMailbox: 'personal', interactive: true, yes: true }),
+    ).resolves.toMatchObject({ mailboxName: 'personal' });
+    await expect(
+      chooseGmailMailboxName('steven.obiajulu@gmail.com', {
+        requestedMailbox: 'personal',
+        confirmAccount: 'Steven.Obiajulu@gmail.com',
+        interactive: true,
+      }),
+    ).resolves.toMatchObject({ mailboxName: 'personal' });
+    expect(vi.mocked(clackPrompts.confirm)).not.toHaveBeenCalled();
+  });
+
+  it('Scenario: Alias linked to a different account is never overwritten', async () => {
+    await seedTokenFile(tmpHome, 'existing-at-gmail-com.json', gmailRecord('personal', 'existing@gmail.com'));
+
+    const decision = await chooseGmailMailboxName('other@gmail.com', {
+      requestedMailbox: 'personal',
+      interactive: false,
+    });
+
+    expect(decision.mailboxName).toBe('other-gmail');
+    expect(decision.refusedRequest).toMatch(/Mailbox "personal" is already used by the Gmail mailbox "personal" \(existing@gmail.com\)/);
+  });
+
+  it('Scenario: Alias clash in a TTY prompts for another name instead of failing', async () => {
+    await seedTokenFile(tmpHome, 'existing-at-gmail-com.json', gmailRecord('personal', 'existing@gmail.com'));
+    setInteractive(true);
+    promptMockState.textResult = 'side-project';
+
+    const decision = await chooseGmailMailboxName('other@gmail.com', {
+      requestedMailbox: 'personal',
+      interactive: true,
+    });
+
+    expect(decision).toEqual({ mailboxName: 'side-project', previousMailboxName: undefined });
+    const clackPrompts = await import('@clack/prompts');
+    expect(vi.mocked(clackPrompts.text)).toHaveBeenCalledWith(expect.objectContaining({ initialValue: 'other-gmail' }));
+  });
+
+  it('Scenario: Derived default name avoids every provider\'s mailbox names', async () => {
+    await seedTokenFile(tmpHome, 'jane-at-example-com.json', microsoftRecord('jane-example', 'jane@example.com'));
+    await seedTokenFile(tmpHome, 'someone-at-gmail-com.json', gmailRecord('jane-example-2', 'someone@gmail.com'));
+
+    const decision = await chooseGmailMailboxName('jane@example.com', { interactive: false });
+
+    expect(decision).toEqual({ mailboxName: 'jane-example-3', previousMailboxName: undefined });
+  });
+
+  it('Scenario: Setup without --mailbox prompts with the derived name in a TTY', async () => {
+    setInteractive(true);
+    promptMockState.textResult = '';
+
+    const decision = await chooseGmailMailboxName('jane@example.com', { interactive: true });
+
+    expect(decision.mailboxName).toBe('jane-example');
+    const clackPrompts = await import('@clack/prompts');
+    expect(vi.mocked(clackPrompts.text)).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'Mailbox name for jane@example.com',
+      defaultValue: 'jane-example',
+    }));
+  });
+
+  it('Scenario: Reconnecting an already-configured account keeps its mailbox name', async () => {
+    await seedTokenFile(tmpHome, 'jane-at-example-com.json', gmailRecord('work', 'jane@example.com'));
+
+    await expect(chooseGmailMailboxName('jane@example.com', { interactive: false }))
+      .resolves.toEqual({ mailboxName: 'work', previousMailboxName: 'work' });
+    await expect(chooseGmailMailboxName('jane@example.com', { requestedMailbox: 'jane@example.com', interactive: false }))
+      .resolves.toEqual({ mailboxName: 'work', previousMailboxName: 'work' });
+  });
+
+  it('Scenario: A Gmail mailbox name used by a Microsoft mailbox is refused before OAuth', async () => {
+    await seedTokenFile(tmpHome, 'jane-at-example-com.json', microsoftRecord('default', 'jane@example.com'));
+
+    await expect(preflightGmailMailboxRequest({ requestedMailbox: 'jane@example.com', interactive: false }))
+      .rejects.toThrow(/already used by the Microsoft mailbox "default" \(jane@example.com\)/);
+    await expect(preflightGmailMailboxRequest({ requestedMailbox: 'default', interactive: false }))
+      .rejects.toThrow(/already used by the Microsoft mailbox/);
+    await expect(preflightGmailMailboxRequest({ requestedMailbox: 'work', interactive: false }))
+      .resolves.toBeUndefined();
+    await expect(preflightGmailMailboxRequest({ confirmAccount: 'not-an-email', interactive: false }))
+      .rejects.toThrow(/--confirm-account expects the email address/);
+    await expect(preflightGmailMailboxRequest({ requestedMailbox: 'bad name!', interactive: false }))
+      .rejects.toThrow(/may only contain letters/);
   });
 });
 
@@ -1008,6 +1131,129 @@ describe('cli/Gmail Configure', () => {
     });
   });
 
+  it('Scenario: Default alias taken by another account falls back to a derived name after OAuth', async () => {
+    // Issue #289 case 1: no --mailbox, and "default" belongs to another Google account.
+    await seedTokenFile(tmpHome, 'existing-at-gmail-com.json', gmailRecord('default', 'existing@gmail.com'));
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail']);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      mailboxName: 'steven-obiajulu-gmail',
+      emailAddress: 'steven.obiajulu@gmail.com',
+    });
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Linked Google account steven.obiajulu@gmail.com as mailbox "steven-obiajulu-gmail"'),
+    );
+  });
+
+  it('Scenario: Explicit --mailbox alias completes without a TTY and reports the linked account', async () => {
+    // Issue #289 case 2: --mailbox openagreements from a non-TTY agent shell.
+    const exitCode = await runCli(['configure', '--provider', 'gmail', '--mailbox', 'openagreements']);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      mailboxName: 'openagreements',
+      emailAddress: 'steven.obiajulu@gmail.com',
+    });
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Linked Google account steven.obiajulu@gmail.com as mailbox "openagreements"'),
+    );
+  });
+
+  it('Scenario: Requested alias owned by another account keeps the authorization under a safe name', async () => {
+    await seedTokenFile(tmpHome, 'existing-at-gmail-com.json', gmailRecord('personal', 'existing@gmail.com'));
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail', '--mailbox', 'personal']);
+
+    expect(exitCode).toBe(1);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      mailboxName: 'steven-obiajulu-gmail',
+      emailAddress: 'steven.obiajulu@gmail.com',
+    });
+    const output = JSON.stringify(vi.mocked(console.error).mock.calls);
+    expect(output).toContain('Refusing to overwrite it');
+    expect(output).toContain('email-agent-mcp mailbox rename steven-obiajulu-gmail <new-name>');
+    // The other account's record is untouched.
+    const untouched = JSON.parse(await readFile(join(tmpHome, 'tokens', 'existing-at-gmail-com.json'), 'utf-8')) as Record<string, unknown>;
+    expect(untouched).toMatchObject({ mailboxName: 'personal', emailAddress: 'existing@gmail.com' });
+  });
+
+  it('Scenario: --confirm-account is the login hint and a mismatch saves nothing', async () => {
+    gmailMockState.profileEmail = 'someone-else@gmail.com';
+
+    const exitCode = await runCli([
+      'setup', '--provider', 'gmail', '--mailbox', 'work', '--confirm-account', 'steven.obiajulu@gmail.com',
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(gmailMockState.brokerSessionArgs).toMatchObject({ loginHint: 'steven.obiajulu@gmail.com' });
+    expect(gmailMockState.savedMetadata).toBeNull();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('--confirm-account expected steven.obiajulu@gmail.com'));
+  });
+
+  it('Scenario: A --mailbox name held by a Microsoft mailbox fails before OAuth starts', async () => {
+    await seedTokenFile(tmpHome, 'steven-obiajulu-at-gmail-com.json', microsoftRecord('default', 'steven.obiajulu@gmail.com'));
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail', '--mailbox', 'steven.obiajulu@gmail.com']);
+
+    expect(exitCode).toBe(1);
+    expect(gmailMockState.brokerSessionArgs).toBeNull();
+    expect(gmailMockState.authUrlOptions).toBeNull();
+    expect(gmailMockState.savedMetadata).toBeNull();
+  });
+
+  it('Scenario: Bare reconnect keeps the only saved Gmail mailbox on its own OAuth client', async () => {
+    await seedSavedGmailMetadata('jane-example', { emailAddress: 'steven.obiajulu@gmail.com', source: 'byok' });
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail']);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      source: 'byok',
+      mailboxName: 'jane-example',
+      clientId: 'saved-client-id',
+      clientSecret: 'saved-client-secret',
+    });
+  });
+
+  it('Scenario: Implicit broker setup never replaces a BYOK mailbox', async () => {
+    await seedSavedGmailMetadata('work', { emailAddress: 'steven.obiajulu@gmail.com', source: 'byok' });
+    await seedTokenFile(tmpHome, 'other-at-gmail-com.json', gmailRecord('other', 'other@gmail.com'));
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail']);
+
+    expect(exitCode).toBe(1);
+    expect(gmailMockState.brokerSessionArgs).not.toBeNull();
+    expect(gmailMockState.savedMetadata).toBeNull();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('with your own OAuth client (BYOK). Nothing was changed'));
+  });
+
+  it('Scenario: Auth mode inherited from another saved mailbox never replaces an account\'s saved mode', async () => {
+    // "default" is a broker mailbox for another account; the signed-in account is saved as BYOK.
+    await seedTokenFile(tmpHome, 'bob-at-example-com.json', {
+      provider: 'gmail', source: 'broker', mailboxName: 'default', emailAddress: 'bob@example.com',
+      brokerUrl: 'https://broker.test.example.com', refreshToken: 'bob-refresh',
+    });
+    await seedSavedGmailMetadata('jane-example', { emailAddress: 'steven.obiajulu@gmail.com', source: 'byok' });
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail']);
+
+    expect(exitCode).toBe(1);
+    expect(gmailMockState.savedMetadata).toBeNull();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('with your own OAuth client (BYOK). Nothing was changed'));
+  });
+
+  it('Scenario: A requested name that is another account\'s token filename is refused after OAuth', async () => {
+    await seedTokenFile(tmpHome, 'work.json', microsoftRecord('office', 'carol@example.com'));
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail', '--mailbox', 'work']);
+
+    expect(exitCode).toBe(1);
+    expect(gmailMockState.savedMetadata).toMatchObject({ mailboxName: 'steven-obiajulu-gmail' });
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('the token file tokens/work.json of another account'));
+  });
+
   it('Scenario: Environment variables override saved OAuth credentials', async () => {
     process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'] = 'env-client-id';
     process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'] = 'env-client-secret';
@@ -1020,6 +1266,131 @@ describe('cli/Gmail Configure', () => {
       clientId: 'env-client-id',
       clientSecret: 'env-client-secret',
     });
+  });
+});
+
+describe('cli/Gmail Setup Flags', () => {
+  it('Scenario: --yes, -y and --confirm-account parse for setup', () => {
+    expect(parseCliArgs(['setup', '--provider', 'gmail', '--yes'])).toMatchObject({ command: 'setup', yes: true });
+    expect(parseCliArgs(['setup', '-y'])).toMatchObject({ yes: true });
+    expect(parseCliArgs(['setup', '--provider', 'gmail', '--mailbox', 'work', '--confirm-account', 'jane@example.com']))
+      .toMatchObject({ mailbox: 'work', confirmAccount: 'jane@example.com' });
+  });
+
+  it('Scenario: mailbox rename positionals parse', () => {
+    expect(parseCliArgs(['mailbox', 'rename', 'old', 'new', '--provider', 'gmail'])).toMatchObject({
+      command: 'mailbox',
+      positionals: ['rename', 'old', 'new'],
+      provider: 'gmail',
+    });
+  });
+});
+
+describe('cli/Mailbox Rename', () => {
+  let tmpHome: string;
+  let originalHome: string | undefined;
+
+  beforeEach(async () => {
+    tmpHome = await mkdtemp(join(tmpdir(), 'email-agent-mcp-rename-'));
+    originalHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    process.env['EMAIL_AGENT_MCP_HOME'] = tmpHome;
+  });
+
+  afterEach(async () => {
+    if (originalHome === undefined) delete process.env['EMAIL_AGENT_MCP_HOME'];
+    else process.env['EMAIL_AGENT_MCP_HOME'] = originalHome;
+    await rm(tmpHome, { recursive: true, force: true });
+  });
+
+  async function readToken(filename: string): Promise<Record<string, unknown>> {
+    return JSON.parse(await readFile(join(tmpHome, 'tokens', filename), 'utf-8')) as Record<string, unknown>;
+  }
+
+  it('Scenario: Rename a Gmail mailbox without signing in again', async () => {
+    const original = gmailRecord('default', 'jane@gmail.com');
+    await seedTokenFile(tmpHome, 'jane-at-gmail-com.json', original);
+
+    const exitCode = await runCli(['mailbox', 'rename', 'default', 'personal']);
+
+    expect(exitCode).toBe(0);
+    expect(await readToken('jane-at-gmail-com.json')).toEqual({ ...original, mailboxName: 'personal' });
+    expect(await readdir(join(tmpHome, 'tokens'))).toEqual(['jane-at-gmail-com.json']);
+    const { loadGmailMailboxMetadata } = await import('@usejunior/provider-gmail');
+    await expect(loadGmailMailboxMetadata('personal')).resolves.toMatchObject({
+      mailboxName: 'personal',
+      refreshToken: 'refresh-jane@gmail.com',
+    });
+  });
+
+  it('Scenario: Rename a Microsoft mailbox pins its token cache name', async () => {
+    const legacy = microsoftRecord('work', 'jane@example.com');
+    delete legacy['cacheName'];
+    await seedTokenFile(tmpHome, 'jane-at-example-com.json', legacy);
+
+    const exitCode = await runCli(['mailbox', 'rename', 'work', 'office', '--provider', 'microsoft']);
+
+    expect(exitCode).toBe(0);
+    expect(await readToken('jane-at-example-com.json')).toMatchObject({
+      mailboxName: 'office',
+      cacheName: 'email-agent-mcp-work',
+      emailAddress: 'jane@example.com',
+    });
+  });
+
+  it('Scenario: Rename refuses a name used by any mailbox on any provider', async () => {
+    await seedTokenFile(tmpHome, 'jane-at-gmail-com.json', gmailRecord('personal', 'jane@gmail.com'));
+    await seedTokenFile(tmpHome, 'jane-at-example-com.json', microsoftRecord('work', 'jane@example.com'));
+
+    expect(await runCli(['mailbox', 'rename', 'personal', 'WORK'])).toBe(1);
+    expect(await runCli(['mailbox', 'rename', 'personal', 'jane@example.com'])).toBe(1);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('already used by the Microsoft mailbox "work"'));
+    expect(await readToken('jane-at-gmail-com.json')).toMatchObject({ mailboxName: 'personal' });
+    expect(await readToken('jane-at-example-com.json')).toMatchObject({ mailboxName: 'work' });
+  });
+
+  it('Scenario: Rename reports a missing source mailbox', async () => {
+    await seedTokenFile(tmpHome, 'jane-at-gmail-com.json', gmailRecord('personal', 'jane@gmail.com'));
+
+    expect(await runCli(['mailbox', 'rename', 'nope', 'other'])).toBe(1);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('No mailbox named "nope". Configured mailboxes: personal (gmail)'));
+  });
+
+  it('Scenario: Rename requires --provider when two providers share a name', async () => {
+    await seedTokenFile(tmpHome, 'jane-at-gmail-com.json', gmailRecord('default', 'jane@gmail.com'));
+    await seedTokenFile(tmpHome, 'jane-at-example-com.json', microsoftRecord('default', 'jane@example.com'));
+
+    expect(await runCli(['mailbox', 'rename', 'default', 'personal'])).toBe(1);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Pass --provider gmail or --provider microsoft'));
+
+    expect(await runCli(['mailbox', 'rename', 'default', 'personal', '--provider', 'gmail'])).toBe(0);
+    expect(await readToken('jane-at-gmail-com.json')).toMatchObject({ mailboxName: 'personal' });
+    expect(await readToken('jane-at-example-com.json')).toMatchObject({ mailboxName: 'default' });
+  });
+
+  it('Scenario: Rename refuses a name that is another account\'s token filename', async () => {
+    await seedTokenFile(tmpHome, 'alice-at-example-com.json', microsoftRecord('alice', 'alice@example.com'));
+    await seedTokenFile(tmpHome, 'bob-at-example-com.json', microsoftRecord('bob', 'bob@example.com'));
+    await seedTokenFile(tmpHome, 'work.json', microsoftRecord('office', 'carol@example.com'));
+
+    expect(await runCli(['mailbox', 'rename', 'bob', 'alice-at-example-com'])).toBe(1);
+    expect(await runCli(['mailbox', 'rename', 'bob', 'work'])).toBe(1);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('matches the token file tokens/work.json of another account'));
+    expect(await readToken('bob-at-example-com.json')).toMatchObject({ mailboxName: 'bob' });
+    // A mailbox may take its own file's stem.
+    expect(await runCli(['mailbox', 'rename', 'bob', 'bob-at-example-com'])).toBe(0);
+  });
+
+  it('Scenario: Rename validates arguments and names', async () => {
+    await seedTokenFile(tmpHome, 'jane-at-gmail-com.json', gmailRecord('personal', 'jane@gmail.com'));
+
+    expect(await runCli(['mailbox', 'rename', 'personal'])).toBe(2);
+    expect(await runCli(['mailbox'])).toBe(2);
+    expect(await runCli(['mailbox', 'move', 'a', 'b'])).toBe(2);
+    expect(await runCli(['mailbox', 'rename', 'personal', 'bad/name'])).toBe(1);
+    expect(await runCli(['mailbox', 'rename', 'personal', 'other@gmail.com'])).toBe(1);
+    // Its own address is an acceptable name.
+    expect(await runCli(['mailbox', 'rename', 'personal', 'jane@gmail.com'])).toBe(0);
+    expect(await readToken('jane-at-gmail-com.json')).toMatchObject({ mailboxName: 'jane@gmail.com' });
   });
 });
 

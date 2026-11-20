@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DelegatedAuthManager, ClientCredentialsAuthManager, toFilesystemSafeKey, listConfiguredMailboxesWithMetadata, getConfigDir, GRAPH_SCOPES, GRAPH_SCOPES_FULL, GRAPH_SCOPES_BY_PROFILE, GRAPH_SCOPES_FULL_BY_PROFILE, isAuthError } from './auth.js';
+import { DelegatedAuthManager, ClientCredentialsAuthManager, renameMailbox, loadMailboxMetadata, toFilesystemSafeKey, listConfiguredMailboxesWithMetadata, getConfigDir, GRAPH_SCOPES, GRAPH_SCOPES_FULL, GRAPH_SCOPES_BY_PROFILE, GRAPH_SCOPES_FULL_BY_PROFILE, isAuthError } from './auth.js';
 import { GraphApiError } from './email-graph-provider.js';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
@@ -251,6 +251,116 @@ describe('provider-microsoft/Delegated OAuth Authentication', () => {
     expect(auth.getTokenHealthWarning()).toBeUndefined();
 
     await rm(testDir, { recursive: true, force: true });
+  });
+});
+
+describe('provider-microsoft/Token Files Shared With Gmail', () => {
+  let savedAgentEmailHome: string | undefined;
+  const tokensDir = join(testHome, 'tokens');
+  const gmail = {
+    provider: 'gmail',
+    source: 'broker',
+    mailboxName: 'jane-example',
+    emailAddress: 'jane@example.com',
+    brokerUrl: 'https://broker.example.com',
+    refreshToken: 'gmail-refresh',
+  };
+
+  beforeEach(async () => {
+    savedAgentEmailHome = process.env['EMAIL_AGENT_MCP_HOME'];
+    process.env['EMAIL_AGENT_MCP_HOME'] = testHome;
+    await mkdir(tokensDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    if (savedAgentEmailHome === undefined) delete process.env['EMAIL_AGENT_MCP_HOME'];
+    else process.env['EMAIL_AGENT_MCP_HOME'] = savedAgentEmailHome;
+    await rm(testHome, { recursive: true, force: true });
+  });
+
+  it('Scenario: Microsoft save moves a Gmail record aside instead of overwriting it', async () => {
+    await writeFile(join(tokensDir, 'jane-at-example-com.json'), JSON.stringify(gmail));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const auth = new DelegatedAuthManager({ mode: 'delegated', clientId: 'test-client-id' }, 'default');
+    await auth.connect({});
+    auth.setEmailAddress('jane@example.com');
+    await auth.saveMetadata();
+
+    // connect() also writes a name-keyed record before the address is known.
+    expect((await readdir(tokensDir)).filter(file => file.startsWith('jane')).sort())
+      .toEqual(['jane-at-example-com.gmail.json', 'jane-at-example-com.json']);
+    expect(JSON.parse(await readFile(join(tokensDir, 'jane-at-example-com.gmail.json'), 'utf-8'))).toEqual(gmail);
+    expect(JSON.parse(await readFile(join(tokensDir, 'jane-at-example-com.json'), 'utf-8'))).toMatchObject({
+      provider: 'microsoft',
+      mailboxName: 'default',
+      emailAddress: 'jane@example.com',
+    });
+  });
+
+  it('Scenario: Microsoft save refuses when the Gmail record cannot be moved aside', async () => {
+    await writeFile(join(tokensDir, 'jane-at-example-com.json'), JSON.stringify(gmail));
+    await writeFile(join(tokensDir, 'jane-at-example-com.gmail.json'), JSON.stringify({ ...gmail, refreshToken: 'other' }));
+
+    const auth = new DelegatedAuthManager({ mode: 'delegated', clientId: 'test-client-id' }, 'default');
+    await auth.connect({});
+    auth.setEmailAddress('jane@example.com');
+    await expect(auth.saveMetadata()).rejects.toThrow(/failed to persist/);
+
+    expect(JSON.parse(await readFile(join(tokensDir, 'jane-at-example-com.json'), 'utf-8'))).toEqual(gmail);
+  });
+
+  it('Scenario: Microsoft save moves a legacy provider-less Gmail record aside', async () => {
+    const legacy = { mailboxName: 'personal', emailAddress: 'jane@example.com', clientId: 'c', clientSecret: 's', refreshToken: 'r' };
+    await writeFile(join(tokensDir, 'jane-at-example-com.json'), JSON.stringify(legacy));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const auth = new DelegatedAuthManager({ mode: 'delegated', clientId: 'test-client-id' }, 'default');
+    await auth.connect({});
+    auth.setEmailAddress('jane@example.com');
+    await auth.saveMetadata();
+
+    expect(JSON.parse(await readFile(join(tokensDir, 'jane-at-example-com.gmail.json'), 'utf-8'))).toEqual(legacy);
+    const discovered = await listConfiguredMailboxesWithMetadata();
+    expect(discovered.map(m => m.mailboxName)).not.toContain('personal');
+  });
+
+  it('Scenario: Microsoft lookup resolves stored names and addresses before filename stems', async () => {
+    const ms = (mailboxName: string, emailAddress: string) => ({
+      provider: 'microsoft', mailboxName, emailAddress, clientId: 'c', authenticationRecord: { homeAccountId: 'h' },
+    });
+    await writeFile(join(tokensDir, 'alice-at-example-com.json'), JSON.stringify(ms('alice', 'alice@example.com')));
+    await writeFile(join(tokensDir, 'bob-at-example-com.json'), JSON.stringify(ms('alice-at-example-com', 'bob@example.com')));
+    await writeFile(join(tokensDir, 'work.json'), JSON.stringify(ms('office', 'carol@example.com')));
+
+    await expect(loadMailboxMetadata('alice-at-example-com')).resolves.toMatchObject({ emailAddress: 'bob@example.com' });
+    await expect(loadMailboxMetadata('alice')).resolves.toMatchObject({ emailAddress: 'alice@example.com' });
+    // Filename stems still work as a legacy fallback when no record claims the name.
+    await expect(loadMailboxMetadata('work')).resolves.toMatchObject({ emailAddress: 'carol@example.com' });
+    await expect(loadMailboxMetadata('dave@example.com')).resolves.toBeNull();
+  });
+
+  it('Scenario: renameMailbox pins the derived cache name and skips Gmail records', async () => {
+    const microsoft = {
+      provider: 'microsoft',
+      mailboxName: 'work',
+      emailAddress: 'jane@example.com',
+      clientId: 'ms-client',
+      authenticationRecord: { homeAccountId: 'home' },
+      lastInteractiveAuthAt: '2026-04-08T12:00:00.000Z',
+    };
+    await writeFile(join(tokensDir, 'jane-at-example-com.json'), JSON.stringify(microsoft));
+    await writeFile(join(tokensDir, 'jane-at-example-com.gmail.json'), JSON.stringify({ ...gmail, mailboxName: 'work' }));
+
+    const rewritten = await renameMailbox({ oldName: 'Work', newName: 'office', emailAddress: 'JANE@example.com' });
+
+    expect(rewritten).toEqual([join(tokensDir, 'jane-at-example-com.json')]);
+    expect(JSON.parse(await readFile(join(tokensDir, 'jane-at-example-com.json'), 'utf-8'))).toEqual({
+      ...microsoft,
+      mailboxName: 'office',
+      cacheName: 'email-agent-mcp-work',
+    });
+    expect(JSON.parse(await readFile(join(tokensDir, 'jane-at-example-com.gmail.json'), 'utf-8'))).toMatchObject({ mailboxName: 'work' });
   });
 });
 

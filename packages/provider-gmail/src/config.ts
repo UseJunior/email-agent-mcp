@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile, rename, rm } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile, rename, rm, link } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -158,46 +158,199 @@ export async function listConfiguredGmailMailboxes(): Promise<GmailMailboxMetada
   return results;
 }
 
+/**
+ * Filename used for a Gmail record when the email-keyed filename
+ * (`<safe-key>.json`) already holds another provider's record (for example a
+ * Microsoft mailbox for the same address). Safe keys never contain dots, so
+ * this name cannot collide with any provider's email-keyed filename.
+ */
+export function gmailProviderScopedFilename(emailAddress: string): string {
+  return `${toFilesystemSafeKey(emailAddress)}.gmail.json`;
+}
+
 export async function loadGmailMailboxMetadata(identifier: string): Promise<GmailMailboxMetadata | null> {
-  const candidatePaths = [`${identifier}.json`];
-  if (identifier.includes('@')) {
-    candidatePaths.push(`${toFilesystemSafeKey(identifier)}.json`);
-  }
+  const directory = getConfigDir();
+  const target = identifier.trim().toLowerCase();
 
-  for (const candidate of candidatePaths) {
-    try {
-      const raw = await readFile(join(getConfigDir(), candidate), 'utf-8');
-      const parsed = normalizeGmailMailboxMetadata(JSON.parse(raw) as unknown);
-      if (parsed) return parsed;
-    } catch {
-      // Try the next path.
-    }
-  }
-
+  // 1. Resolve by identity: a record whose stored email address or mailbox
+  //    name equals the identifier. Email matches win over name matches (the
+  //    email address is the canonical mailbox identity), then recency.
+  const byEmail: GmailMailboxMetadata[] = [];
+  const byName: GmailMailboxMetadata[] = [];
+  let files: string[] = [];
   try {
-    const files = (await readdir(getConfigDir())).filter(file => file.endsWith('.json'));
-    for (const file of files) {
-      try {
-        const raw = await readFile(join(getConfigDir(), file), 'utf-8');
-        const parsed = normalizeGmailMailboxMetadata(JSON.parse(raw) as unknown);
-        if (parsed && (parsed.mailboxName === identifier || parsed.emailAddress === identifier)) {
-          return parsed;
-        }
-      } catch {
-        // Skip unreadable or invalid files.
-      }
-    }
+    files = (await readdir(directory)).filter(file => file.endsWith('.json'));
   } catch {
-    // Config dir does not exist.
+    return null; // Config dir does not exist.
   }
+  for (const file of files) {
+    try {
+      const parsed = normalizeGmailMailboxMetadata(JSON.parse(await readFile(join(directory, file), 'utf-8')) as unknown);
+      if (!parsed) continue;
+      if (parsed.emailAddress.trim().toLowerCase() === target) byEmail.push(parsed);
+      else if (parsed.mailboxName.trim().toLowerCase() === target) byName.push(parsed);
+    } catch {
+      // Skip unreadable or invalid files.
+    }
+  }
+  const newestFirst = (a: GmailMailboxMetadata, b: GmailMailboxMetadata) =>
+    sortByRecency({ metadata: a }, { metadata: b });
+  if (byEmail.length > 0) return byEmail.sort(newestFirst)[0]!;
+  if (byName.length > 0) return byName.sort(newestFirst)[0]!;
 
+  // 2. Legacy fallback: a filename stem (for example a pre-email alias file).
+  //    Only used when no record claims the identifier, so a stem can never
+  //    shadow another mailbox's stored name or address.
+  if (identifier.includes('@')) return null;
+  try {
+    const parsed = normalizeGmailMailboxMetadata(
+      JSON.parse(await readFile(join(directory, `${identifier}.json`), 'utf-8')) as unknown,
+    );
+    if (parsed) return parsed;
+  } catch {
+    // Not found.
+  }
   return null;
 }
 
-export async function saveGmailMailboxMetadata(metadata: GmailMailboxMetadata): Promise<void> {
-  const filename = `${toFilesystemSafeKey(metadata.emailAddress)}.json`;
-  const path = join(getConfigDir(), filename);
-  await serializeMetadata(path, () => atomicWriteMetadata(path, metadata));
+type RawRecord = Record<string, unknown>;
+
+async function readRawRecord(path: string): Promise<RawRecord | null | 'missing'> {
+  let raw: string;
+  try {
+    raw = await readFile(path, 'utf-8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+    throw error;
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pick the file a Gmail record for `emailAddress` is written to.
+ *
+ * 1. An existing Gmail record for the same address is updated in place.
+ * 2. Otherwise the email-keyed `<safe-key>.json` is used when it is free.
+ * 3. If `<safe-key>.json` holds anything that is not a Gmail record (a
+ *    Microsoft mailbox for the same address, or an unreadable file), it is
+ *    never overwritten: the Gmail record goes to `<safe-key>.gmail.json`.
+ */
+export async function resolveGmailMetadataPath(emailAddress: string): Promise<string> {
+  const directory = getConfigDir();
+  const target = emailAddress.toLowerCase();
+  const canonical = `${toFilesystemSafeKey(emailAddress)}.json`;
+  const scoped = gmailProviderScopedFilename(emailAddress);
+
+  let files: string[] = [];
+  try {
+    files = (await readdir(directory)).filter(file => file.endsWith('.json'));
+  } catch {
+    // Config dir does not exist yet.
+  }
+
+  const ordered = [canonical, scoped, ...files.filter(file => file !== canonical && file !== scoped)];
+  for (const file of ordered) {
+    const record = await readRawRecord(join(directory, file)).catch(() => null);
+    if (!record || record === 'missing') continue;
+    const parsed = normalizeGmailMailboxMetadata(record);
+    if (parsed && parsed.emailAddress.toLowerCase() === target) {
+      return join(directory, file);
+    }
+  }
+
+  // No record for this address yet: take the first free name. Safe keys are
+  // lossy (jane.doe@ and jane-doe@ share one), so an occupied name is never
+  // reused, whoever owns it.
+  for (const candidate of gmailCandidateFilenames(emailAddress)) {
+    const record = await readRawRecord(join(directory, candidate)).catch(() => null);
+    if (record === 'missing') return join(directory, candidate);
+  }
+  throw new Error(`No free token filename for Gmail mailbox ${emailAddress}`);
+}
+
+function gmailCandidateFilenames(emailAddress: string): string[] {
+  const key = toFilesystemSafeKey(emailAddress);
+  const names = [`${key}.json`, `${key}.gmail.json`];
+  for (let n = 2; n <= 50; n++) names.push(`${key}.gmail-${n}.json`);
+  return names;
+}
+
+function ownsGmailRecord(record: RawRecord | null | 'missing', emailAddress: string): boolean {
+  if (!record || record === 'missing') return false;
+  const parsed = normalizeGmailMailboxMetadata(record);
+  return !!parsed && parsed.emailAddress.toLowerCase() === emailAddress.toLowerCase();
+}
+
+/** Save a Gmail mailbox record and return the path it was written to. */
+export async function saveGmailMailboxMetadata(metadata: GmailMailboxMetadata): Promise<string> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const path = await resolveGmailMetadataPath(metadata.emailAddress);
+    const current = await readRawRecord(path).catch(() => null);
+    if (current === 'missing') {
+      // A new file: create it exclusively so a writer that claimed the same
+      // name in the meantime is never overwritten.
+      if (await atomicCreateMetadata(path, metadata)) return path;
+      continue;
+    }
+    if (!ownsGmailRecord(current, metadata.emailAddress)) {
+      // Another account or provider claimed the file after it was chosen
+      // (or it is unreadable): never replace it; choose again.
+      continue;
+    }
+    // This address's own record: replace it in place, re-checking ownership
+    // immediately before publishing.
+    let replaced = false;
+    await serializeMetadata(path, async () => {
+      const latest = await readRawRecord(path).catch(() => null);
+      if (!ownsGmailRecord(latest, metadata.emailAddress)) return;
+      await atomicWriteMetadata(path, metadata);
+      replaced = true;
+    });
+    if (replaced) return path;
+  }
+  throw new Error(`Could not claim a token filename for Gmail mailbox ${metadata.emailAddress}`);
+}
+
+/**
+ * Rename the Gmail mailbox alias `oldName` (case-insensitive) for the account
+ * `emailAddress`. Gmail token files are keyed by email address, so the file
+ * stays where it is and only its `mailboxName` changes. Returns the paths that
+ * were rewritten. Callers are responsible for collision checks.
+ */
+export async function renameGmailMailbox(args: {
+  oldName: string;
+  newName: string;
+  emailAddress: string;
+}): Promise<string[]> {
+  const directory = getConfigDir();
+  const oldKey = args.oldName.trim().toLowerCase();
+  const emailKey = args.emailAddress.trim().toLowerCase();
+  let files: string[];
+  try {
+    files = (await readdir(directory)).filter(file => file.endsWith('.json'));
+  } catch {
+    return [];
+  }
+
+  const rewritten: string[] = [];
+  for (const file of files) {
+    const path = join(directory, file);
+    const record = await readRawRecord(path).catch(() => null);
+    if (!record || record === 'missing') continue;
+    const parsed = normalizeGmailMailboxMetadata(record);
+    if (!parsed) continue;
+    if (parsed.mailboxName.trim().toLowerCase() !== oldKey) continue;
+    if (parsed.emailAddress.trim().toLowerCase() !== emailKey) continue;
+    await serializeMetadata(path, () =>
+      atomicWriteMetadata(path, { ...record, mailboxName: args.newName } as unknown as GmailMailboxMetadata));
+    rewritten.push(path);
+  }
+  return rewritten;
 }
 
 const metadataWrites = new Map<string, Promise<void>>();
@@ -223,6 +376,25 @@ async function atomicWriteMetadata(path: string, metadata: GmailMailboxMetadata)
   }
 }
 
+/** Publish a new metadata file only if `path` does not exist yet. */
+async function atomicCreateMetadata(path: string, metadata: GmailMailboxMetadata): Promise<boolean> {
+  await mkdir(dirname(path), { recursive: true });
+  const temp = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temp, JSON.stringify({ ...metadata, provider: 'gmail' }, null, 2) + '\n',
+      { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
+    try {
+      await link(temp, path);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+      throw error;
+    }
+  } finally {
+    await rm(temp, { force: true });
+  }
+}
+
 /** Process-local ordered compare-and-replace at the existing metadata route.
  * Atomic rename prevents partial files; this is not a cross-process CAS.
  */
@@ -235,7 +407,12 @@ export function createGmailMetadataWriter(metadata: GmailMailboxMetadata):
     await serializeMetadata(canonicalPath, async () => {
       const files = await readdir(directory);
       const canonical = `${toFilesystemSafeKey(metadata.emailAddress)}.json`;
-      const ordered = [canonical, ...files.filter(file => file.endsWith('.json') && file !== canonical)];
+      const scoped = gmailProviderScopedFilename(metadata.emailAddress);
+      const ordered = [
+        canonical,
+        ...files.filter(file => file === scoped),
+        ...files.filter(file => file.endsWith('.json') && file !== canonical && file !== scoped),
+      ];
       for (const file of ordered) {
         const path = join(directory, file);
         let current: GmailMailboxMetadata | null;

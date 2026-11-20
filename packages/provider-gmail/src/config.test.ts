@@ -9,17 +9,28 @@ import {
   loadGmailMailboxMetadata,
   saveGmailMailboxMetadata,
   createGmailMetadataWriter,
+  renameGmailMailbox,
   toFilesystemSafeKey,
   type GmailMailboxMetadata,
 } from './config.js';
 
-const fsFailure = vi.hoisted(() => ({ rename: false }));
+const fsFailure = vi.hoisted(() => ({
+  rename: false,
+  onRead: null as null | ((path: string) => Promise<void>),
+}));
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, rename: async (...args: Parameters<typeof actual.rename>) => {
-    if (fsFailure.rename) throw new Error('synthetic rename failure');
-    return actual.rename(...args);
-  } };
+  return {
+    ...actual,
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      if (fsFailure.rename) throw new Error('synthetic rename failure');
+      return actual.rename(...args);
+    },
+    readFile: (async (...args: Parameters<typeof actual.readFile>) => {
+      if (fsFailure.onRead && typeof args[0] === 'string') await fsFailure.onRead(args[0]);
+      return actual.readFile(...args);
+    }) as typeof actual.readFile,
+  };
 });
 
 let tempHome: string;
@@ -46,6 +57,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   fsFailure.rename = false;
+  fsFailure.onRead = null;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   delete process.env['EMAIL_AGENT_MCP_HOME'];
@@ -175,6 +187,110 @@ describe('provider-gmail/Config Discovery', () => {
 
     expect(saved.provider).toBe('gmail');
     expect(saved.emailAddress).toBe('Steven.Obiajulu+mail@gmail.com');
+  });
+});
+
+describe('provider-gmail/Token Files Shared With Microsoft', () => {
+  const microsoft = {
+    provider: 'microsoft',
+    mailboxName: 'default',
+    emailAddress: 'jane@example.com',
+    clientId: 'ms-client',
+    authenticationRecord: { homeAccountId: 'home' },
+    lastInteractiveAuthAt: '2026-04-08T12:00:00.000Z',
+  };
+
+  it('Scenario: Gmail save never overwrites a Microsoft record for the same address', async () => {
+    const tokens = join(tempHome, 'tokens');
+    await writeFile(join(tokens, 'jane-at-example-com.json'), JSON.stringify(microsoft));
+
+    const path = await saveGmailMailboxMetadata(gmailMailbox({ mailboxName: 'jane-example', emailAddress: 'jane@example.com' }));
+
+    expect(path).toBe(join(tokens, 'jane-at-example-com.gmail.json'));
+    expect(JSON.parse(await readFile(join(tokens, 'jane-at-example-com.json'), 'utf-8'))).toEqual(microsoft);
+    await expect(loadGmailMailboxMetadata('jane@example.com')).resolves.toMatchObject({ mailboxName: 'jane-example' });
+    await expect(listConfiguredGmailMailboxes()).resolves.toHaveLength(1);
+
+    // A re-save updates the same provider-scoped file in place.
+    await saveGmailMailboxMetadata(gmailMailbox({ mailboxName: 'jane-example', emailAddress: 'jane@example.com', refreshToken: 'second' }));
+    expect((await readdir(tokens)).sort()).toEqual(['jane-at-example-com.gmail.json', 'jane-at-example-com.json']);
+    await expect(loadGmailMailboxMetadata('jane-example')).resolves.toMatchObject({ refreshToken: 'second' });
+  });
+
+  it('Scenario: Gmail token rotation finds a provider-scoped record', async () => {
+    const tokens = join(tempHome, 'tokens');
+    await writeFile(join(tokens, 'jane-at-example-com.json'), JSON.stringify(microsoft));
+    const metadata = gmailMailbox({ mailboxName: 'jane-example', emailAddress: 'jane@example.com' });
+    await saveGmailMailboxMetadata(metadata);
+
+    await createGmailMetadataWriter(metadata)('rotated', metadata.refreshToken);
+
+    expect(JSON.parse(await readFile(join(tokens, 'jane-at-example-com.gmail.json'), 'utf-8'))).toMatchObject({ refreshToken: 'rotated' });
+    expect(JSON.parse(await readFile(join(tokens, 'jane-at-example-com.json'), 'utf-8'))).toEqual(microsoft);
+  });
+
+  it('Scenario: Gmail save never overwrites another account that shares a lossy safe key', async () => {
+    // jane.doe@ and jane-doe@ both map to jane-doe-at-example-com.
+    const tokens = join(tempHome, 'tokens');
+    await writeFile(join(tokens, 'jane-doe-at-example-com.json'), JSON.stringify({ ...microsoft, emailAddress: 'jane.doe@example.com' }));
+
+    const first = await saveGmailMailboxMetadata(gmailMailbox({ mailboxName: 'first', emailAddress: 'jane.doe@example.com', refreshToken: 'r1' }));
+    const second = await saveGmailMailboxMetadata(gmailMailbox({ mailboxName: 'second', emailAddress: 'jane-doe@example.com', refreshToken: 'r2' }));
+
+    expect(first).toBe(join(tokens, 'jane-doe-at-example-com.gmail.json'));
+    expect(second).toBe(join(tokens, 'jane-doe-at-example-com.gmail-2.json'));
+    expect((await listConfiguredGmailMailboxes()).map(m => m.emailAddress).sort())
+      .toEqual(['jane-doe@example.com', 'jane.doe@example.com']);
+    await expect(loadGmailMailboxMetadata('jane.doe@example.com')).resolves.toMatchObject({ mailboxName: 'first', refreshToken: 'r1' });
+    await expect(loadGmailMailboxMetadata('jane-doe@example.com')).resolves.toMatchObject({ mailboxName: 'second', refreshToken: 'r2' });
+  });
+
+  it('Scenario: A Gmail save that loses the filename race picks another name', async () => {
+    // Interleave a second save between choosing a free filename and publishing it.
+    const tokens = join(tempHome, 'tokens');
+    const canonical = join(tokens, 'jane-doe-at-example-com.json');
+    let reads = 0;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let reached!: () => void;
+    const paused = new Promise<void>(resolve => { reached = resolve; });
+    fsFailure.onRead = async path => {
+      // Read 3 of the canonical path is the save's check after the resolver picked it.
+      if (path === canonical && ++reads === 3) { reached(); await gate; }
+    };
+
+    const pending = saveGmailMailboxMetadata(gmailMailbox({ mailboxName: 'second', emailAddress: 'jane-doe@example.com', refreshToken: 'r2' }));
+    await paused;
+    fsFailure.onRead = null;
+    await saveGmailMailboxMetadata(gmailMailbox({ mailboxName: 'first', emailAddress: 'jane.doe@example.com', refreshToken: 'r1' }));
+    release();
+    const second = await pending;
+
+    expect(second).toBe(join(tokens, 'jane-doe-at-example-com.gmail.json'));
+    await expect(loadGmailMailboxMetadata('jane.doe@example.com')).resolves.toMatchObject({ refreshToken: 'r1' });
+    await expect(loadGmailMailboxMetadata('jane-doe@example.com')).resolves.toMatchObject({ refreshToken: 'r2' });
+  });
+
+  it('Scenario: Gmail lookup resolves stored names and addresses before filename stems', async () => {
+    const tokens = join(tempHome, 'tokens');
+    await writeFile(join(tokens, 'alice-at-example-com.json'), JSON.stringify(gmailMailbox({ mailboxName: 'alice', emailAddress: 'alice@example.com' })));
+    await writeFile(join(tokens, 'bob-at-example-com.json'), JSON.stringify(gmailMailbox({ mailboxName: 'alice-at-example-com', emailAddress: 'bob@example.com' })));
+
+    await expect(loadGmailMailboxMetadata('alice-at-example-com')).resolves.toMatchObject({ emailAddress: 'bob@example.com' });
+    await expect(loadGmailMailboxMetadata('ALICE@example.com')).resolves.toMatchObject({ mailboxName: 'alice' });
+    await expect(loadGmailMailboxMetadata('carol@example.com')).resolves.toBeNull();
+  });
+
+  it('Scenario: renameGmailMailbox rewrites only the matching account record', async () => {
+    const tokens = join(tempHome, 'tokens');
+    await writeFile(join(tokens, 'jane-at-example-com.json'), JSON.stringify(microsoft));
+    await saveGmailMailboxMetadata(gmailMailbox({ mailboxName: 'default', emailAddress: 'jane@gmail.com' }));
+
+    const rewritten = await renameGmailMailbox({ oldName: 'DEFAULT', newName: 'personal', emailAddress: 'jane@gmail.com' });
+
+    expect(rewritten).toEqual([join(tokens, 'jane-at-gmail-com.json')]);
+    await expect(loadGmailMailboxMetadata('personal')).resolves.toMatchObject({ emailAddress: 'jane@gmail.com' });
+    expect(JSON.parse(await readFile(join(tokens, 'jane-at-example-com.json'), 'utf-8'))).toEqual(microsoft);
   });
 });
 
