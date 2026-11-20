@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile, rename, rm } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile, rename, rm, link } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -169,39 +169,47 @@ export function gmailProviderScopedFilename(emailAddress: string): string {
 }
 
 export async function loadGmailMailboxMetadata(identifier: string): Promise<GmailMailboxMetadata | null> {
-  const candidatePaths = [`${identifier}.json`];
-  if (identifier.includes('@')) {
-    candidatePaths.push(`${toFilesystemSafeKey(identifier)}.json`);
-    candidatePaths.push(gmailProviderScopedFilename(identifier));
-  }
+  const directory = getConfigDir();
+  const target = identifier.trim().toLowerCase();
 
-  for (const candidate of candidatePaths) {
-    try {
-      const raw = await readFile(join(getConfigDir(), candidate), 'utf-8');
-      const parsed = normalizeGmailMailboxMetadata(JSON.parse(raw) as unknown);
-      if (parsed) return parsed;
-    } catch {
-      // Try the next path.
-    }
-  }
-
+  // 1. Resolve by identity: a record whose stored email address or mailbox
+  //    name equals the identifier. Email matches win over name matches (the
+  //    email address is the canonical mailbox identity), then recency.
+  const byEmail: GmailMailboxMetadata[] = [];
+  const byName: GmailMailboxMetadata[] = [];
+  let files: string[] = [];
   try {
-    const files = (await readdir(getConfigDir())).filter(file => file.endsWith('.json'));
-    for (const file of files) {
-      try {
-        const raw = await readFile(join(getConfigDir(), file), 'utf-8');
-        const parsed = normalizeGmailMailboxMetadata(JSON.parse(raw) as unknown);
-        if (parsed && (parsed.mailboxName === identifier || parsed.emailAddress === identifier)) {
-          return parsed;
-        }
-      } catch {
-        // Skip unreadable or invalid files.
-      }
-    }
+    files = (await readdir(directory)).filter(file => file.endsWith('.json'));
   } catch {
-    // Config dir does not exist.
+    return null; // Config dir does not exist.
   }
+  for (const file of files) {
+    try {
+      const parsed = normalizeGmailMailboxMetadata(JSON.parse(await readFile(join(directory, file), 'utf-8')) as unknown);
+      if (!parsed) continue;
+      if (parsed.emailAddress.trim().toLowerCase() === target) byEmail.push(parsed);
+      else if (parsed.mailboxName.trim().toLowerCase() === target) byName.push(parsed);
+    } catch {
+      // Skip unreadable or invalid files.
+    }
+  }
+  const newestFirst = (a: GmailMailboxMetadata, b: GmailMailboxMetadata) =>
+    sortByRecency({ metadata: a }, { metadata: b });
+  if (byEmail.length > 0) return byEmail.sort(newestFirst)[0]!;
+  if (byName.length > 0) return byName.sort(newestFirst)[0]!;
 
+  // 2. Legacy fallback: a filename stem (for example a pre-email alias file).
+  //    Only used when no record claims the identifier, so a stem can never
+  //    shadow another mailbox's stored name or address.
+  if (identifier.includes('@')) return null;
+  try {
+    const parsed = normalizeGmailMailboxMetadata(
+      JSON.parse(await readFile(join(directory, `${identifier}.json`), 'utf-8')) as unknown,
+    );
+    if (parsed) return parsed;
+  } catch {
+    // Not found.
+  }
   return null;
 }
 
@@ -255,16 +263,38 @@ export async function resolveGmailMetadataPath(emailAddress: string): Promise<st
     }
   }
 
-  const canonicalRecord = await readRawRecord(join(directory, canonical)).catch(() => null);
-  if (canonicalRecord === 'missing') return join(directory, canonical);
-  return join(directory, scoped);
+  // No record for this address yet: take the first free name. Safe keys are
+  // lossy (jane.doe@ and jane-doe@ share one), so an occupied name is never
+  // reused, whoever owns it.
+  for (const candidate of gmailCandidateFilenames(emailAddress)) {
+    const record = await readRawRecord(join(directory, candidate)).catch(() => null);
+    if (record === 'missing') return join(directory, candidate);
+  }
+  throw new Error(`No free token filename for Gmail mailbox ${emailAddress}`);
+}
+
+function gmailCandidateFilenames(emailAddress: string): string[] {
+  const key = toFilesystemSafeKey(emailAddress);
+  const names = [`${key}.json`, `${key}.gmail.json`];
+  for (let n = 2; n <= 50; n++) names.push(`${key}.gmail-${n}.json`);
+  return names;
 }
 
 /** Save a Gmail mailbox record and return the path it was written to. */
 export async function saveGmailMailboxMetadata(metadata: GmailMailboxMetadata): Promise<string> {
-  const path = await resolveGmailMetadataPath(metadata.emailAddress);
-  await serializeMetadata(path, () => atomicWriteMetadata(path, metadata));
-  return path;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const path = await resolveGmailMetadataPath(metadata.emailAddress);
+    const existing = await readRawRecord(path).catch(() => null);
+    if (existing !== 'missing') {
+      // An existing record for this same address: replace it in place.
+      await serializeMetadata(path, () => atomicWriteMetadata(path, metadata));
+      return path;
+    }
+    // A new file: create it exclusively so a concurrent writer that claimed
+    // the same name in the meantime is never overwritten.
+    if (await atomicCreateMetadata(path, metadata)) return path;
+  }
+  throw new Error(`Could not claim a token filename for Gmail mailbox ${metadata.emailAddress}`);
 }
 
 /**
@@ -322,6 +352,25 @@ async function atomicWriteMetadata(path: string, metadata: GmailMailboxMetadata)
     await writeFile(temp, JSON.stringify({ ...metadata, provider: 'gmail' }, null, 2) + '\n',
       { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
     await rename(temp, path);
+  } finally {
+    await rm(temp, { force: true });
+  }
+}
+
+/** Publish a new metadata file only if `path` does not exist yet. */
+async function atomicCreateMetadata(path: string, metadata: GmailMailboxMetadata): Promise<boolean> {
+  await mkdir(dirname(path), { recursive: true });
+  const temp = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temp, JSON.stringify({ ...metadata, provider: 'gmail' }, null, 2) + '\n',
+      { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
+    try {
+      await link(temp, path);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+      throw error;
+    }
   } finally {
     await rm(temp, { force: true });
   }

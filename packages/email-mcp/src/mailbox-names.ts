@@ -103,11 +103,35 @@ export function suggestMailboxName(
   emailAddress: string,
   mailboxes: readonly MailboxNameEntry[],
   self?: MailboxNameEntry,
+  isOtherwiseTaken: (name: string) => boolean = () => false,
 ): string {
+  const taken = (name: string) => Boolean(findMailboxNameConflict(name, mailboxes, self)) || isOtherwiseTaken(name);
   const base = deriveMailboxName(emailAddress);
-  if (!findMailboxNameConflict(base, mailboxes, self)) return base;
+  if (!taken(base)) return base;
   for (let suffix = 2; ; suffix++) {
     const candidate = `${base}-${suffix}`;
-    if (!findMailboxNameConflict(candidate, mailboxes, self)) return candidate;
+    if (!taken(candidate)) return candidate;
   }
+}
+
+/** Token filename stems (lowercased, without `.json`) mapped to the email address stored in each file. */
+export type TokenFileStems = ReadonlyMap<string, string | undefined>;
+
+/**
+ * Legacy lookups still accept a token filename stem as a selector, so a name
+ * must not equal the stem of a file that belongs to a different account.
+ * Returns the conflicting stem, or undefined.
+ */
+export function findTokenStemConflict(
+  name: string,
+  stems: TokenFileStems,
+  ownEmailAddress?: string,
+): string | undefined {
+  const key = normalizeMailboxName(name);
+  if (!stems.has(key)) return undefined;
+  const owner = stems.get(key);
+  if (owner && ownEmailAddress && normalizeMailboxName(owner) === normalizeMailboxName(ownEmailAddress)) {
+    return undefined;
+  }
+  return key;
 }

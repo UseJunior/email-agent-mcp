@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 import {
   describeMailbox,
   findMailboxNameConflict,
+  findTokenStemConflict,
+  type TokenFileStems,
   normalizeMailboxName,
   suggestMailboxName,
   validateMailboxName,
@@ -222,6 +224,39 @@ function canPrompt(): boolean {
   return Boolean(process.stdin.isTTY) && Boolean(process.stdout.isTTY);
 }
 
+/**
+ * Mirrors provider-microsoft's isGmailShapedRecord: Gmail records, including
+ * legacy ones written before the `provider` field existed.
+ */
+function isGmailShapedRecord(record: { provider?: unknown; refreshToken?: unknown } & object): boolean {
+  if (record.provider === 'gmail') return true;
+  return record.provider === undefined && !('authenticationRecord' in record) && typeof record.refreshToken === 'string';
+}
+
+/** Map each token filename stem to the email address stored in that file. */
+async function loadTokenFileStems(): Promise<TokenFileStems> {
+  const { readdir } = await import('node:fs/promises');
+  const tokensDir = join(getAgentEmailHome(), 'tokens');
+  const stems = new Map<string, string | undefined>();
+  let files: string[] = [];
+  try {
+    files = (await readdir(tokensDir)).filter(file => file.endsWith('.json'));
+  } catch {
+    return stems;
+  }
+  for (const file of files) {
+    let emailAddress: string | undefined;
+    try {
+      const record = JSON.parse(await readFile(join(tokensDir, file), 'utf-8')) as { emailAddress?: unknown };
+      emailAddress = typeof record.emailAddress === 'string' ? record.emailAddress : undefined;
+    } catch {
+      // Unreadable files still reserve their stem.
+    }
+    stems.set(file.slice(0, -'.json'.length).toLowerCase(), emailAddress);
+  }
+  return stems;
+}
+
 export interface GmailMailboxNameRequest {
   /** `--mailbox` as passed on the command line. */
   requestedMailbox?: string;
@@ -297,6 +332,7 @@ async function promptForGmailMailboxName(
   suggestion: string,
   mailboxes: readonly MailboxNameEntry[],
   self: MailboxNameEntry,
+  stems: TokenFileStems,
 ): Promise<string> {
   const p = await import('@clack/prompts');
   const check = (value: string | undefined): string | undefined => {
@@ -304,7 +340,9 @@ async function promptForGmailMailboxName(
     const invalid = validateMailboxName(name, emailAddress);
     if (invalid) return invalid;
     const conflict = findMailboxNameConflict(name, mailboxes, self);
-    return conflict ? `"${name}" is already used by ${describeMailbox(conflict)}.` : undefined;
+    if (conflict) return `"${name}" is already used by ${describeMailbox(conflict)}.`;
+    const stem = findTokenStemConflict(name, stems, emailAddress);
+    return stem ? `"${name}" matches the token file tokens/${stem}.json of another account.` : undefined;
   };
 
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -366,14 +404,16 @@ export async function chooseGmailMailboxName(
     mailboxName: existing?.mailboxName ?? requested ?? '',
     emailAddress,
   };
-  const fallbackName = existing?.mailboxName ?? suggestMailboxName(emailAddress, mailboxes, self);
+  const stems = await loadTokenFileStems();
+  const fallbackName = existing?.mailboxName ??
+    suggestMailboxName(emailAddress, mailboxes, self, name => Boolean(findTokenStemConflict(name, stems, emailAddress)));
   const interactive = request.interactive && !request.yes;
 
   if (!requested) {
     if (existing) return { mailboxName: existing.mailboxName, previousMailboxName };
     if (interactive) {
       return {
-        mailboxName: await promptForGmailMailboxName(emailAddress, fallbackName, mailboxes, self),
+        mailboxName: await promptForGmailMailboxName(emailAddress, fallbackName, mailboxes, self, stems),
         previousMailboxName,
       };
     }
@@ -386,7 +426,8 @@ export async function chooseGmailMailboxName(
   }
 
   const conflict = findMailboxNameConflict(requested, mailboxes, self);
-  if (!conflict) {
+  const stemConflict = conflict ? undefined : findTokenStemConflict(requested, stems, emailAddress);
+  if (!conflict && !stemConflict) {
     const keepsKnownMapping = existing !== undefined &&
       normalizeMailboxValue(existing.mailboxName) === normalizeMailboxValue(requested);
     const accountConfirmed = Boolean(confirmAccount) || requested.includes('@');
@@ -405,11 +446,12 @@ export async function chooseGmailMailboxName(
     };
   }
 
-  const refusal = `Mailbox "${requested}" is already used by ${describeMailbox(conflict)}, but Google authenticated ${emailAddress}. Refusing to overwrite it.`;
+  const owner = conflict ? describeMailbox(conflict) : `the token file tokens/${stemConflict}.json of another account`;
+  const refusal = `Mailbox "${requested}" is already used by ${owner}, but Google authenticated ${emailAddress}. Refusing to overwrite it.`;
   if (interactive) {
     console.error(`[email-agent-mcp] ${refusal}`);
     return {
-      mailboxName: await promptForGmailMailboxName(emailAddress, fallbackName, mailboxes, self),
+      mailboxName: await promptForGmailMailboxName(emailAddress, fallbackName, mailboxes, self, stems),
       previousMailboxName,
     };
   }
@@ -967,8 +1009,15 @@ async function resolveGmailAuthSetup(opts: CliOptions): Promise<GmailAuthSetup> 
   //    #44 reconnect behaviour and lets returning BYOK users skip the
   //    broker path silently.
   const mailboxIdentifier = opts.mailbox ?? opts.confirmAccount ?? 'default';
-  const { loadGmailMailboxMetadata } = await import('@usejunior/provider-gmail');
-  const saved = await loadGmailMailboxMetadata(mailboxIdentifier);
+  const { loadGmailMailboxMetadata, listConfiguredGmailMailboxes } = await import('@usejunior/provider-gmail');
+  let saved = await loadGmailMailboxMetadata(mailboxIdentifier);
+  if (!saved && !opts.mailbox && !opts.confirmAccount) {
+    // Bare `configure --provider gmail`: new mailboxes get derived names, not
+    // "default", so fall back to the only saved Gmail mailbox (if exactly one)
+    // to keep its OAuth client on reconnect.
+    const gmailMailboxes = await listConfiguredGmailMailboxes();
+    if (gmailMailboxes.length === 1) saved = gmailMailboxes[0]!;
+  }
   if (saved?.source === 'byok') {
     return { mode: 'byok', clientId: saved.clientId, clientSecret: saved.clientSecret, source: 'saved' };
   }
@@ -1036,6 +1085,7 @@ async function runGmailConfigure(opts: CliOptions): Promise<number> {
     console.error('');
     return await runGmailBrokerConfigure({
       request,
+      setup,
       loginHint,
       brokerUrl,
       provider,
@@ -1088,7 +1138,7 @@ async function runGmailConfigure(opts: CliOptions): Promise<number> {
   }
 
   const lastInteractiveAuthAt = new Date().toISOString();
-  return await completeGmailSetup(emailAddress, request, mailboxName => saveGmailMailboxMetadata({
+  return await completeGmailSetup(emailAddress, request, setup, mailboxName => saveGmailMailboxMetadata({
     provider: 'gmail',
     source: 'byok',
     mailboxName,
@@ -1105,11 +1155,12 @@ async function runGmailConfigure(opts: CliOptions): Promise<number> {
 
 async function runGmailBrokerConfigure(args: {
   request: GmailMailboxNameRequest;
+  setup: GmailAuthSetup;
   loginHint?: string;
   brokerUrl: string;
   provider: typeof import('@usejunior/provider-gmail');
 }): Promise<number> {
-  const { request, loginHint, brokerUrl, provider } = args;
+  const { request, setup, loginHint, brokerUrl, provider } = args;
   const { GmailAuthManager, saveGmailMailboxMetadata } = provider;
 
   const auth = new GmailAuthManager({
@@ -1144,7 +1195,7 @@ async function runGmailBrokerConfigure(args: {
   }
 
   const lastInteractiveAuthAt = new Date().toISOString();
-  return await completeGmailSetup(emailAddress, request, mailboxName => saveGmailMailboxMetadata({
+  return await completeGmailSetup(emailAddress, request, setup, mailboxName => saveGmailMailboxMetadata({
     provider: 'gmail',
     source: 'broker',
     mailboxName,
@@ -1162,8 +1213,20 @@ async function runGmailBrokerConfigure(args: {
 async function completeGmailSetup(
   emailAddress: string,
   request: GmailMailboxNameRequest,
+  setup: GmailAuthSetup,
   save: (mailboxName: string) => Promise<string | void>,
 ): Promise<number> {
+  // Never switch an account from its own OAuth client (BYOK) to the hosted
+  // broker implicitly: that only happens with explicit --broker-url.
+  if (setup.mode === 'broker' && setup.source === 'default') {
+    const { loadGmailMailboxMetadata } = await import('@usejunior/provider-gmail');
+    const saved = await loadGmailMailboxMetadata(emailAddress);
+    if (saved?.source === 'byok') {
+      throw new Error(
+        `${emailAddress} is already configured as mailbox "${saved.mailboxName}" with your own OAuth client (BYOK). Nothing was changed. Re-run with --mailbox ${saved.mailboxName} to reconnect it with that client, or pass --broker-url to switch it to the hosted broker.`,
+      );
+    }
+  }
   const decision = await chooseGmailMailboxName(emailAddress, request);
   const savedPath = await save(decision.mailboxName);
   await finalizeGmailMailbox(emailAddress, decision, savedPath || undefined);
@@ -1306,10 +1369,10 @@ export async function runConfigure(opts: CliOptions): Promise<number> {
               if (!file.endsWith('.json') || file === newFilename) continue;
               try {
                 const content = await readFileAsync(join(tokensDir, file), 'utf-8');
-                const meta = JSON.parse(content) as { emailAddress?: string; provider?: string };
+                const meta = JSON.parse(content) as { emailAddress?: string; provider?: string; refreshToken?: unknown };
                 // Only Microsoft records are superseded here. A Gmail mailbox
                 // for the same address is a different mailbox and must survive.
-                if (meta.provider === 'gmail') continue;
+                if (isGmailShapedRecord(meta)) continue;
                 if (meta.emailAddress && meta.emailAddress.toLowerCase() === emailAddress.toLowerCase()) {
                   console.error(`[email-agent-mcp] Removing superseded token file: ${file}`);
                   await unlink(join(tokensDir, file));
@@ -1535,6 +1598,11 @@ export async function runMailboxRename(oldName: string, newName: string, provide
   const conflict = findMailboxNameConflict(trimmedNew, mailboxes, target);
   if (conflict) {
     console.error(`Error: Cannot rename "${target.mailboxName}" to "${trimmedNew}": that name is already used by ${describeMailbox(conflict)}.`);
+    return 1;
+  }
+  const stemConflict = findTokenStemConflict(trimmedNew, await loadTokenFileStems(), target.emailAddress);
+  if (stemConflict) {
+    console.error(`Error: Cannot rename "${target.mailboxName}" to "${trimmedNew}": it matches the token file tokens/${stemConflict}.json of another account.`);
     return 1;
   }
 

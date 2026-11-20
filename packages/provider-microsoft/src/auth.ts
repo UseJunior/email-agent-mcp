@@ -739,7 +739,7 @@ export async function listConfiguredMailboxesWithMetadata(): Promise<MailboxMeta
     try {
       const content = await readFile(join(getConfigDir(), file), 'utf-8');
       const metadata = JSON.parse(content) as MailboxMetadata & { provider?: string };
-      if (metadata.provider === 'gmail') {
+      if (isGmailShapedRecord(metadata)) {
         continue;
       }
       entries.push({ filename: file, metadata });
@@ -812,6 +812,20 @@ export async function listConfiguredMailboxesWithMetadata(): Promise<MailboxMeta
 }
 
 /**
+ * True for records written by the Gmail provider, including legacy Gmail
+ * records from before the `provider` field existed (refresh token, no MSAL
+ * authentication record).
+ */
+export function isGmailShapedRecord(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (record['provider'] === 'gmail') return true;
+  return record['provider'] === undefined &&
+    !('authenticationRecord' in record) &&
+    typeof record['refreshToken'] === 'string';
+}
+
+/**
  * Gmail and Microsoft records for the same email address share the
  * email-keyed filename `<safe-key>.json`. Before a Microsoft record is
  * written there, move a Gmail record that occupies it to the Gmail
@@ -826,7 +840,7 @@ export async function relocateGmailRecordAt(path: string): Promise<void> {
   } catch {
     return; // Missing or unreadable: nothing to preserve that a Gmail reader would load.
   }
-  if (!parsed || typeof parsed !== 'object' || (parsed as { provider?: unknown }).provider !== 'gmail') return;
+  if (!isGmailShapedRecord(parsed)) return;
 
   const aside = path.replace(/\.json$/, '.gmail.json');
   try {
@@ -875,7 +889,7 @@ export async function renameMailbox(args: {
     } catch {
       continue;
     }
-    if (record['provider'] === 'gmail' || !('authenticationRecord' in record)) continue;
+    if (isGmailShapedRecord(record) || !('authenticationRecord' in record)) continue;
     if (typeof record['mailboxName'] !== 'string' || record['mailboxName'].trim().toLowerCase() !== oldKey) continue;
     if (typeof record['emailAddress'] !== 'string' || record['emailAddress'].trim().toLowerCase() !== emailKey) continue;
 
@@ -903,51 +917,59 @@ export async function renameMailbox(args: {
  * Accepts a mailbox name (filename stem), an email address, or a filesystem-safe key.
  */
 export async function loadMailboxMetadata(identifier: string): Promise<MailboxMetadata | null> {
-  // Try direct filename match first (e.g., "work" → "work.json", or safe key → safe key.json)
+  const { readdir } = await import('node:fs/promises');
+  const directory = getConfigDir();
+  const target = identifier.trim().toLowerCase();
+
+  let files: string[];
   try {
-    const content = await readFile(join(getConfigDir(), `${identifier}.json`), 'utf-8');
-    const metadata = JSON.parse(content) as MailboxMetadata & { provider?: string };
-    if (metadata.provider !== 'gmail') {
-      return metadata;
-    }
+    files = (await readdir(directory)).filter(f => f.endsWith('.json'));
   } catch {
-    // Not found by direct name
+    return null; // No config dir
   }
 
-  // Try as email address: convert to filesystem-safe key
-  if (identifier.includes('@')) {
+  // 1. Resolve by identity: a Microsoft record whose stored email address or
+  //    mailbox name equals the identifier. Email matches win (the email
+  //    address is the canonical identity), then the most recent sign-in.
+  const byEmail: MailboxMetadata[] = [];
+  const byName: MailboxMetadata[] = [];
+  for (const file of files) {
     try {
-      const safeKey = toFilesystemSafeKey(identifier);
-      const content = await readFile(join(getConfigDir(), `${safeKey}.json`), 'utf-8');
-      const metadata = JSON.parse(content) as MailboxMetadata & { provider?: string };
-      if (metadata.provider !== 'gmail') {
-        return metadata;
+      const parsed = JSON.parse(await readFile(join(directory, file), 'utf-8')) as unknown;
+      if (isGmailShapedRecord(parsed)) continue;
+      const metadata = parsed as MailboxMetadata;
+      if (typeof metadata.emailAddress === 'string' && metadata.emailAddress.trim().toLowerCase() === target) {
+        byEmail.push(metadata);
+      } else if (typeof metadata.mailboxName === 'string' && metadata.mailboxName.trim().toLowerCase() === target) {
+        byName.push(metadata);
       }
+    } catch {
+      // Skip unreadable files
+    }
+  }
+  const newestFirst = (a: MailboxMetadata, b: MailboxMetadata) =>
+    new Date(b.lastInteractiveAuthAt ?? '1970-01-01').getTime() -
+    new Date(a.lastInteractiveAuthAt ?? '1970-01-01').getTime();
+  if (byEmail.length > 0) return byEmail.sort(newestFirst)[0]!;
+  if (byName.length > 0) return byName.sort(newestFirst)[0]!;
+
+  // 2. Legacy fallback: a filename stem (e.g. "work" -> work.json, or a safe
+  //    key). Only used when no record claims the identifier, so a stem can
+  //    never shadow another mailbox's stored name or address.
+  const stems = [identifier];
+  if (identifier.includes('@')) stems.push(toFilesystemSafeKey(identifier));
+  for (const stem of stems) {
+    try {
+      const parsed = JSON.parse(await readFile(join(directory, `${stem}.json`), 'utf-8')) as unknown;
+      if (isGmailShapedRecord(parsed)) continue;
+      const metadata = parsed as MailboxMetadata;
+      // A stem hit must not hand back a record that belongs to another address.
+      if (identifier.includes('@') && metadata.emailAddress &&
+          metadata.emailAddress.trim().toLowerCase() !== target) continue;
+      return metadata;
     } catch {
       // Not found
     }
-  }
-
-  // Fall back: search all metadata files for matching mailboxName or emailAddress
-  try {
-    const { readdir } = await import('node:fs/promises');
-    const files = await readdir(getConfigDir());
-    for (const file of files.filter(f => f.endsWith('.json'))) {
-      try {
-        const content = await readFile(join(getConfigDir(), file), 'utf-8');
-        const metadata = JSON.parse(content) as MailboxMetadata & { provider?: string };
-        if (
-          metadata.provider !== 'gmail' &&
-          (metadata.mailboxName === identifier || metadata.emailAddress === identifier)
-        ) {
-          return metadata;
-        }
-      } catch {
-        // Skip unreadable files
-      }
-    }
-  } catch {
-    // No config dir
   }
 
   return null;

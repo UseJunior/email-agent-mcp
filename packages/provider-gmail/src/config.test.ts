@@ -218,6 +218,32 @@ describe('provider-gmail/Token Files Shared With Microsoft', () => {
     expect(JSON.parse(await readFile(join(tokens, 'jane-at-example-com.json'), 'utf-8'))).toEqual(microsoft);
   });
 
+  it('Scenario: Gmail save never overwrites another account that shares a lossy safe key', async () => {
+    // jane.doe@ and jane-doe@ both map to jane-doe-at-example-com.
+    const tokens = join(tempHome, 'tokens');
+    await writeFile(join(tokens, 'jane-doe-at-example-com.json'), JSON.stringify({ ...microsoft, emailAddress: 'jane.doe@example.com' }));
+
+    const first = await saveGmailMailboxMetadata(gmailMailbox({ mailboxName: 'first', emailAddress: 'jane.doe@example.com', refreshToken: 'r1' }));
+    const second = await saveGmailMailboxMetadata(gmailMailbox({ mailboxName: 'second', emailAddress: 'jane-doe@example.com', refreshToken: 'r2' }));
+
+    expect(first).toBe(join(tokens, 'jane-doe-at-example-com.gmail.json'));
+    expect(second).toBe(join(tokens, 'jane-doe-at-example-com.gmail-2.json'));
+    expect((await listConfiguredGmailMailboxes()).map(m => m.emailAddress).sort())
+      .toEqual(['jane-doe@example.com', 'jane.doe@example.com']);
+    await expect(loadGmailMailboxMetadata('jane.doe@example.com')).resolves.toMatchObject({ mailboxName: 'first', refreshToken: 'r1' });
+    await expect(loadGmailMailboxMetadata('jane-doe@example.com')).resolves.toMatchObject({ mailboxName: 'second', refreshToken: 'r2' });
+  });
+
+  it('Scenario: Gmail lookup resolves stored names and addresses before filename stems', async () => {
+    const tokens = join(tempHome, 'tokens');
+    await writeFile(join(tokens, 'alice-at-example-com.json'), JSON.stringify(gmailMailbox({ mailboxName: 'alice', emailAddress: 'alice@example.com' })));
+    await writeFile(join(tokens, 'bob-at-example-com.json'), JSON.stringify(gmailMailbox({ mailboxName: 'alice-at-example-com', emailAddress: 'bob@example.com' })));
+
+    await expect(loadGmailMailboxMetadata('alice-at-example-com')).resolves.toMatchObject({ emailAddress: 'bob@example.com' });
+    await expect(loadGmailMailboxMetadata('ALICE@example.com')).resolves.toMatchObject({ mailboxName: 'alice' });
+    await expect(loadGmailMailboxMetadata('carol@example.com')).resolves.toBeNull();
+  });
+
   it('Scenario: renameGmailMailbox rewrites only the matching account record', async () => {
     const tokens = join(tempHome, 'tokens');
     await writeFile(join(tokens, 'jane-at-example-com.json'), JSON.stringify(microsoft));

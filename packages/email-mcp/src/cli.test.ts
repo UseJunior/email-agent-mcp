@@ -1203,6 +1203,42 @@ describe('cli/Gmail Configure', () => {
     expect(gmailMockState.savedMetadata).toBeNull();
   });
 
+  it('Scenario: Bare reconnect keeps the only saved Gmail mailbox on its own OAuth client', async () => {
+    await seedSavedGmailMetadata('jane-example', { emailAddress: 'steven.obiajulu@gmail.com', source: 'byok' });
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail']);
+
+    expect(exitCode).toBe(0);
+    expect(gmailMockState.savedMetadata).toMatchObject({
+      source: 'byok',
+      mailboxName: 'jane-example',
+      clientId: 'saved-client-id',
+      clientSecret: 'saved-client-secret',
+    });
+  });
+
+  it('Scenario: Implicit broker setup never replaces a BYOK mailbox', async () => {
+    await seedSavedGmailMetadata('work', { emailAddress: 'steven.obiajulu@gmail.com', source: 'byok' });
+    await seedTokenFile(tmpHome, 'other-at-gmail-com.json', gmailRecord('other', 'other@gmail.com'));
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail']);
+
+    expect(exitCode).toBe(1);
+    expect(gmailMockState.brokerSessionArgs).not.toBeNull();
+    expect(gmailMockState.savedMetadata).toBeNull();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('with your own OAuth client (BYOK). Nothing was changed'));
+  });
+
+  it('Scenario: A requested name that is another account\'s token filename is refused after OAuth', async () => {
+    await seedTokenFile(tmpHome, 'work.json', microsoftRecord('office', 'carol@example.com'));
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail', '--mailbox', 'work']);
+
+    expect(exitCode).toBe(1);
+    expect(gmailMockState.savedMetadata).toMatchObject({ mailboxName: 'steven-obiajulu-gmail' });
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('the token file tokens/work.json of another account'));
+  });
+
   it('Scenario: Environment variables override saved OAuth credentials', async () => {
     process.env['AGENT_EMAIL_GMAIL_CLIENT_ID'] = 'env-client-id';
     process.env['AGENT_EMAIL_GMAIL_CLIENT_SECRET'] = 'env-client-secret';
@@ -1314,6 +1350,19 @@ describe('cli/Mailbox Rename', () => {
     expect(await runCli(['mailbox', 'rename', 'default', 'personal', '--provider', 'gmail'])).toBe(0);
     expect(await readToken('jane-at-gmail-com.json')).toMatchObject({ mailboxName: 'personal' });
     expect(await readToken('jane-at-example-com.json')).toMatchObject({ mailboxName: 'default' });
+  });
+
+  it('Scenario: Rename refuses a name that is another account\'s token filename', async () => {
+    await seedTokenFile(tmpHome, 'alice-at-example-com.json', microsoftRecord('alice', 'alice@example.com'));
+    await seedTokenFile(tmpHome, 'bob-at-example-com.json', microsoftRecord('bob', 'bob@example.com'));
+    await seedTokenFile(tmpHome, 'work.json', microsoftRecord('office', 'carol@example.com'));
+
+    expect(await runCli(['mailbox', 'rename', 'bob', 'alice-at-example-com'])).toBe(1);
+    expect(await runCli(['mailbox', 'rename', 'bob', 'work'])).toBe(1);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('matches the token file tokens/work.json of another account'));
+    expect(await readToken('bob-at-example-com.json')).toMatchObject({ mailboxName: 'bob' });
+    // A mailbox may take its own file's stem.
+    expect(await runCli(['mailbox', 'rename', 'bob', 'bob-at-example-com'])).toBe(0);
   });
 
   it('Scenario: Rename validates arguments and names', async () => {

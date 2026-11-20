@@ -54,6 +54,16 @@ mailbox that is linked to a different account. Setup SHALL NOT require a TTY.
 - **WHEN** `--mailbox` equals the name or email address of a non-Gmail mailbox
 - **THEN** setup exits non-zero before starting OAuth
 
+#### Scenario: Implicit broker setup never replaces a BYOK mailbox
+- **WHEN** setup selects the hosted broker only by default (no `--broker-url`)
+- **AND** the authenticated account is already saved with its own OAuth client (BYOK)
+- **THEN** setup exits non-zero and leaves the saved BYOK record unchanged
+
+#### Scenario: Bare reconnect keeps the only saved Gmail mailbox on its own OAuth client
+- **WHEN** `configure --provider gmail` runs with no `--mailbox`, `--confirm-account`, or credential flags
+- **AND** exactly one Gmail mailbox is saved
+- **THEN** setup reuses that mailbox's saved auth mode and credentials
+
 ### Requirement: Mailbox Rename Subcommand
 
 The system SHALL provide `email-agent-mcp mailbox rename <old> <new>
@@ -72,6 +82,10 @@ any other mailbox on any provider.
 
 #### Scenario: Rename refuses a name used by any mailbox on any provider
 - **WHEN** the new name equals another mailbox's name or email address, on any provider and in any letter case
+- **THEN** the command exits 1 and changes nothing
+
+#### Scenario: Rename refuses a name that is another account's token filename
+- **WHEN** the new name equals the filename stem of a token file that belongs to a different account
 - **THEN** the command exits 1 and changes nothing
 
 #### Scenario: Rename reports a missing source mailbox

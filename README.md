@@ -681,7 +681,9 @@ stays where it is and only the name stored in it changes. Restart running
 
 A Gmail and a Microsoft mailbox can share an email address. Their token files
 never overwrite each other: when `tokens/<safe-key>.json` already holds the
-Microsoft record, the Gmail record is stored as `tokens/<safe-key>.gmail.json`.
+Microsoft record, the Gmail record is stored as `tokens/<safe-key>.gmail.json`
+(or `<safe-key>.gmail-2.json`, ... if that is taken too). A new token file never
+replaces a file that belongs to another account.
 
 ### BYOK: keep the grant from expiring after 7 days
 
