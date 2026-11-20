@@ -59,6 +59,11 @@ mailbox that is linked to a different account. Setup SHALL NOT require a TTY.
 - **AND** the authenticated account is already saved with its own OAuth client (BYOK)
 - **THEN** setup exits non-zero and leaves the saved BYOK record unchanged
 
+#### Scenario: Auth mode inherited from another saved mailbox never replaces an account's saved mode
+- **WHEN** the auth mode was not chosen by explicit flags (it came from the broker default or from another saved mailbox)
+- **AND** the authenticated account is already saved with a different mode (BYOK vs broker)
+- **THEN** setup exits non-zero and leaves the saved record unchanged
+
 #### Scenario: Bare reconnect keeps the only saved Gmail mailbox on its own OAuth client
 - **WHEN** `configure --provider gmail` runs with no `--mailbox`, `--confirm-account`, or credential flags
 - **AND** exactly one Gmail mailbox is saved

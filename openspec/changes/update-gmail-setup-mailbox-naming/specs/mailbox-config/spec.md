@@ -30,3 +30,7 @@ lookups SHALL resolve stored email addresses and names before filename stems.
 - **WHEN** a mailbox is looked up by an identifier that one record stores as its name and another file uses as its filename stem
 - **THEN** the record that stores the identifier is returned
 - **AND** filename stems are used only when no record claims the identifier
+
+#### Scenario: A Gmail save that loses the filename race picks another name
+- **WHEN** another save claims the filename a Gmail save chose, before the first save publishes
+- **THEN** the first save chooses another free filename and both records survive

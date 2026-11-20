@@ -280,19 +280,38 @@ function gmailCandidateFilenames(emailAddress: string): string[] {
   return names;
 }
 
+function ownsGmailRecord(record: RawRecord | null | 'missing', emailAddress: string): boolean {
+  if (!record || record === 'missing') return false;
+  const parsed = normalizeGmailMailboxMetadata(record);
+  return !!parsed && parsed.emailAddress.toLowerCase() === emailAddress.toLowerCase();
+}
+
 /** Save a Gmail mailbox record and return the path it was written to. */
 export async function saveGmailMailboxMetadata(metadata: GmailMailboxMetadata): Promise<string> {
   for (let attempt = 0; attempt < 5; attempt++) {
     const path = await resolveGmailMetadataPath(metadata.emailAddress);
-    const existing = await readRawRecord(path).catch(() => null);
-    if (existing !== 'missing') {
-      // An existing record for this same address: replace it in place.
-      await serializeMetadata(path, () => atomicWriteMetadata(path, metadata));
-      return path;
+    const current = await readRawRecord(path).catch(() => null);
+    if (current === 'missing') {
+      // A new file: create it exclusively so a writer that claimed the same
+      // name in the meantime is never overwritten.
+      if (await atomicCreateMetadata(path, metadata)) return path;
+      continue;
     }
-    // A new file: create it exclusively so a concurrent writer that claimed
-    // the same name in the meantime is never overwritten.
-    if (await atomicCreateMetadata(path, metadata)) return path;
+    if (!ownsGmailRecord(current, metadata.emailAddress)) {
+      // Another account or provider claimed the file after it was chosen
+      // (or it is unreadable): never replace it; choose again.
+      continue;
+    }
+    // This address's own record: replace it in place, re-checking ownership
+    // immediately before publishing.
+    let replaced = false;
+    await serializeMetadata(path, async () => {
+      const latest = await readRawRecord(path).catch(() => null);
+      if (!ownsGmailRecord(latest, metadata.emailAddress)) return;
+      await atomicWriteMetadata(path, metadata);
+      replaced = true;
+    });
+    if (replaced) return path;
   }
   throw new Error(`Could not claim a token filename for Gmail mailbox ${metadata.emailAddress}`);
 }

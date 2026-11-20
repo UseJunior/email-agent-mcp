@@ -1229,6 +1229,21 @@ describe('cli/Gmail Configure', () => {
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining('with your own OAuth client (BYOK). Nothing was changed'));
   });
 
+  it('Scenario: Auth mode inherited from another saved mailbox never replaces an account\'s saved mode', async () => {
+    // "default" is a broker mailbox for another account; the signed-in account is saved as BYOK.
+    await seedTokenFile(tmpHome, 'bob-at-example-com.json', {
+      provider: 'gmail', source: 'broker', mailboxName: 'default', emailAddress: 'bob@example.com',
+      brokerUrl: 'https://broker.test.example.com', refreshToken: 'bob-refresh',
+    });
+    await seedSavedGmailMetadata('jane-example', { emailAddress: 'steven.obiajulu@gmail.com', source: 'byok' });
+
+    const exitCode = await runCli(['configure', '--provider', 'gmail']);
+
+    expect(exitCode).toBe(1);
+    expect(gmailMockState.savedMetadata).toBeNull();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('with your own OAuth client (BYOK). Nothing was changed'));
+  });
+
   it('Scenario: A requested name that is another account\'s token filename is refused after OAuth', async () => {
     await seedTokenFile(tmpHome, 'work.json', microsoftRecord('office', 'carol@example.com'));
 

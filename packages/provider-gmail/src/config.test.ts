@@ -14,13 +14,23 @@ import {
   type GmailMailboxMetadata,
 } from './config.js';
 
-const fsFailure = vi.hoisted(() => ({ rename: false }));
+const fsFailure = vi.hoisted(() => ({
+  rename: false,
+  onRead: null as null | ((path: string) => Promise<void>),
+}));
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, rename: async (...args: Parameters<typeof actual.rename>) => {
-    if (fsFailure.rename) throw new Error('synthetic rename failure');
-    return actual.rename(...args);
-  } };
+  return {
+    ...actual,
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      if (fsFailure.rename) throw new Error('synthetic rename failure');
+      return actual.rename(...args);
+    },
+    readFile: (async (...args: Parameters<typeof actual.readFile>) => {
+      if (fsFailure.onRead && typeof args[0] === 'string') await fsFailure.onRead(args[0]);
+      return actual.readFile(...args);
+    }) as typeof actual.readFile,
+  };
 });
 
 let tempHome: string;
@@ -47,6 +57,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   fsFailure.rename = false;
+  fsFailure.onRead = null;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   delete process.env['EMAIL_AGENT_MCP_HOME'];
@@ -232,6 +243,32 @@ describe('provider-gmail/Token Files Shared With Microsoft', () => {
       .toEqual(['jane-doe@example.com', 'jane.doe@example.com']);
     await expect(loadGmailMailboxMetadata('jane.doe@example.com')).resolves.toMatchObject({ mailboxName: 'first', refreshToken: 'r1' });
     await expect(loadGmailMailboxMetadata('jane-doe@example.com')).resolves.toMatchObject({ mailboxName: 'second', refreshToken: 'r2' });
+  });
+
+  it('Scenario: A Gmail save that loses the filename race picks another name', async () => {
+    // Interleave a second save between choosing a free filename and publishing it.
+    const tokens = join(tempHome, 'tokens');
+    const canonical = join(tokens, 'jane-doe-at-example-com.json');
+    let reads = 0;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let reached!: () => void;
+    const paused = new Promise<void>(resolve => { reached = resolve; });
+    fsFailure.onRead = async path => {
+      // Read 3 of the canonical path is the save's check after the resolver picked it.
+      if (path === canonical && ++reads === 3) { reached(); await gate; }
+    };
+
+    const pending = saveGmailMailboxMetadata(gmailMailbox({ mailboxName: 'second', emailAddress: 'jane-doe@example.com', refreshToken: 'r2' }));
+    await paused;
+    fsFailure.onRead = null;
+    await saveGmailMailboxMetadata(gmailMailbox({ mailboxName: 'first', emailAddress: 'jane.doe@example.com', refreshToken: 'r1' }));
+    release();
+    const second = await pending;
+
+    expect(second).toBe(join(tokens, 'jane-doe-at-example-com.gmail.json'));
+    await expect(loadGmailMailboxMetadata('jane.doe@example.com')).resolves.toMatchObject({ refreshToken: 'r1' });
+    await expect(loadGmailMailboxMetadata('jane-doe@example.com')).resolves.toMatchObject({ refreshToken: 'r2' });
   });
 
   it('Scenario: Gmail lookup resolves stored names and addresses before filename stems', async () => {

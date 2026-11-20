@@ -1216,14 +1216,19 @@ async function completeGmailSetup(
   setup: GmailAuthSetup,
   save: (mailboxName: string) => Promise<string | void>,
 ): Promise<number> {
-  // Never switch an account from its own OAuth client (BYOK) to the hosted
-  // broker implicitly: that only happens with explicit --broker-url.
-  if (setup.mode === 'broker' && setup.source === 'default') {
+  // Never switch an already-saved account between its own OAuth client (BYOK)
+  // and the hosted broker implicitly. The auth mode may have been inherited
+  // from a different saved mailbox (or the broker default) before we knew
+  // which account would sign in; only explicit flags may change it.
+  if (setup.source !== 'explicit') {
     const { loadGmailMailboxMetadata } = await import('@usejunior/provider-gmail');
     const saved = await loadGmailMailboxMetadata(emailAddress);
-    if (saved?.source === 'byok') {
+    if (saved && normalizeMailboxValue(saved.emailAddress) === normalizeMailboxValue(emailAddress) && saved.source !== setup.mode) {
+      const switchHint = saved.source === 'byok'
+        ? 'or pass --broker-url to switch it to the hosted broker'
+        : 'or pass --client-id and --client-secret to switch it to your own OAuth client';
       throw new Error(
-        `${emailAddress} is already configured as mailbox "${saved.mailboxName}" with your own OAuth client (BYOK). Nothing was changed. Re-run with --mailbox ${saved.mailboxName} to reconnect it with that client, or pass --broker-url to switch it to the hosted broker.`,
+        `${emailAddress} is already configured as mailbox "${saved.mailboxName}" with ${saved.source === 'byok' ? 'your own OAuth client (BYOK)' : 'the hosted OAuth broker'}. Nothing was changed. Re-run with --mailbox ${saved.mailboxName} to reconnect it the same way, ${switchHint}.`,
       );
     }
   }
